@@ -8,7 +8,7 @@ import mlx.core as mx
 
 # LTX-2 native frame rate. Matches frame_rate in the official Lightricks PipelineParams.
 # See: https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-pipelines/src/ltx_pipelines/utils/constants.py
-NATIVE_FPS: int = 24
+NATIVE_FPS: float = 24.0
 
 class VideoPixelShape(NamedTuple):
     """
