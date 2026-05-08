@@ -292,61 +292,6 @@ def decode_tiled(
     out_h = h * scale_h
     out_w = w * scale_w
 
-    # Initialize output buffer and weight accumulator
-    output = mx.zeros((b, 3, out_t, out_h, out_w))
-    weights = mx.zeros((b, 1, out_t, out_h, out_w))
-
-    for tile_spec in tiles:
-        # Extract tile from latent
-        tile_latent = latent[
-            :, :,
-            tile_spec.in_t_start:tile_spec.in_t_end,
-            tile_spec.in_h_start:tile_spec.in_h_end,
-            tile_spec.in_w_start:tile_spec.in_w_end,
-        ]
-
-        # Decode tile
-        decoded_tile = decoder_fn(tile_latent, timestep=timestep)
-        mx.eval(decoded_tile)
-
-        # Generate blending mask
-        tile_t = tile_spec.out_t_end - tile_spec.out_t_start
-        tile_h = tile_spec.out_h_end - tile_spec.out_h_start
-        tile_w = tile_spec.out_w_end - tile_spec.out_w_start
-
-        mask_t = compute_trapezoidal_mask_1d(
-            tile_t, tile_spec.ramp_t_left, tile_spec.ramp_t_right,
-            left_starts_from_0=(tile_spec.out_t_start == 0)
-        )
-        mask_h = compute_trapezoidal_mask_1d(tile_h, tile_spec.ramp_h_left, tile_spec.ramp_h_right)
-        mask_w = compute_trapezoidal_mask_1d(tile_w, tile_spec.ramp_w_left, tile_spec.ramp_w_right)
-
-        # Create 5D mask by outer product
-        mask = mask_t[None, None, :, None, None] * mask_h[None, None, None, :, None] * mask_w[None, None, None, None, :]
-
-        # Accumulate into output buffer
-        # We need to handle the accumulation carefully since MLX doesn't have in-place ops
-        out_slice = (
-            slice(None), slice(None),
-            slice(tile_spec.out_t_start, tile_spec.out_t_end),
-            slice(tile_spec.out_h_start, tile_spec.out_h_end),
-            slice(tile_spec.out_w_start, tile_spec.out_w_end),
-        )
-
-        # Create update arrays
-        decoded_actual = decoded_tile[:, :, :tile_t, :tile_h, :tile_w]
-        output_update = decoded_actual * mask
-        weight_update = mask
-
-        # For simplicity, we'll create a sparse update
-        # This is less efficient but clearer
-        temp_output = mx.zeros_like(output)
-        temp_weights = mx.zeros_like(weights)
-
-        # We'll use a different approach: process tiles in temporal order
-        # and yield chunks as they complete
-
-    # Since MLX doesn't have efficient scatter operations, we'll use a different approach
     # Process tiles and yield the final blended result
     output = mx.zeros((b, 3, out_t, out_h, out_w))
     weights = mx.zeros((1, 1, out_t, out_h, out_w))
@@ -393,18 +338,9 @@ def decode_tiled(
         out_h_slice = slice(tile_spec.out_h_start, tile_spec.out_h_start + tile_h)
         out_w_slice = slice(tile_spec.out_w_start, tile_spec.out_w_start + tile_w)
 
-        # Extract current values
-        current_output = output[:, :, out_t_slice, out_h_slice, out_w_slice]
-        current_weights = weights[:, :, out_t_slice, out_h_slice, out_w_slice]
-
-        # Add weighted contribution
-        new_output = current_output + decoded_slice * mask
-        new_weights = current_weights + mask
-
-        # Reconstruct output array (this is expensive but necessary)
-        # Build slices for before and after
-        output = _update_slice_5d(output, new_output, out_t_slice, out_h_slice, out_w_slice)
-        weights = _update_slice_5d(weights, new_weights, out_t_slice, out_h_slice, out_w_slice)
+        # Accumulate weighted tile into output buffers
+        output = output.at[:, :, out_t_slice, out_h_slice, out_w_slice].add(decoded_slice * mask)
+        weights = weights.at[:, :, out_t_slice, out_h_slice, out_w_slice].add(mask)
 
     # Normalize by weights
     output = output / mx.maximum(weights, 1e-8)
@@ -412,64 +348,3 @@ def decode_tiled(
     yield output
 
 
-def _update_slice_5d(
-    arr: mx.array,
-    update: mx.array,
-    t_slice: slice,
-    h_slice: slice,
-    w_slice: slice,
-) -> mx.array:
-    """Update a 5D array at given slices. Returns new array."""
-    # This is a workaround for lack of in-place operations in MLX
-    # We concatenate the before/update/after segments
-
-    b, c, t_total, h_total, w_total = arr.shape
-
-    t_start = t_slice.start or 0
-    t_end = t_slice.stop or t_total
-    h_start = h_slice.start or 0
-    h_end = h_slice.stop or h_total
-    w_start = w_slice.start or 0
-    w_end = w_slice.stop or w_total
-
-    # Build along width dimension first
-    w_before = arr[:, :, t_start:t_end, h_start:h_end, :w_start] if w_start > 0 else None
-    w_after = arr[:, :, t_start:t_end, h_start:h_end, w_end:] if w_end < w_total else None
-
-    # Concatenate width segments
-    if w_before is not None and w_after is not None:
-        row_updated = mx.concatenate([w_before, update, w_after], axis=4)
-    elif w_before is not None:
-        row_updated = mx.concatenate([w_before, update], axis=4)
-    elif w_after is not None:
-        row_updated = mx.concatenate([update, w_after], axis=4)
-    else:
-        row_updated = update
-
-    # Build along height dimension
-    h_before = arr[:, :, t_start:t_end, :h_start, :] if h_start > 0 else None
-    h_after = arr[:, :, t_start:t_end, h_end:, :] if h_end < h_total else None
-
-    if h_before is not None and h_after is not None:
-        plane_updated = mx.concatenate([h_before, row_updated, h_after], axis=3)
-    elif h_before is not None:
-        plane_updated = mx.concatenate([h_before, row_updated], axis=3)
-    elif h_after is not None:
-        plane_updated = mx.concatenate([row_updated, h_after], axis=3)
-    else:
-        plane_updated = row_updated
-
-    # Build along time dimension
-    t_before = arr[:, :, :t_start, :, :] if t_start > 0 else None
-    t_after = arr[:, :, t_end:, :, :] if t_end < t_total else None
-
-    if t_before is not None and t_after is not None:
-        result = mx.concatenate([t_before, plane_updated, t_after], axis=2)
-    elif t_before is not None:
-        result = mx.concatenate([t_before, plane_updated], axis=2)
-    elif t_after is not None:
-        result = mx.concatenate([plane_updated, t_after], axis=2)
-    else:
-        result = plane_updated
-
-    return result

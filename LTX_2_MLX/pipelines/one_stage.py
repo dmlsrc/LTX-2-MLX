@@ -9,6 +9,7 @@ This pipeline provides standard CFG-based video generation in a single pass:
 This is the most common pipeline for high-quality video generation.
 """
 
+import gc
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
@@ -990,6 +991,12 @@ class OneStagePipeline:
             del latent_unnorm, latent_upscaled
             output_frames = final_video_latent.shape[2]
             print(f"  Temporal upscale complete: {output_frames} latent frames")
+
+        # Unload transformer before VAE decode to free memory
+        del self.transformer
+        self.transformer = None
+        gc.collect()
+        mx.clear_cache()
 
         # Decode video (auto-tile for large generations to prevent Metal watchdog timeout)
         effective_tiling = config._get_tiling_config()

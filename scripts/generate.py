@@ -1710,6 +1710,10 @@ def generate_video(
             vocoder=vocoder,
         )
 
+        del model  # pipeline now holds the only reference; del self.transformer in one_stage.py can actually free it
+        model = None
+        gc.collect()
+
         # Create config with audio enabled
         # LTX-2.3 reference: video_cfg=3.0, audio_cfg=7.0, rescale=0.7
         av_config = OneStageCFGConfig(
