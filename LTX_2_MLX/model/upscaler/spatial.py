@@ -419,9 +419,6 @@ def load_spatial_upscaler_weights(upscaler: SpatialUpscaler, weights_path: str) 
         upscaler: SpatialUpscaler instance
         weights_path: Path to safetensors file
     """
-    from safetensors import safe_open
-    import torch
-
     try:
         from tqdm import tqdm
         has_tqdm = True
@@ -430,53 +427,42 @@ def load_spatial_upscaler_weights(upscaler: SpatialUpscaler, weights_path: str) 
 
     print(f"Loading Spatial Upscaler weights from {weights_path}...")
     loaded_count = 0
+    weights = mx.load(weights_path)
 
-    with safe_open(weights_path, framework="pt") as f:
-        keys = list(f.keys())
+    if has_tqdm:
+        key_iter = tqdm(weights.items(), desc="Loading upscaler", ncols=80, total=len(weights))
+    else:
+        key_iter = weights.items()
 
-        if has_tqdm:
-            key_iter = tqdm(keys, desc="Loading upscaler", ncols=80)
-        else:
-            key_iter = keys
-
-        for key in key_iter:
-            tensor = f.get_tensor(key)
-            # Keep bf16 weights as bf16 (Apple Silicon M5 has native bf16 support)
-            # For older hardware, fall back to fp32
-            if tensor.dtype == torch.bfloat16:
-                # Convert via float32 numpy then cast to bf16 in MLX
-                value = mx.array(tensor.to(torch.float32).numpy()).astype(mx.bfloat16)
-            else:
-                value = mx.array(tensor.numpy())
-
-            # Map weights to model
-            if key == "initial_conv.weight":
-                # 3D conv weight: keep as (out_C, in_C, kT, kH, kW)
-                upscaler.initial_conv_weight = value
-                loaded_count += 1
-            elif key == "initial_conv.bias":
-                upscaler.initial_conv_bias = value
-                loaded_count += 1
-            elif key == "initial_norm.weight":
-                upscaler.initial_norm.weight = value
-                loaded_count += 1
-            elif key == "initial_norm.bias":
-                upscaler.initial_norm.bias = value
-                loaded_count += 1
-            elif key == "final_conv.weight":
-                upscaler.final_conv_weight = value
-                loaded_count += 1
-            elif key == "final_conv.bias":
-                upscaler.final_conv_bias = value
-                loaded_count += 1
-            elif key.startswith("res_blocks."):
-                loaded_count += _load_res_block_weight(upscaler.res_blocks, key, value, "res_blocks.")
-            elif key.startswith("post_upsample_res_blocks."):
-                loaded_count += _load_res_block_weight(
-                    upscaler.post_upsample_res_blocks, key, value, "post_upsample_res_blocks."
-                )
-            elif key.startswith("upsampler."):
-                loaded_count += _load_upsampler_weight(upscaler.upsampler, key, value)
+    for key, value in key_iter:
+        # Map weights to model
+        if key == "initial_conv.weight":
+            # 3D conv weight: keep as (out_C, in_C, kT, kH, kW)
+            upscaler.initial_conv_weight = value
+            loaded_count += 1
+        elif key == "initial_conv.bias":
+            upscaler.initial_conv_bias = value
+            loaded_count += 1
+        elif key == "initial_norm.weight":
+            upscaler.initial_norm.weight = value
+            loaded_count += 1
+        elif key == "initial_norm.bias":
+            upscaler.initial_norm.bias = value
+            loaded_count += 1
+        elif key == "final_conv.weight":
+            upscaler.final_conv_weight = value
+            loaded_count += 1
+        elif key == "final_conv.bias":
+            upscaler.final_conv_bias = value
+            loaded_count += 1
+        elif key.startswith("res_blocks."):
+            loaded_count += _load_res_block_weight(upscaler.res_blocks, key, value, "res_blocks.")
+        elif key.startswith("post_upsample_res_blocks."):
+            loaded_count += _load_res_block_weight(
+                upscaler.post_upsample_res_blocks, key, value, "post_upsample_res_blocks."
+            )
+        elif key.startswith("upsampler."):
+            loaded_count += _load_upsampler_weight(upscaler.upsampler, key, value)
 
     print(f"  Loaded {loaded_count} weight tensors")
 

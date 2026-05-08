@@ -406,128 +406,100 @@ class SimpleVideoEncoder(nn.Module):
 
 def load_vae_encoder_weights(encoder: SimpleVideoEncoder, weights_path: str) -> None:
     """
-    Load VAE encoder weights from PyTorch safetensors file.
+    Load VAE encoder weights from a safetensors file.
 
     Args:
         encoder: SimpleVideoEncoder instance to load weights into.
         weights_path: Path to safetensors file containing VAE weights.
     """
-    from safetensors import safe_open
-    import torch
-
     print(f"Loading VAE encoder weights from {weights_path}...")
 
     loaded_count = 0
+    weights = mx.load(weights_path)
 
-    with safe_open(weights_path, framework="pt") as f:
-        # Load per-channel statistics
-        for stat_key in ["mean-of-means", "std-of-means", "mean-of-stds", "mean-of-stds-over-std-of-means", "channel"]:
-            pt_key = f"vae.per_channel_statistics.{stat_key}"
-            if pt_key in f.keys():
-                tensor = f.get_tensor(pt_key)
-                if tensor.dtype == torch.bfloat16:
-                    tensor = tensor.to(torch.float32)
-                value = mx.array(tensor.numpy())
+    # Load per-channel statistics
+    for stat_key in ["mean-of-means", "std-of-means", "mean-of-stds", "mean-of-stds-over-std-of-means", "channel"]:
+        pt_key = f"vae.per_channel_statistics.{stat_key}"
+        if pt_key in weights:
+            # Convert hyphenated names to underscored attribute names
+            attr_name = stat_key.replace("-", "_")
+            setattr(encoder.per_channel_statistics, attr_name, weights[pt_key])
+            loaded_count += 1
 
-                # Convert hyphenated names to underscored attribute names
-                attr_name = stat_key.replace("-", "_")
-                setattr(encoder.per_channel_statistics, attr_name, value)
-                loaded_count += 1
+    # Load conv_in
+    for suffix in ["weight", "bias"]:
+        pt_key = f"vae.encoder.conv_in.conv.{suffix}"
+        if pt_key in weights:
+            if suffix == "weight":
+                encoder.conv_in.weight = weights[pt_key]
+            else:
+                encoder.conv_in.bias = weights[pt_key]
+            loaded_count += 1
 
-        # Load conv_in
-        for suffix in ["weight", "bias"]:
-            pt_key = f"vae.encoder.conv_in.conv.{suffix}"
-            if pt_key in f.keys():
-                tensor = f.get_tensor(pt_key)
-                if tensor.dtype == torch.bfloat16:
-                    tensor = tensor.to(torch.float32)
-                value = mx.array(tensor.numpy())
+    # Load down_blocks
+    # Block structure from weights:
+    # 0: res_x (4 blocks at 128ch)
+    # 1: compress_space_res (conv only)
+    # 2: res_x (6 blocks at 256ch)
+    # 3: compress_time_res (conv only)
+    # 4: res_x (6 blocks at 512ch)
+    # 5: compress_all_res (conv only)
+    # 6: res_x (2 blocks at 1024ch)
+    # 7: compress_all_res (conv only)
+    # 8: res_x (2 blocks at 2048ch)
 
-                if suffix == "weight":
-                    encoder.conv_in.weight = value
-                else:
-                    encoder.conv_in.bias = value
-                loaded_count += 1
+    block_config = [
+        (0, "down_blocks_0", "res", 4),
+        (1, "down_blocks_1", "downsample", 0),
+        (2, "down_blocks_2", "res", 6),
+        (3, "down_blocks_3", "downsample", 0),
+        (4, "down_blocks_4", "res", 6),
+        (5, "down_blocks_5", "downsample", 0),
+        (6, "down_blocks_6", "res", 2),
+        (7, "down_blocks_7", "downsample", 0),
+        (8, "down_blocks_8", "res", 2),
+    ]
 
-        # Load down_blocks
-        # Block structure from weights:
-        # 0: res_x (4 blocks at 128ch)
-        # 1: compress_space_res (conv only)
-        # 2: res_x (6 blocks at 256ch)
-        # 3: compress_time_res (conv only)
-        # 4: res_x (6 blocks at 512ch)
-        # 5: compress_all_res (conv only)
-        # 6: res_x (2 blocks at 1024ch)
-        # 7: compress_all_res (conv only)
-        # 8: res_x (2 blocks at 2048ch)
+    for pt_idx, mlx_name, block_type, num_blocks in block_config:
+        block = getattr(encoder, mlx_name)
 
-        block_config = [
-            (0, "down_blocks_0", "res", 4),
-            (1, "down_blocks_1", "downsample", 0),
-            (2, "down_blocks_2", "res", 6),
-            (3, "down_blocks_3", "downsample", 0),
-            (4, "down_blocks_4", "res", 6),
-            (5, "down_blocks_5", "downsample", 0),
-            (6, "down_blocks_6", "res", 2),
-            (7, "down_blocks_7", "downsample", 0),
-            (8, "down_blocks_8", "res", 2),
-        ]
+        if block_type == "res":
+            # Load res blocks
+            for res_idx in range(num_blocks):
+                res_block = block.res_blocks[res_idx]
 
-        for pt_idx, mlx_name, block_type, num_blocks in block_config:
-            block = getattr(encoder, mlx_name)
+                # Load conv1 and conv2
+                for conv_name in ["conv1", "conv2"]:
+                    conv = getattr(res_block, conv_name)
+                    for suffix in ["weight", "bias"]:
+                        pt_key = f"vae.encoder.down_blocks.{pt_idx}.res_blocks.{res_idx}.{conv_name}.conv.{suffix}"
+                        if pt_key in weights:
+                            if suffix == "weight":
+                                conv.weight = weights[pt_key]
+                            else:
+                                conv.bias = weights[pt_key]
+                            loaded_count += 1
 
-            if block_type == "res":
-                # Load res blocks
-                for res_idx in range(num_blocks):
-                    res_block = block.res_blocks[res_idx]
+        else:  # downsample
+            # Load downsample conv
+            for suffix in ["weight", "bias"]:
+                pt_key = f"vae.encoder.down_blocks.{pt_idx}.conv.conv.{suffix}"
+                if pt_key in weights:
+                    if suffix == "weight":
+                        block.conv.weight = weights[pt_key]
+                    else:
+                        block.conv.bias = weights[pt_key]
+                    loaded_count += 1
 
-                    # Load conv1 and conv2
-                    for conv_name in ["conv1", "conv2"]:
-                        conv = getattr(res_block, conv_name)
-                        for suffix in ["weight", "bias"]:
-                            pt_key = f"vae.encoder.down_blocks.{pt_idx}.res_blocks.{res_idx}.{conv_name}.conv.{suffix}"
-                            if pt_key in f.keys():
-                                tensor = f.get_tensor(pt_key)
-                                if tensor.dtype == torch.bfloat16:
-                                    tensor = tensor.to(torch.float32)
-                                value = mx.array(tensor.numpy())
-
-                                if suffix == "weight":
-                                    conv.weight = value
-                                else:
-                                    conv.bias = value
-                                loaded_count += 1
-
-            else:  # downsample
-                # Load downsample conv
-                for suffix in ["weight", "bias"]:
-                    pt_key = f"vae.encoder.down_blocks.{pt_idx}.conv.conv.{suffix}"
-                    if pt_key in f.keys():
-                        tensor = f.get_tensor(pt_key)
-                        if tensor.dtype == torch.bfloat16:
-                            tensor = tensor.to(torch.float32)
-                        value = mx.array(tensor.numpy())
-
-                        if suffix == "weight":
-                            block.conv.weight = value
-                        else:
-                            block.conv.bias = value
-                        loaded_count += 1
-
-        # Load conv_out
-        for suffix in ["weight", "bias"]:
-            pt_key = f"vae.encoder.conv_out.conv.{suffix}"
-            if pt_key in f.keys():
-                tensor = f.get_tensor(pt_key)
-                if tensor.dtype == torch.bfloat16:
-                    tensor = tensor.to(torch.float32)
-                value = mx.array(tensor.numpy())
-
-                if suffix == "weight":
-                    encoder.conv_out.weight = value
-                else:
-                    encoder.conv_out.bias = value
-                loaded_count += 1
+    # Load conv_out
+    for suffix in ["weight", "bias"]:
+        pt_key = f"vae.encoder.conv_out.conv.{suffix}"
+        if pt_key in weights:
+            if suffix == "weight":
+                encoder.conv_out.weight = weights[pt_key]
+            else:
+                encoder.conv_out.bias = weights[pt_key]
+            loaded_count += 1
 
     print(f"  Loaded {loaded_count} weight tensors")
 

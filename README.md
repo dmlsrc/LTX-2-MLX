@@ -75,7 +75,6 @@ Download from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-2) on Hug
 | Model | Size | Description |
 |-------|------|-------------|
 | [`ltx-2-19b-distilled.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled.safetensors) | 43GB | Fast generation (8 steps) |
-| [`ltx-2-19b-distilled-fp8.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled-fp8.safetensors) | 27GB | FP8 quantized (smaller download) |
 | [`ltx-2-19b-dev.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-dev.safetensors) | 43GB | Higher quality (25-50 steps) |
 | [`ltx-2-spatial-upscaler-x2-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-spatial-upscaler-x2-1.0.safetensors) | 995MB | 2x resolution upscaling |
 | [`ltx-2-temporal-upscaler-x2-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-temporal-upscaler-x2-1.0.safetensors) | 262MB | 2x framerate upscaling |

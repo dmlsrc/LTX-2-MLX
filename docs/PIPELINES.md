@@ -163,7 +163,6 @@ python scripts/generate.py "Your prompt" \
 | `--output` | Output video path | outputs/output.mp4 |
 | `--weights` | Path to weights file | weights/ltx-2/ltx-2-19b-distilled.safetensors |
 | `--fp16` | Use FP16 computation (~50% memory reduction) | True |
-| `--fp8` | Load FP8-quantized weights | False |
 | `--model-variant` | `distilled` (fast) or `dev` (quality) | distilled |
 | `--spatial-upscaler-weights` | Path to spatial upscaler weights (for two-stage) | None |
 | `--temporal-upscaler-weights` | Path to temporal upscaler weights | None |

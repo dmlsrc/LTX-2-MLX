@@ -211,96 +211,80 @@ def load_audio_encoder_weights(encoder: AudioEncoder, weights_path: str) -> None
         encoder: AudioEncoder model to load weights into.
         weights_path: Path to safetensors file.
     """
-    from safetensors import safe_open
-    import torch as pt
-
     print(f"  Loading audio encoder weights from {weights_path}...")
 
     # Weight mapping from PyTorch to MLX
     # PyTorch: audio_vae.encoder.*
     # MLX conv weight shape: (out_C, kH, kW, in_C) vs PyTorch (out_C, in_C, kH, kW)
 
-    with safe_open(weights_path, framework="pt") as f:
-        keys = list(f.keys())
+    weights = mx.load(weights_path)
 
-        # Filter to audio encoder keys
-        encoder_keys = [k for k in keys if k.startswith("audio_vae.encoder.")]
+    # Filter to audio encoder keys
+    encoder_keys = [k for k in weights if k.startswith("audio_vae.encoder.")]
 
-        if not encoder_keys:
-            print("  Warning: No audio encoder keys found in weights file")
-            return
+    if not encoder_keys:
+        print("  Warning: No audio encoder keys found in weights file")
+        return
 
-        # Load conv_in
-        _load_conv_weights(encoder.conv_in, f, "audio_vae.encoder.conv_in")
+    # Load conv_in
+    _load_conv_weights(encoder.conv_in, weights, "audio_vae.encoder.conv_in")
 
-        # Load down blocks
-        for i_level, level in enumerate(encoder.down_blocks):
-            for i_block, res_block in enumerate(level["res_blocks"]):
-                prefix = f"audio_vae.encoder.down.{i_level}.block.{i_block}"
-                _load_resblock_weights(res_block, f, prefix)
+    # Load down blocks
+    for i_level, level in enumerate(encoder.down_blocks):
+        for i_block, res_block in enumerate(level["res_blocks"]):
+            prefix = f"audio_vae.encoder.down.{i_level}.block.{i_block}"
+            _load_resblock_weights(res_block, weights, prefix)
 
-            if level["downsample"] is not None:
-                prefix = f"audio_vae.encoder.down.{i_level}.downsample"
-                _load_conv_weights(level["downsample"].conv, f, f"{prefix}.conv")
+        if level["downsample"] is not None:
+            prefix = f"audio_vae.encoder.down.{i_level}.downsample"
+            _load_conv_weights(level["downsample"].conv, weights, f"{prefix}.conv")
 
-        # Load mid blocks
-        _load_resblock_weights(encoder.mid_block_1, f, "audio_vae.encoder.mid.block_1")
-        _load_resblock_weights(encoder.mid_block_2, f, "audio_vae.encoder.mid.block_2")
+    # Load mid blocks
+    _load_resblock_weights(encoder.mid_block_1, weights, "audio_vae.encoder.mid.block_1")
+    _load_resblock_weights(encoder.mid_block_2, weights, "audio_vae.encoder.mid.block_2")
 
-        # Load conv_out
-        _load_conv_weights(encoder.conv_out, f, "audio_vae.encoder.conv_out")
+    # Load conv_out
+    _load_conv_weights(encoder.conv_out, weights, "audio_vae.encoder.conv_out")
 
-        # Load per-channel statistics
-        # PyTorch uses hyphenated names: mean-of-means, std-of-means
-        mean_key = "audio_vae.encoder.per_channel_statistics.mean-of-means"
-        std_key = "audio_vae.encoder.per_channel_statistics.std-of-means"
+    # Load per-channel statistics
+    # PyTorch uses hyphenated names: mean-of-means, std-of-means
+    mean_key = "audio_vae.encoder.per_channel_statistics.mean-of-means"
+    std_key = "audio_vae.encoder.per_channel_statistics.std-of-means"
 
-        if mean_key in keys:
-            mean = f.get_tensor(mean_key)
-            if mean.dtype == pt.bfloat16:
-                mean = mean.to(pt.float32)
-            encoder.per_channel_statistics.mean_of_means = mx.array(mean.numpy())
-            print(f"    Loaded mean-of-means: shape={mean.shape}, mean={float(mean.mean()):.4f}")
+    if mean_key in weights:
+        mean = weights[mean_key]
+        encoder.per_channel_statistics.mean_of_means = mean
+        print(f"    Loaded mean-of-means: shape={mean.shape}, mean={float(mx.mean(mean.astype(mx.float32))):.4f}")
 
-        if std_key in keys:
-            std = f.get_tensor(std_key)
-            if std.dtype == pt.bfloat16:
-                std = std.to(pt.float32)
-            encoder.per_channel_statistics.std_of_means = mx.array(std.numpy())
-            print(f"    Loaded std-of-means: shape={std.shape}, mean={float(std.mean()):.4f}")
+    if std_key in weights:
+        std = weights[std_key]
+        encoder.per_channel_statistics.std_of_means = std
+        print(f"    Loaded std-of-means: shape={std.shape}, mean={float(mx.mean(std.astype(mx.float32))):.4f}")
 
     mx.eval(encoder.parameters())
     print("  Audio encoder weights loaded successfully")
 
 
-def _load_conv_weights(conv: CausalConv2d, f, prefix: str) -> None:
+def _load_conv_weights(conv: CausalConv2d, weights: dict, prefix: str) -> None:
     """Load conv weights with shape transposition."""
-    import torch
-
     weight_key = f"{prefix}.weight"
     bias_key = f"{prefix}.bias"
 
-    if weight_key in list(f.keys()):
-        w = f.get_tensor(weight_key)
+    if weight_key in weights:
+        w = weights[weight_key]
         # Transpose: PyTorch (out_C, in_C, kH, kW) -> MLX (out_C, kH, kW, in_C)
-        w = w.permute(0, 2, 3, 1)
-        if w.dtype == torch.bfloat16:
-            w = w.to(torch.float32)
-        conv.weight = mx.array(w.numpy())
+        conv.weight = w.transpose(0, 2, 3, 1)
 
-    if bias_key in list(f.keys()):
-        b = f.get_tensor(bias_key)
-        if b.dtype == torch.bfloat16:
-            b = b.to(torch.float32)
-        conv.bias = mx.array(b.numpy())
+    if bias_key in weights:
+        conv.bias = weights[bias_key]
 
 
-def _load_resblock_weights(block: SimpleResBlock2d, f, prefix: str) -> None:
+def _load_resblock_weights(block: SimpleResBlock2d, weights: dict, prefix: str) -> None:
     """Load ResBlock weights."""
-    _load_conv_weights(block.conv1, f, f"{prefix}.conv1")
-    _load_conv_weights(block.conv2, f, f"{prefix}.conv2")
+    _load_conv_weights(block.conv1, weights, f"{prefix}.conv1")
+    _load_conv_weights(block.conv2, weights, f"{prefix}.conv2")
     if block.skip is not None:
-        _load_conv_weights(block.skip, f, f"{prefix}.nin_shortcut")
+        _load_conv_weights(block.skip, weights, f"{prefix}.nin_shortcut")
 
 
 def encode_audio(

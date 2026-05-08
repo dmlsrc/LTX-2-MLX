@@ -47,15 +47,6 @@ WEIGHTS = {
         "size": "~43GB",
         "required": True,
     },
-    "distilled-fp8": {
-        "name": "LTX-2 19B Distilled (FP8)",
-        "description": "Quantized version, smaller download (~27GB)",
-        "repo": "Lightricks/LTX-2",
-        "filename": "ltx-2-19b-distilled-fp8.safetensors",
-        "local_path": "weights/ltx-2/ltx-2-19b-distilled-fp8.safetensors",
-        "size": "~27GB",
-        "required": False,
-    },
     "dev": {
         "name": "LTX-2 19B Dev",
         "description": "Higher quality (25-50 steps), slower generation",
@@ -63,15 +54,6 @@ WEIGHTS = {
         "filename": "ltx-2-19b-dev.safetensors",
         "local_path": "weights/ltx-2/ltx-2-19b-dev.safetensors",
         "size": "~43GB",
-        "required": False,
-    },
-    "dev-fp8": {
-        "name": "LTX-2 19B Dev (FP8)",
-        "description": "Quantized dev version, smaller download",
-        "repo": "Lightricks/LTX-2",
-        "filename": "ltx-2-19b-dev-fp8.safetensors",
-        "local_path": "weights/ltx-2/ltx-2-19b-dev-fp8.safetensors",
-        "size": "~27GB",
         "required": False,
     },
     "spatial": {

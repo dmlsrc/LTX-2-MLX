@@ -41,7 +41,6 @@ These tests validate end-to-end video generation pipelines:
   - Image-to-video generation
   - Two-stage pipeline with spatial upscaling
   - Two-stage pipeline with spatial upscaling
-  - FP8 quantized model testing
 
 ### Manual Verification (Placeholder Mode)
 

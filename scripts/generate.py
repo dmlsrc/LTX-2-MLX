@@ -789,7 +789,6 @@ def load_transformer(
     weights_path: str,
     num_layers: int = 48,
     compute_dtype: mx.Dtype = mx.float32,
-    use_fp8: bool = False,
     low_memory: bool = False,
     fast_mode: bool = False,
 ) -> LTXModel:
@@ -799,15 +798,13 @@ def load_transformer(
         weights_path: Path to safetensors weights file.
         num_layers: Number of transformer layers.
         compute_dtype: Dtype for computation.
-        use_fp8: If True, load FP8 weights and dequantize.
         low_memory: If True, use aggressive memory optimization.
         fast_mode: If True, skip intermediate evaluations.
     """
     dtype_name = "FP16" if compute_dtype == mx.float16 else ("BF16" if compute_dtype == mx.bfloat16 else "FP32")
-    fp8_str = " (FP8 dequantized)" if use_fp8 else ""
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
-    print(f"Loading transformer ({dtype_name}{fp8_str}{mem_str}{fast_str})...")
+    print(f"Loading transformer ({dtype_name}{mem_str}{fast_str})...")
 
     model = LTXModel(
         model_type=LTXModelType.VideoOnly,
@@ -826,9 +823,7 @@ def load_transformer(
 
     # Load weights
     if weights_path and os.path.exists(weights_path):
-        dtype_map = {mx.float16: "float16", mx.bfloat16: "bfloat16"}
-        target_dtype = dtype_map.get(compute_dtype, "float32")
-        load_transformer_weights(model, weights_path, use_fp8=use_fp8, target_dtype=target_dtype)
+        load_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
 
@@ -839,7 +834,6 @@ def load_av_transformer(
     weights_path: str,
     num_layers: int = 48,
     compute_dtype: mx.Dtype = mx.float32,
-    use_fp8: bool = False,
     low_memory: bool = False,
     caption_channels: int | None = 3840,
     cross_attention_adaln: bool = False,
@@ -854,10 +848,9 @@ def load_av_transformer(
         apply_gated_attention: V2 per-head gating in attention.
     """
     dtype_name = "FP16" if compute_dtype == mx.float16 else ("BF16" if compute_dtype == mx.bfloat16 else "FP32")
-    fp8_str = " (FP8 dequantized)" if use_fp8 else ""
     mem_str = " (low memory)" if low_memory else ""
     v2_str = " (V2)" if cross_attention_adaln else ""
-    print(f"Loading AudioVideo transformer ({dtype_name}{fp8_str}{mem_str}{v2_str})...")
+    print(f"Loading AudioVideo transformer ({dtype_name}{mem_str}{v2_str})...")
 
     model = LTXAVModel(
         model_type=LTXModelType.AudioVideo,
@@ -878,9 +871,7 @@ def load_av_transformer(
 
     # Load weights (including audio components)
     if weights_path and os.path.exists(weights_path):
-        dtype_map = {mx.float16: "float16", mx.bfloat16: "bfloat16"}
-        target_dtype = dtype_map.get(compute_dtype, "float32")
-        load_av_transformer_weights(model, weights_path, use_fp8=use_fp8, target_dtype=target_dtype)
+        load_av_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
 
@@ -982,7 +973,6 @@ def generate_video(
     gemma_path: str = "weights/gemma-3-12b",
     use_gemma: bool = True,
     use_fp16: bool = True,  # FP16 by default for memory efficiency
-    use_fp8: bool = False,
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
     spatial_upscaler_weights: str = None,
@@ -1043,8 +1033,6 @@ def generate_video(
     print(f"Resolution: {width}x{height}, {num_frames} frames")
     print(f"Steps: {num_steps}, CFG: {cfg_scale}, Seed: {seed}")
     print(f"Model variant: {model_variant}")
-    if use_fp8:
-        print(f"Weights: FP8 quantized (dequantized at load time)")
     if use_fp16:
         print(f"Compute dtype: FP16 (memory optimized)")
     if skip_vae:
@@ -1188,7 +1176,7 @@ def generate_video(
         if not use_placeholder and weights_path:
             model = load_av_transformer(
                 weights_path, num_layers=48, compute_dtype=compute_dtype,
-                use_fp8=use_fp8, low_memory=low_memory,
+                low_memory=low_memory,
                 caption_channels=None if v2 else 3840,
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
@@ -1199,7 +1187,7 @@ def generate_video(
     else:
         print("\n[2/5] Loading transformer...")
         if not use_placeholder and weights_path:
-            velocity_model = load_transformer(weights_path, num_layers=48, compute_dtype=compute_dtype, use_fp8=use_fp8, low_memory=low_memory, fast_mode=fast_mode)
+            velocity_model = load_transformer(weights_path, num_layers=48, compute_dtype=compute_dtype, low_memory=low_memory, fast_mode=fast_mode)
 
             # Apply cross-attention scaling if specified (improves text conditioning)
             if cross_attn_scale != 1.0:
@@ -2432,11 +2420,6 @@ def main():
         help="Use FP32 computation instead of FP16 (higher memory usage)"
     )
     parser.add_argument(
-        "--fp8",
-        action="store_true",
-        help="Load FP8-quantized weights (auto-selects distilled-fp8 or dev-fp8)"
-    )
-    parser.add_argument(
         "--model-variant",
         type=str,
         choices=["distilled", "dev"],
@@ -2659,12 +2642,6 @@ def main():
             args.steps = 30
             print(f"Using dev model default: {args.steps} steps")
 
-    # Auto-select FP8 weights if --fp8 flag is set
-    if args.fp8:
-        if ".safetensors" in args.weights and "-fp8" not in args.weights:
-            args.weights = args.weights.replace(".safetensors", "-fp8.safetensors")
-            print(f"Using FP8 weights: {args.weights}")
-
     resolved_num_frames = resolve_num_frames(
         num_frames=args.frames,
         duration_seconds=args.duration,
@@ -2696,7 +2673,6 @@ def main():
         gemma_path=args.gemma_path,
         use_gemma=not args.no_gemma,
         use_fp16=not args.fp32,  # FP16 is default, --fp32 overrides
-        use_fp8=args.fp8,
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
         spatial_upscaler_weights=args.spatial_upscaler_weights,

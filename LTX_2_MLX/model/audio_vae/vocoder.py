@@ -809,105 +809,78 @@ class Vocoder(nn.Module):
         return x
 
 
-def _load_conv1d_weights(f, prefix: str, conv: Conv1d, keys) -> None:
+def _load_conv1d_weights(weights: dict, prefix: str, conv: Conv1d) -> None:
     """Load weights for a Conv1d layer."""
-    import torch
-
     for suffix in ["weight", "bias"]:
         pt_key = f"{prefix}.{suffix}"
-        if pt_key in keys:
-            tensor = f.get_tensor(pt_key)
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float32)
-            value = tensor.numpy()
-
+        if pt_key in weights:
+            value = weights[pt_key]
             if suffix == "weight":
                 # PyTorch: (out, in, k) -> MLX: (out, k, in)
                 value = value.transpose(0, 2, 1)
-                conv.weight = mx.array(value)
+                conv.weight = value
             else:
-                conv.bias = mx.array(value)
+                conv.bias = value
 
 
-def _load_conv_transpose1d_weights(f, prefix: str, conv: ConvTranspose1d, keys) -> None:
+def _load_conv_transpose1d_weights(weights: dict, prefix: str, conv: ConvTranspose1d) -> None:
     """Load weights for a ConvTranspose1d layer."""
-    import torch
-
     for suffix in ["weight", "bias"]:
         pt_key = f"{prefix}.{suffix}"
-        if pt_key in keys:
-            tensor = f.get_tensor(pt_key)
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float32)
-            value = tensor.numpy()
-
+        if pt_key in weights:
+            value = weights[pt_key]
             if suffix == "weight":
                 # PyTorch transpose: (in, out, k) -> MLX: (out, k, in)
                 value = value.transpose(1, 2, 0)
-                conv.weight = mx.array(value)
+                conv.weight = value
             else:
-                conv.bias = mx.array(value)
+                conv.bias = value
 
 
-def _load_snakebeta_weights(f, prefix: str, snake: SnakeBeta, keys) -> None:
+def _load_snakebeta_weights(weights: dict, prefix: str, snake: SnakeBeta) -> None:
     """Load SnakeBeta alpha and beta parameters."""
-    import torch
-
     for param_name in ["alpha", "beta"]:
         pt_key = f"{prefix}.{param_name}"
-        if pt_key in keys:
-            tensor = f.get_tensor(pt_key)
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float32)
-            setattr(snake, param_name, mx.array(tensor.numpy()))
+        if pt_key in weights:
+            setattr(snake, param_name, weights[pt_key])
 
 
-def _load_lowpass_filter_weights(f, prefix: str, lpf: LowPassFilter1d, keys) -> None:
+def _load_lowpass_filter_weights(weights: dict, prefix: str, lpf: LowPassFilter1d) -> None:
     """Load LowPassFilter1d filter buffer."""
-    import torch
-
     pt_key = f"{prefix}.filter"
-    if pt_key in keys:
-        tensor = f.get_tensor(pt_key)
-        if tensor.dtype == torch.bfloat16:
-            tensor = tensor.to(torch.float32)
-        lpf.filter = mx.array(tensor.numpy())
+    if pt_key in weights:
+        lpf.filter = weights[pt_key]
 
 
-def _load_upsample1d_weights(f, prefix: str, up: UpSample1d, keys) -> None:
+def _load_upsample1d_weights(weights: dict, prefix: str, up: UpSample1d) -> None:
     """Load UpSample1d filter buffer."""
-    import torch
-
     pt_key = f"{prefix}.filter"
-    if pt_key in keys:
-        tensor = f.get_tensor(pt_key)
-        if tensor.dtype == torch.bfloat16:
-            tensor = tensor.to(torch.float32)
-        up.filter = mx.array(tensor.numpy())
+    if pt_key in weights:
+        up.filter = weights[pt_key]
 
 
-def _load_activation1d_weights(f, prefix: str, act1d: Activation1d, keys) -> None:
+def _load_activation1d_weights(weights: dict, prefix: str, act1d: Activation1d) -> None:
     """Load Activation1d weights (SnakeBeta + upsample/downsample filters)."""
-    _load_snakebeta_weights(f, f"{prefix}.act", act1d.act, keys)
-    _load_upsample1d_weights(f, f"{prefix}.upsample", act1d.upsample, keys)
+    _load_snakebeta_weights(weights, f"{prefix}.act", act1d.act)
+    _load_upsample1d_weights(weights, f"{prefix}.upsample", act1d.upsample)
     _load_lowpass_filter_weights(
-        f, f"{prefix}.downsample.lowpass", act1d.downsample.lowpass, keys
+        weights, f"{prefix}.downsample.lowpass", act1d.downsample.lowpass
     )
 
 
-def _load_amp_block_weights(f, prefix: str, block: AMPBlock1, keys) -> None:
+def _load_amp_block_weights(weights: dict, prefix: str, block: AMPBlock1) -> None:
     """Load AMPBlock1 weights including convolutions, SnakeBeta, and filter buffers."""
     for j, conv in enumerate(block.convs1):
-        _load_conv1d_weights(f, f"{prefix}.convs1.{j}", conv, keys)
+        _load_conv1d_weights(weights, f"{prefix}.convs1.{j}", conv)
     for j, conv in enumerate(block.convs2):
-        _load_conv1d_weights(f, f"{prefix}.convs2.{j}", conv, keys)
+        _load_conv1d_weights(weights, f"{prefix}.convs2.{j}", conv)
     for j, act in enumerate(block.acts1):
-        _load_activation1d_weights(f, f"{prefix}.acts1.{j}", act, keys)
+        _load_activation1d_weights(weights, f"{prefix}.acts1.{j}", act)
     for j, act in enumerate(block.acts2):
-        _load_activation1d_weights(f, f"{prefix}.acts2.{j}", act, keys)
+        _load_activation1d_weights(weights, f"{prefix}.acts2.{j}", act)
 
 
-def _load_vocoder_inner(f, vocoder: Vocoder, prefix: str, keys) -> int:
+def _load_vocoder_inner(weights: dict, vocoder: Vocoder, prefix: str) -> int:
     """Load weights for a single Vocoder instance.
 
     Shared logic used by both load_vocoder_weights and load_vocoder_with_bwe_weights.
@@ -915,33 +888,33 @@ def _load_vocoder_inner(f, vocoder: Vocoder, prefix: str, keys) -> int:
     loaded_count = 0
 
     # Load conv_pre
-    _load_conv1d_weights(f, f"{prefix}.conv_pre", vocoder.conv_pre, keys)
+    _load_conv1d_weights(weights, f"{prefix}.conv_pre", vocoder.conv_pre)
     loaded_count += 1
 
     # Load upsampling layers
     for i, up in enumerate(vocoder.ups):
-        _load_conv_transpose1d_weights(f, f"{prefix}.ups.{i}", up, keys)
+        _load_conv_transpose1d_weights(weights, f"{prefix}.ups.{i}", up)
         loaded_count += 1
 
     # Load resblocks
     for i, block in enumerate(vocoder.resblocks):
         block_prefix = f"{prefix}.resblocks.{i}"
         if isinstance(block, AMPBlock1):
-            _load_amp_block_weights(f, block_prefix, block, keys)
+            _load_amp_block_weights(weights, block_prefix, block)
         else:
             for j, conv in enumerate(block.convs1):
-                _load_conv1d_weights(f, f"{block_prefix}.convs1.{j}", conv, keys)
+                _load_conv1d_weights(weights, f"{block_prefix}.convs1.{j}", conv)
             for j, conv in enumerate(block.convs2):
-                _load_conv1d_weights(f, f"{block_prefix}.convs2.{j}", conv, keys)
+                _load_conv1d_weights(weights, f"{block_prefix}.convs2.{j}", conv)
         loaded_count += 1
 
     # Load act_post (for AMP mode)
     if vocoder.is_amp and vocoder.act_post is not None:
-        _load_activation1d_weights(f, f"{prefix}.act_post", vocoder.act_post, keys)
+        _load_activation1d_weights(weights, f"{prefix}.act_post", vocoder.act_post)
         loaded_count += 1
 
     # Load conv_post
-    _load_conv1d_weights(f, f"{prefix}.conv_post", vocoder.conv_post, keys)
+    _load_conv1d_weights(weights, f"{prefix}.conv_post", vocoder.conv_post)
     loaded_count += 1
 
     return loaded_count
@@ -949,20 +922,16 @@ def _load_vocoder_inner(f, vocoder: Vocoder, prefix: str, keys) -> int:
 
 def load_vocoder_weights(vocoder: Vocoder, weights_path: str) -> None:
     """Load Vocoder weights from safetensors file."""
-    from safetensors import safe_open
-
     print(f"Loading Vocoder weights from {weights_path}...")
+    weights = mx.load(weights_path)
 
-    with safe_open(weights_path, framework="pt") as f:
-        keys = f.keys()
+    # Check if vocoder weights exist
+    vocoder_keys = [k for k in weights if k.startswith("vocoder.")]
+    if not vocoder_keys:
+        print("  Warning: No vocoder weights found in checkpoint")
+        return
 
-        # Check if vocoder weights exist
-        vocoder_keys = [k for k in keys if k.startswith("vocoder.")]
-        if not vocoder_keys:
-            print("  Warning: No vocoder weights found in checkpoint")
-            return
-
-        loaded_count = _load_vocoder_inner(f, vocoder, "vocoder", keys)
+    loaded_count = _load_vocoder_inner(weights, vocoder, "vocoder")
 
     print(f"  Loaded {loaded_count} vocoder weight tensors")
 
@@ -971,46 +940,35 @@ def load_vocoder_with_bwe_weights(
     vocoder_with_bwe: VocoderWithBWE, weights_path: str
 ) -> None:
     """Load weights for VocoderWithBWE from a safetensors checkpoint."""
-    from safetensors import safe_open
-    import torch
-
     print(f"Loading VocoderWithBWE weights from {weights_path}...")
     loaded_count = 0
+    weights = mx.load(weights_path)
 
-    with safe_open(weights_path, framework="pt") as f:
-        keys = f.keys()
+    # Load inner vocoder
+    loaded_count += _load_vocoder_inner(
+        weights, vocoder_with_bwe.vocoder, "vocoder.vocoder"
+    )
 
-        # Load inner vocoder
-        loaded_count += _load_vocoder_inner(
-            f, vocoder_with_bwe.vocoder, "vocoder.vocoder", keys
-        )
+    # Load BWE generator
+    loaded_count += _load_vocoder_inner(
+        weights, vocoder_with_bwe.bwe_generator, "vocoder.bwe_generator"
+    )
 
-        # Load BWE generator
-        loaded_count += _load_vocoder_inner(
-            f, vocoder_with_bwe.bwe_generator, "vocoder.bwe_generator", keys
-        )
+    # Load mel_stft
+    mel_stft = vocoder_with_bwe.mel_stft
+    stft_fn = mel_stft.stft_fn
 
-        # Load mel_stft
-        mel_stft = vocoder_with_bwe.mel_stft
-        stft_fn = mel_stft.stft_fn
-
-        # Load STFT forward_basis and inverse_basis
-        for buf_name in ["forward_basis", "inverse_basis"]:
-            pt_key = f"vocoder.mel_stft.stft_fn.{buf_name}"
-            if pt_key in keys:
-                tensor = f.get_tensor(pt_key)
-                if tensor.dtype == torch.bfloat16:
-                    tensor = tensor.to(torch.float32)
-                setattr(stft_fn, buf_name, mx.array(tensor.numpy()))
-                loaded_count += 1
-
-        # Load mel_basis
-        pt_key = "vocoder.mel_stft.mel_basis"
-        if pt_key in keys:
-            tensor = f.get_tensor(pt_key)
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float32)
-            mel_stft.mel_basis = mx.array(tensor.numpy())
+    # Load STFT forward_basis and inverse_basis
+    for buf_name in ["forward_basis", "inverse_basis"]:
+        pt_key = f"vocoder.mel_stft.stft_fn.{buf_name}"
+        if pt_key in weights:
+            setattr(stft_fn, buf_name, weights[pt_key])
             loaded_count += 1
+
+    # Load mel_basis
+    pt_key = "vocoder.mel_stft.mel_basis"
+    if pt_key in weights:
+        mel_stft.mel_basis = weights[pt_key]
+        loaded_count += 1
 
     print(f"  Loaded {loaded_count} vocoder+BWE weight tensors")

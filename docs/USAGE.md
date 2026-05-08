@@ -60,7 +60,6 @@ Available weights from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-
 | Weight | Size | Description |
 |--------|------|-------------|
 | `ltx-2-19b-distilled.safetensors` | 43GB | Fast generation (8 steps) |
-| `ltx-2-19b-distilled-fp8.safetensors` | 27GB | FP8 quantized |
 | `ltx-2-19b-dev.safetensors` | 43GB | Higher quality (25-50 steps) |
 | `ltx-2-spatial-upscaler-x2-1.0.safetensors` | 995MB | 2x resolution |
 | `ltx-2-temporal-upscaler-x2-1.0.safetensors` | 262MB | 2x framerate |
@@ -374,7 +373,6 @@ uv run scripts/download_weights.py --weights gemma
 - Text-to-video generation with semantic content
 - 6 specialized pipelines
 - Two-stage pipeline with spatial upscaling
-- FP8 weight loading (`--fp8`)
 - Temporal upscaler (`--upscale-temporal`)
 - IC-LoRA conditioning (`--control-video`)
 - Generic LoRA support (`--lora`)

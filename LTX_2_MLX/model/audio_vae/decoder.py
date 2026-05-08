@@ -427,101 +427,84 @@ def load_audio_decoder_weights(decoder: AudioDecoder, weights_path: str) -> None
         decoder: AudioDecoder instance to load weights into.
         weights_path: Path to safetensors file.
     """
-    from safetensors import safe_open
-    import torch
-
     print(f"Loading Audio VAE decoder weights from {weights_path}...")
     loaded_count = 0
+    weights = mx.load(weights_path)
 
-    with safe_open(weights_path, framework="pt") as f:
-        keys = f.keys()
+    # Check if audio VAE weights exist
+    audio_keys = [k for k in weights if k.startswith("audio_vae.")]
+    if not audio_keys:
+        print("  Warning: No audio VAE weights found in checkpoint")
+        return
 
-        # Check if audio VAE weights exist
-        audio_keys = [k for k in keys if k.startswith("audio_vae.")]
-        if not audio_keys:
-            print("  Warning: No audio VAE weights found in checkpoint")
-            return
+    # Load conv_in
+    _load_conv_weights(weights, "audio_vae.decoder.conv_in.conv", decoder.conv_in)
+    loaded_count += 1
 
-        # Load conv_in
-        _load_conv_weights(f, "audio_vae.decoder.conv_in.conv", decoder.conv_in, keys)
-        loaded_count += 1
+    # Load mid block
+    _load_simple_resblock_weights(weights, "audio_vae.decoder.mid.block_1", decoder.mid_block_1)
+    _load_simple_resblock_weights(weights, "audio_vae.decoder.mid.block_2", decoder.mid_block_2)
+    loaded_count += 2
 
-        # Load mid block
-        _load_simple_resblock_weights(f, "audio_vae.decoder.mid.block_1", decoder.mid_block_1, keys)
-        _load_simple_resblock_weights(f, "audio_vae.decoder.mid.block_2", decoder.mid_block_2, keys)
-        loaded_count += 2
+    # Load upsampling blocks
+    for i_level, level_blocks in enumerate(decoder.up_blocks):
+        # Map to PyTorch level indexing (reversed)
+        pt_level = decoder.num_resolutions - 1 - i_level
 
-        # Load upsampling blocks
-        for i_level, level_blocks in enumerate(decoder.up_blocks):
-            # Map to PyTorch level indexing (reversed)
-            pt_level = decoder.num_resolutions - 1 - i_level
-
-            for i_block, res_block in enumerate(level_blocks["res_blocks"]):
-                prefix = f"audio_vae.decoder.up.{pt_level}.block.{i_block}"
-                _load_simple_resblock_weights(f, prefix, res_block, keys)
-                loaded_count += 1
-
-            if level_blocks["upsample"] is not None:
-                # Checkpoint has double .conv: audio_vae.decoder.up.X.upsample.conv.conv.weight
-                prefix = f"audio_vae.decoder.up.{pt_level}.upsample.conv.conv"
-                _load_conv_weights(f, prefix, level_blocks["upsample"].conv, keys)
-                loaded_count += 1
-
-        # Load conv_out
-        _load_conv_weights(f, "audio_vae.decoder.conv_out.conv", decoder.conv_out, keys)
-        loaded_count += 1
-
-        # Load per-channel statistics
-        # PyTorch uses hyphenated names: mean-of-means, std-of-means
-        # Note: The checkpoint stores these at audio_vae.per_channel_statistics (not audio_vae.decoder.)
-        mean_key = "audio_vae.per_channel_statistics.mean-of-means"
-        std_key = "audio_vae.per_channel_statistics.std-of-means"
-
-        if mean_key in keys:
-            import torch
-            mean = f.get_tensor(mean_key)
-            if mean.dtype == torch.bfloat16:
-                mean = mean.to(torch.float32)
-            decoder.per_channel_statistics.mean_of_means = mx.array(mean.numpy())
-            print(f"    Loaded decoder mean-of-means: shape={mean.shape}, mean={float(mean.mean()):.4f}")
+        for i_block, res_block in enumerate(level_blocks["res_blocks"]):
+            prefix = f"audio_vae.decoder.up.{pt_level}.block.{i_block}"
+            _load_simple_resblock_weights(weights, prefix, res_block)
             loaded_count += 1
 
-        if std_key in keys:
-            import torch
-            std = f.get_tensor(std_key)
-            if std.dtype == torch.bfloat16:
-                std = std.to(torch.float32)
-            decoder.per_channel_statistics.std_of_means = mx.array(std.numpy())
-            print(f"    Loaded decoder std-of-means: shape={std.shape}, mean={float(std.mean()):.4f}")
+        if level_blocks["upsample"] is not None:
+            # Checkpoint has double .conv: audio_vae.decoder.up.X.upsample.conv.conv.weight
+            prefix = f"audio_vae.decoder.up.{pt_level}.upsample.conv.conv"
+            _load_conv_weights(weights, prefix, level_blocks["upsample"].conv)
             loaded_count += 1
+
+    # Load conv_out
+    _load_conv_weights(weights, "audio_vae.decoder.conv_out.conv", decoder.conv_out)
+    loaded_count += 1
+
+    # Load per-channel statistics
+    # PyTorch uses hyphenated names: mean-of-means, std-of-means
+    # Note: The checkpoint stores these at audio_vae.per_channel_statistics (not audio_vae.decoder.)
+    mean_key = "audio_vae.per_channel_statistics.mean-of-means"
+    std_key = "audio_vae.per_channel_statistics.std-of-means"
+
+    if mean_key in weights:
+        mean = weights[mean_key]
+        decoder.per_channel_statistics.mean_of_means = mean
+        print(f"    Loaded decoder mean-of-means: shape={mean.shape}, mean={float(mx.mean(mean.astype(mx.float32))):.4f}")
+        loaded_count += 1
+
+    if std_key in weights:
+        std = weights[std_key]
+        decoder.per_channel_statistics.std_of_means = std
+        print(f"    Loaded decoder std-of-means: shape={std.shape}, mean={float(mx.mean(std.astype(mx.float32))):.4f}")
+        loaded_count += 1
 
     print(f"  Loaded {loaded_count} audio decoder weight tensors")
 
 
-def _load_conv_weights(f, prefix: str, conv: CausalConv2d, keys) -> None:
+def _load_conv_weights(weights: dict, prefix: str, conv: CausalConv2d) -> None:
     """Load weights for a CausalConv2d layer."""
-    import torch
-
     for suffix in ["weight", "bias"]:
         pt_key = f"{prefix}.{suffix}"
-        if pt_key in keys:
-            tensor = f.get_tensor(pt_key)
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float32)
-            value = tensor.numpy()
-
+        if pt_key in weights:
+            value = weights[pt_key]
             if suffix == "weight":
                 # PyTorch: (out, in, kH, kW) -> MLX: (out, kH, kW, in)
                 value = value.transpose(0, 2, 3, 1)
-                conv.weight = mx.array(value)
+                conv.weight = value
             else:
-                conv.bias = mx.array(value)
+                conv.bias = value
 
 
-def _load_simple_resblock_weights(f, prefix: str, block: SimpleResBlock2d, keys) -> None:
+def _load_simple_resblock_weights(weights: dict, prefix: str, block: SimpleResBlock2d) -> None:
     """Load weights for a SimpleResBlock2d."""
-    _load_conv_weights(f, f"{prefix}.conv1.conv", block.conv1, keys)
-    _load_conv_weights(f, f"{prefix}.conv2.conv", block.conv2, keys)
+    _load_conv_weights(weights, f"{prefix}.conv1.conv", block.conv1)
+    _load_conv_weights(weights, f"{prefix}.conv2.conv", block.conv2)
 
     if block.skip is not None:
-        _load_conv_weights(f, f"{prefix}.nin_shortcut.conv", block.skip, keys)
+        _load_conv_weights(weights, f"{prefix}.nin_shortcut.conv", block.skip)

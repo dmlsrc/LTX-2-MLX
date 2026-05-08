@@ -1,4 +1,4 @@
-"""Tests for loader module: weight conversion, FP8, LoRA, and registry."""
+"""Tests for loader module: weight conversion, LoRA, and registry."""
 
 import pytest
 import mlx.core as mx
@@ -565,48 +565,6 @@ class TestStateDictRegistry:
 
 
 # ============================================================================
-# FP8 Loader Tests (Mock-based, no actual weights needed)
-# ============================================================================
-
-class TestFP8Functions:
-    """Tests for FP8 loader functions."""
-
-    def test_dequantize_fp8_weight_mock(self):
-        """Test FP8 dequantization logic with mocks."""
-        # This test verifies the logic without requiring actual FP8 tensors
-        from LTX_2_MLX.loader.fp8_loader import HAS_TORCH
-
-        if not HAS_TORCH:
-            pytest.skip("PyTorch not available")
-
-        import torch
-        from LTX_2_MLX.loader.fp8_loader import dequantize_fp8_weight
-
-        # Create a regular float tensor as a stand-in
-        # (actual FP8 would need special handling)
-        weight = torch.tensor([1.0, 2.0, 3.0])
-        scale = 2.0
-
-        result = dequantize_fp8_weight(weight, scale)
-        expected = mx.array([2.0, 4.0, 6.0])
-
-        assert mx.allclose(result, expected)
-
-    def test_is_fp8_checkpoint_detection(self):
-        """Test FP8 checkpoint detection by checking for weight_scale keys."""
-        # This is a mock test - actual file testing would require fixtures
-        from LTX_2_MLX.loader.fp8_loader import HAS_TORCH
-
-        if not HAS_TORCH:
-            pytest.skip("PyTorch not available")
-
-        # We can't easily test is_fp8_checkpoint without a real file
-        # but we can verify the function exists and is callable
-        from LTX_2_MLX.loader.fp8_loader import is_fp8_checkpoint
-        assert callable(is_fp8_checkpoint)
-
-
-# ============================================================================
 # Integration Tests (require actual weights - marked for skip)
 # ============================================================================
 
@@ -627,15 +585,3 @@ class TestLoaderIntegration:
         with safe_open(str(weight_files[0]), framework="pt") as f:
             keys = list(f.keys())
         assert len(keys) > 0
-
-    def test_fp8_checkpoint_info_real(self, weights_dir):
-        """Test FP8 checkpoint info on real files."""
-        from LTX_2_MLX.loader.fp8_loader import get_fp8_checkpoint_info
-
-        fp8_files = list(weights_dir.glob("**/*fp8*.safetensors"))
-        if not fp8_files:
-            pytest.skip("No FP8 weight files found")
-
-        info = get_fp8_checkpoint_info(str(fp8_files[0]))
-        assert "is_fp8" in info
-        assert info["is_fp8"] == True

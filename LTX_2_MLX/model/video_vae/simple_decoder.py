@@ -565,110 +565,101 @@ class SimpleVideoDecoder(nn.Module):
 
 def load_vae_decoder_weights(decoder: SimpleVideoDecoder, weights_path: str) -> None:
     """
-    Load VAE decoder weights from PyTorch safetensors file.
+    Load VAE decoder weights from a safetensors file.
     Works generically for any decoder architecture built from config.
     """
-    from safetensors import safe_open
-    import torch
-
     print(f"Loading VAE decoder weights from {weights_path}...")
 
     loaded_count = 0
+    weights = mx.load(weights_path)
 
-    with safe_open(weights_path, framework="pt") as f:
-        all_keys = set(f.keys())
+    def load_tensor(pt_key):
+        nonlocal loaded_count
+        if pt_key not in weights:
+            return None
+        loaded_count += 1
+        return weights[pt_key]
 
-        def load_tensor(pt_key):
-            nonlocal loaded_count
-            if pt_key not in all_keys:
-                return None
-            tensor = f.get_tensor(pt_key)
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float32)
-            loaded_count += 1
-            return mx.array(tensor.numpy())
-
-        # Load per-channel statistics
-        for stat_key, attr_name in [("mean-of-means", "mean_of_means"), ("std-of-means", "std_of_means")]:
-            val = load_tensor(f"vae.per_channel_statistics.{stat_key}")
-            if val is not None:
-                setattr(decoder, attr_name, val)
-
-        # Load conv_in
-        for suffix in ["weight", "bias"]:
-            val = load_tensor(f"vae.decoder.conv_in.conv.{suffix}")
-            if val is not None:
-                setattr(decoder.conv_in, suffix, val)
-
-        # Load up_blocks generically
-        for pt_idx, (block, btype) in enumerate(zip(decoder.up_blocks, decoder.block_types)):
-            if btype == "res":
-                # Load res blocks
-                for res_idx, res_block in enumerate(block.res_blocks):
-                    for conv_name in ["conv1", "conv2"]:
-                        conv = getattr(res_block, conv_name)
-                        for suffix in ["weight", "bias"]:
-                            val = load_tensor(f"vae.decoder.up_blocks.{pt_idx}.res_blocks.{res_idx}.{conv_name}.conv.{suffix}")
-                            if val is not None:
-                                setattr(conv, suffix, val)
-
-                    # Load scale_shift_table
-                    val = load_tensor(f"vae.decoder.up_blocks.{pt_idx}.res_blocks.{res_idx}.scale_shift_table")
-                    if val is not None:
-                        res_block.scale_shift_table = val
-
-                # Load time embedder for this res block group
-                pt_prefix = f"vae.decoder.up_blocks.{pt_idx}.time_embedder.timestep_embedder"
-                l1_key = f"{pt_prefix}.linear_1.weight"
-                if l1_key in all_keys:
-                    l1_weight = f.get_tensor(l1_key)
-                    hidden_dim = l1_weight.shape[0]
-                    output_dim = 4 * block.channels
-
-                    block.time_embedder = TimestepEmbedder(
-                        hidden_dim=hidden_dim, output_dim=output_dim, input_dim=256
-                    )
-                    for layer_name in ["linear_1", "linear_2"]:
-                        for suffix in ["weight", "bias"]:
-                            val = load_tensor(f"{pt_prefix}.{layer_name}.{suffix}")
-                            if val is not None:
-                                layer = getattr(block.time_embedder, layer_name)
-                                setattr(layer, suffix, val)
-
-            else:  # upsample
-                for suffix in ["weight", "bias"]:
-                    val = load_tensor(f"vae.decoder.up_blocks.{pt_idx}.conv.conv.{suffix}")
-                    if val is not None:
-                        setattr(block.conv, suffix, val)
-
-        # Load conv_out
-        for suffix in ["weight", "bias"]:
-            val = load_tensor(f"vae.decoder.conv_out.conv.{suffix}")
-            if val is not None:
-                setattr(decoder.conv_out, suffix, val)
-
-        # Load last_scale_shift_table
-        val = load_tensor("vae.decoder.last_scale_shift_table")
+    # Load per-channel statistics
+    for stat_key, attr_name in [("mean-of-means", "mean_of_means"), ("std-of-means", "std_of_means")]:
+        val = load_tensor(f"vae.per_channel_statistics.{stat_key}")
         if val is not None:
-            decoder.last_scale_shift_table = val
+            setattr(decoder, attr_name, val)
 
-        # Load timestep conditioning params
-        if decoder.timestep_conditioning:
-            val = load_tensor("vae.decoder.timestep_scale_multiplier")
-            if val is not None:
-                decoder.timestep_scale_multiplier = val
+    # Load conv_in
+    for suffix in ["weight", "bias"]:
+        val = load_tensor(f"vae.decoder.conv_in.conv.{suffix}")
+        if val is not None:
+            setattr(decoder.conv_in, suffix, val)
 
-            pt_prefix = "vae.decoder.last_time_embedder.timestep_embedder"
-            if f"{pt_prefix}.linear_1.weight" in all_keys:
-                decoder.last_time_embedder = TimestepEmbedder(
-                    hidden_dim=256, output_dim=2 * decoder.final_channels, input_dim=256
+    # Load up_blocks generically
+    for pt_idx, (block, btype) in enumerate(zip(decoder.up_blocks, decoder.block_types)):
+        if btype == "res":
+            # Load res blocks
+            for res_idx, res_block in enumerate(block.res_blocks):
+                for conv_name in ["conv1", "conv2"]:
+                    conv = getattr(res_block, conv_name)
+                    for suffix in ["weight", "bias"]:
+                        val = load_tensor(f"vae.decoder.up_blocks.{pt_idx}.res_blocks.{res_idx}.{conv_name}.conv.{suffix}")
+                        if val is not None:
+                            setattr(conv, suffix, val)
+
+                # Load scale_shift_table
+                val = load_tensor(f"vae.decoder.up_blocks.{pt_idx}.res_blocks.{res_idx}.scale_shift_table")
+                if val is not None:
+                    res_block.scale_shift_table = val
+
+            # Load time embedder for this res block group
+            pt_prefix = f"vae.decoder.up_blocks.{pt_idx}.time_embedder.timestep_embedder"
+            l1_key = f"{pt_prefix}.linear_1.weight"
+            if l1_key in weights:
+                hidden_dim = weights[l1_key].shape[0]
+                output_dim = 4 * block.channels
+
+                block.time_embedder = TimestepEmbedder(
+                    hidden_dim=hidden_dim, output_dim=output_dim, input_dim=256
                 )
                 for layer_name in ["linear_1", "linear_2"]:
                     for suffix in ["weight", "bias"]:
                         val = load_tensor(f"{pt_prefix}.{layer_name}.{suffix}")
                         if val is not None:
-                            layer = getattr(decoder.last_time_embedder, layer_name)
+                            layer = getattr(block.time_embedder, layer_name)
                             setattr(layer, suffix, val)
+
+        else:  # upsample
+            for suffix in ["weight", "bias"]:
+                val = load_tensor(f"vae.decoder.up_blocks.{pt_idx}.conv.conv.{suffix}")
+                if val is not None:
+                    setattr(block.conv, suffix, val)
+
+    # Load conv_out
+    for suffix in ["weight", "bias"]:
+        val = load_tensor(f"vae.decoder.conv_out.conv.{suffix}")
+        if val is not None:
+            setattr(decoder.conv_out, suffix, val)
+
+    # Load last_scale_shift_table
+    val = load_tensor("vae.decoder.last_scale_shift_table")
+    if val is not None:
+        decoder.last_scale_shift_table = val
+
+    # Load timestep conditioning params
+    if decoder.timestep_conditioning:
+        val = load_tensor("vae.decoder.timestep_scale_multiplier")
+        if val is not None:
+            decoder.timestep_scale_multiplier = val
+
+        pt_prefix = "vae.decoder.last_time_embedder.timestep_embedder"
+        if f"{pt_prefix}.linear_1.weight" in weights:
+            decoder.last_time_embedder = TimestepEmbedder(
+                hidden_dim=256, output_dim=2 * decoder.final_channels, input_dim=256
+            )
+            for layer_name in ["linear_1", "linear_2"]:
+                for suffix in ["weight", "bias"]:
+                    val = load_tensor(f"{pt_prefix}.{layer_name}.{suffix}")
+                    if val is not None:
+                        layer = getattr(decoder.last_time_embedder, layer_name)
+                        setattr(layer, suffix, val)
 
     print(f"  Loaded {loaded_count} weight tensors")
 

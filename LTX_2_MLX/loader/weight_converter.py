@@ -6,7 +6,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
-from safetensors import safe_open
 
 
 def load_safetensors(path: str) -> Dict[str, mx.array]:
@@ -19,13 +18,7 @@ def load_safetensors(path: str) -> Dict[str, mx.array]:
     Returns:
         Dictionary of weight name to mx.array.
     """
-    weights = {}
-    with safe_open(path, framework="pt") as f:
-        for key in f.keys():
-            tensor = f.get_tensor(key)
-            # Convert to numpy then to MLX
-            weights[key] = mx.array(tensor.numpy())
-    return weights
+    return dict(mx.load(path))
 
 
 def transpose_linear_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
@@ -319,10 +312,8 @@ def load_transformer_weights(
     model: nn.Module,
     weights_path: str,
     strict: bool = False,
-    use_fp8: bool = False,
     include_audio: bool = False,
     streaming: bool = True,
-    target_dtype: str = "float16",
 ) -> None:
     """
     Load transformer weights into an MLX model.
@@ -331,12 +322,9 @@ def load_transformer_weights(
         model: MLX model to load weights into.
         weights_path: Path to safetensors file.
         strict: If True, raise error on missing/extra keys.
-        use_fp8: If True, handle FP8 quantized weights with dequantization.
         include_audio: If True, include audio-related weights (for AudioVideo model).
         streaming: If True, use memory-efficient streaming load (default True).
-        target_dtype: Target dtype after dequantization ("float16" or "float32").
     """
-    from safetensors import safe_open
     import gc
 
     try:
@@ -346,93 +334,40 @@ def load_transformer_weights(
         has_tqdm = False
         print(f"Loading weights from {weights_path}...")
 
-    # Check for FP8 and load scales if needed
-    fp8_scales = {}
-    if use_fp8:
-        with safe_open(weights_path, framework="pt") as f:
-            for key in f.keys():
-                if key.endswith(".weight_scale"):
-                    fp8_scales[key.replace(".weight_scale", ".weight")] = f.get_tensor(key).item()
+    raw_weights = mx.load(weights_path)
+    if has_tqdm:
+        key_iter = tqdm(
+            raw_weights.items(),
+            desc="Loading transformer",
+            ncols=80,
+            total=len(raw_weights),
+        )
+    else:
+        key_iter = raw_weights.items()
 
-    # Build the weights dictionary for model.update()
     weights_dict = {}
     loaded_count = 0
     skipped_count = 0
 
-    with safe_open(weights_path, framework="pt") as f:
-        all_keys = list(f.keys())
-        if has_tqdm:
-            key_iter = tqdm(all_keys, desc="Loading transformer", ncols=80)
-        else:
-            key_iter = all_keys
+    for pytorch_key, value in key_iter:
+        # Only process diffusion model keys
+        if not pytorch_key.startswith("model.diffusion_model."):
+            continue
 
-        for pytorch_key in key_iter:
-            # Only process diffusion model keys
-            if not pytorch_key.startswith("model.diffusion_model."):
-                continue
+        # Remove prefix
+        key = pytorch_key.replace("model.diffusion_model.", "")
 
-            # Remove prefix
-            key = pytorch_key.replace("model.diffusion_model.", "")
+        # Convert key
+        mlx_key = convert_pytorch_key_to_mlx(key, include_audio=include_audio)
+        if mlx_key is None:
+            skipped_count += 1
+            continue
 
-            # Convert key
-            mlx_key = convert_pytorch_key_to_mlx(key, include_audio=include_audio)
-            if mlx_key is None:
-                skipped_count += 1
-                continue
+        weights_dict[mlx_key] = value
+        loaded_count += 1
 
-            # Load tensor and convert to target dtype
-            tensor = f.get_tensor(pytorch_key)
-            import torch
-
-            # Determine target torch dtype for memory efficiency
-            torch_dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16}
-            torch_target = torch_dtype_map.get(target_dtype, torch.float32)
-
-            # Handle FP8 quantized weights
-            if use_fp8 and pytorch_key in fp8_scales:
-                # FP8 weight - dequantize using scale, then convert to target dtype
-                scale = fp8_scales[pytorch_key]
-                tensor = (tensor.to(torch.float32) * scale).to(torch_target)
-            elif tensor.dtype == torch.bfloat16:
-                # Handle BFloat16 by converting to target dtype
-                tensor = tensor.to(torch_target)
-            elif hasattr(torch, 'float8_e4m3fn') and tensor.dtype == torch.float8_e4m3fn:
-                # FP8 without scale (shouldn't happen but handle gracefully)
-                tensor = tensor.to(torch_target)
-            elif tensor.dtype != torch_target and tensor.dtype in (torch.float32, torch.float16):
-                # Convert other float types to target dtype
-                tensor = tensor.to(torch_target)
-
-            # Convert to MLX array
-            # numpy doesn't support bfloat16, so convert via float32 then cast in MLX
-            if tensor.dtype == torch.bfloat16:
-                np_array = tensor.to(torch.float32).numpy()
-                value = mx.array(np_array).astype(mx.bfloat16)
-            else:
-                np_array = tensor.numpy()
-                value = mx.array(np_array)
-
-            # MEMORY OPTIMIZATION: Delete torch tensor and numpy array immediately
-            # This prevents double memory usage during weight loading
-            if streaming:
-                del tensor
-                del np_array
-
-            # Note: MLX Linear stores weights as [out_features, in_features],
-            # same as PyTorch, so we do NOT transpose Linear weights.
-            # Both frameworks transpose during forward pass.
-
-            weights_dict[mlx_key] = value
-            loaded_count += 1
-
-            # MEMORY OPTIMIZATION: Periodic garbage collection during streaming
-            # Every 100 weights, clean up to prevent memory fragmentation
-            if streaming and loaded_count % 100 == 0:
-                gc.collect()
-
-    # Final cleanup before model update
-    if streaming:
-        gc.collect()
+    del raw_weights
+    gc.collect()
 
     print(f"  Converted {loaded_count} weight tensors (skipped {skipped_count})")
 
@@ -528,8 +463,6 @@ def load_av_transformer_weights(
     model: nn.Module,
     weights_path: str,
     strict: bool = False,
-    use_fp8: bool = False,
-    target_dtype: str = "float16",
 ) -> None:
     """
     Load AudioVideo transformer weights into an MLX model.
@@ -540,14 +473,10 @@ def load_av_transformer_weights(
         model: MLX AudioVideo model to load weights into.
         weights_path: Path to safetensors file.
         strict: If True, raise error on missing/extra keys.
-        use_fp8: If True, handle FP8 quantized weights with dequantization.
-        target_dtype: Target dtype after dequantization ("float16" or "float32").
     """
     load_transformer_weights(
         model=model,
         weights_path=weights_path,
         strict=strict,
-        use_fp8=use_fp8,
         include_audio=True,
-        target_dtype=target_dtype,
     )

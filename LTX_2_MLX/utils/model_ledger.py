@@ -29,7 +29,6 @@ class ModelLedger:
         temporal_upscaler_path: Path to temporal upscaler weights (optional).
         loras: List of LoRA configurations to apply to transformer.
         compute_dtype: Computation dtype (float32 or float16).
-        use_fp8: Whether to load FP8 weights.
     """
 
     checkpoint_path: Optional[str] = None
@@ -38,7 +37,6 @@ class ModelLedger:
     temporal_upscaler_path: Optional[str] = None
     loras: List[LoRAConfig] = field(default_factory=list)
     compute_dtype: mx.Dtype = mx.float32
-    use_fp8: bool = False
 
     # Cached model instances
     _transformer: Optional[Any] = field(default=None, repr=False)
@@ -86,7 +84,7 @@ class ModelLedger:
             compute_dtype=self.compute_dtype,
         )
 
-        load_transformer_weights(model, self.checkpoint_path, use_fp8=self.use_fp8)
+        load_transformer_weights(model, self.checkpoint_path)
 
         # Apply LoRAs if any
         if self.loras:
@@ -300,7 +298,6 @@ class ModelLedger:
             temporal_upscaler_path=self.temporal_upscaler_path,
             loras=list(self.loras) + list(loras),
             compute_dtype=self.compute_dtype,
-            use_fp8=self.use_fp8,
         )
 
 
@@ -311,7 +308,6 @@ def create_model_ledger(
     temporal_upscaler_path: Optional[str] = None,
     loras: Optional[List[LoRAConfig]] = None,
     use_fp16: bool = False,
-    use_fp8: bool = False,
 ) -> ModelLedger:
     """
     Create a ModelLedger with the given configuration.
@@ -323,7 +319,6 @@ def create_model_ledger(
         temporal_upscaler_path: Path to temporal upscaler (optional).
         loras: List of LoRA configs (optional).
         use_fp16: Use FP16 computation.
-        use_fp8: Load FP8 quantized weights.
 
     Returns:
         Configured ModelLedger instance.
@@ -337,5 +332,4 @@ def create_model_ledger(
         temporal_upscaler_path=temporal_upscaler_path,
         loras=loras or [],
         compute_dtype=compute_dtype,
-        use_fp8=use_fp8,
     )

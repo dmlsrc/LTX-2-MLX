@@ -29,24 +29,7 @@ def load_lora_weights(path: str) -> Dict[str, mx.array]:
     Returns:
         Dictionary mapping weight names to arrays.
     """
-    from safetensors import safe_open
-    import torch
-
-    weights = {}
-
-    with safe_open(path, framework="pt") as f:
-        for key in f.keys():
-            tensor = f.get_tensor(key)
-
-            # Convert to float32 if needed
-            if tensor.dtype == torch.bfloat16:
-                tensor = tensor.to(torch.float32)
-            elif tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-                tensor = tensor.to(torch.float32)
-
-            weights[key] = mx.array(tensor.numpy())
-
-    return weights
+    return dict(mx.load(path))
 
 
 def find_lora_keys_for_weight(
