@@ -498,7 +498,7 @@ class _STFTFn(nn.Module):
         b, _, t = y.shape
         y_mlx = y.transpose(0, 2, 1)  # (B, T, 1)
         # Weight: PyTorch (out, in, k) -> MLX (out, k, in)
-        w = self.forward_basis.transpose(0, 2, 1)  # (n_freqs*2, filter_length, 1) -> already good shape
+        w = self.forward_basis.astype(y_mlx.dtype).transpose(0, 2, 1)
         # Actually MLX weight shape is (out_channels, kernel_width, in_channels)
         # forward_basis is (n_freqs*2, 1, filter_length) in PyTorch = (out, in, k)
         # MLX needs (out, k, in) = (n_freqs*2, filter_length, 1)
@@ -546,7 +546,11 @@ class MelSTFT(nn.Module):
         energy = mx.sqrt((magnitude ** 2).sum(axis=1))
         # mel_basis: (n_mel, n_freqs), magnitude: (B, n_freqs, T_frames)
         # We want (B, n_mel, T_frames) = mel_basis @ magnitude per batch
-        mel = mx.einsum("mf,bft->bmt", self.mel_basis, magnitude)
+        mel = mx.einsum(
+            "mf,bft->bmt",
+            self.mel_basis.astype(magnitude.dtype),
+            magnitude,
+        )
         log_mel = mx.log(mx.clip(mel, a_min=1e-5, a_max=None))
         return log_mel, magnitude, phase, energy
 
@@ -555,7 +559,11 @@ class VocoderWithBWE(nn.Module):
     """Vocoder with bandwidth extension (BWE) upsampling.
 
     Chains a mel-to-wav vocoder with a BWE module that upsamples the output
-    to a higher sample rate.
+    to a higher sample rate. This wrapper intentionally runs in fp32, following
+    Lightricks/LTX-2 ltx-core's VocoderWithBWE.forward caution: bf16 arithmetic
+    hurts mel/STFT spectral metrics through the long BigVGAN+BWE chain even
+    though the rest of the audio decode path can follow the requested compute
+    dtype.
     """
 
     def __init__(
@@ -575,6 +583,10 @@ class VocoderWithBWE(nn.Module):
         self.output_sampling_rate = output_sampling_rate
         self.hop_length = hop_length
         self.output_sample_rate = output_sampling_rate
+        # Scope the fp32 island to BWE. Plain AudioDecoder and Vocoder honor the
+        # requested compute dtype; Lightricks only special-cases VocoderWithBWE.
+        self.vocoder.compute_dtype = mx.float32
+        self.bwe_generator.compute_dtype = mx.float32
         self.resampler = UpSample1d(
             ratio=output_sampling_rate // input_sampling_rate,
             window_type="hann",
@@ -596,10 +608,8 @@ class VocoderWithBWE(nn.Module):
     def __call__(self, mel_spec: mx.array) -> mx.array:
         """Run vocoder + BWE forward pass.
 
-        Runs in float32 regardless of input dtype.  bfloat16 accumulation
-        errors compound through 108 sequential convolutions in the BigVGAN v2
-        architecture and degrade spectral metrics by 40-90%.  fp32 eliminates
-        this degradation.  (Matches upstream PyTorch autocast strategy.)
+        Runs in float32 regardless of input dtype, matching Lightricks'
+        VocoderWithBWE autocast behavior.
 
         Args:
             mel_spec: (B, 2, T, mel_bins) stereo mel spectrogram.
@@ -607,8 +617,10 @@ class VocoderWithBWE(nn.Module):
             Waveform (B, out_channels, T_out) clipped to [-1, 1].
         """
         input_dtype = mel_spec.dtype
-        # Force fp32 for the entire vocoder + BWE chain.
-        # bfloat16 accumulation errors degrade spectral metrics by 40-90%.
+        # Force fp32 for the entire vocoder + BWE chain. Lightricks/LTX-2
+        # reports bf16 degrades mel_l1/MRSTFT metrics by 40-90% in
+        # ltx_core.model.audio_vae.vocoder.VocoderWithBWE.forward; keep this
+        # precision exception local to BWE instead of the whole audio path.
         mel_spec = mel_spec.astype(mx.float32)
 
         # Stage 1: Main vocoder (108 convolutions)
@@ -678,7 +690,7 @@ class Vocoder(nn.Module):
         upsample_initial_channel: int = 1024,
         stereo: bool = True,
         output_sample_rate: int = 24000,
-        compute_dtype: mx.Dtype = mx.float32,
+        compute_dtype: mx.Dtype = mx.bfloat16,
         resblock: str = "1",
         activation: str = "snake",
         apply_final_activation: bool = True,
@@ -755,9 +767,9 @@ class Vocoder(nn.Module):
         Returns:
             Audio waveform (B, 2, audio_length)
         """
-        # Always run in fp32 — bfloat16 accumulation errors compound through
-        # 108 sequential convolutions causing 40-90% spectral degradation
-        x = x.astype(mx.float32)
+        # Plain vocoder follows the requested/model dtype. VocoderWithBWE
+        # overrides child vocoders to fp32 for the Lightricks BWE precision island.
+        x = x.astype(self.compute_dtype)
 
         # Transpose: (B, channels, time, mel_bins) -> (B, channels, mel_bins, time)
         x = x.transpose(0, 1, 3, 2)

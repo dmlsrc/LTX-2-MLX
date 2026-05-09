@@ -186,7 +186,7 @@ def make_decoder(weights_path: str, compute_dtype: Any):
 
 
 def make_audio_decoder_and_vocoder(weights_path: str, compute_dtype: Any):
-    from scripts.generate import create_vocoder_for_checkpoint
+    from scripts.generate import create_vocoder_for_checkpoint, print_audio_dtype_summary
     from LTX_2_MLX.model.audio_vae import (
         AudioDecoder,
         load_audio_decoder_weights,
@@ -205,6 +205,7 @@ def make_audio_decoder_and_vocoder(weights_path: str, compute_dtype: Any):
         load_vocoder_with_bwe_weights(vocoder, weights_path)
     else:
         load_vocoder_weights(vocoder, weights_path)
+    print_audio_dtype_summary(compute_dtype, is_bwe)
 
     sample_rate = vocoder.output_sample_rate
     gc.collect()
@@ -215,6 +216,7 @@ def decode_audio_latent(audio_latent: Any, audio_decoder: Any, vocoder: Any, mx_
     mel_spectrogram = audio_decoder(audio_latent)
     mx_mod.eval(mel_spectrogram)
     waveform = vocoder(mel_spectrogram)
+    waveform = waveform.astype(mx_mod.float32)
     mx_mod.eval(waveform)
     return waveform
 

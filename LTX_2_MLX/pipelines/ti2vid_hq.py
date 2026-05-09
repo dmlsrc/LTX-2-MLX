@@ -69,7 +69,7 @@ class TI2VidHQConfig:
     distilled_lora_config: Optional[LoRAConfig] = None
 
     tiling_config: Optional[TilingConfig] = None
-    dtype: mx.Dtype = mx.float16
+    dtype: mx.Dtype = mx.bfloat16
 
     audio_enabled: bool = False
     use_internal_audio_branch: bool = True

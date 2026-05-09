@@ -38,7 +38,7 @@ class VideoLatentTools:
 
     def create_initial_state(
         self,
-        dtype: mx.Dtype = mx.float32,
+        dtype: mx.Dtype = mx.bfloat16,
         initial_latent: Optional[mx.array] = None,
     ) -> LatentState:
         """
@@ -180,7 +180,7 @@ class AudioLatentTools:
 
     def create_initial_state(
         self,
-        dtype: mx.Dtype = mx.float32,
+        dtype: mx.Dtype = mx.bfloat16,
         initial_latent: Optional[mx.array] = None,
     ) -> LatentState:
         """

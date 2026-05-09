@@ -116,7 +116,7 @@ class TwoStageCFGConfig:
     tiling_config: Optional[TilingConfig] = None
 
     # Compute settings
-    dtype: mx.Dtype = mx.float32
+    dtype: mx.Dtype = mx.bfloat16
 
     # Audio configuration
     audio_enabled: bool = False

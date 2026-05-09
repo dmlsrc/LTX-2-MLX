@@ -66,7 +66,7 @@ class KeyframeInterpolationConfig:
     tiling_config: Optional[TilingConfig] = None
 
     # Compute settings
-    dtype: mx.Dtype = mx.float32
+    dtype: mx.Dtype = mx.bfloat16
 
     def __post_init__(self):
         if self.num_frames % 8 != 1:

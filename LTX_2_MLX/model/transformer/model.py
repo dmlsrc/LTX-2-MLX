@@ -92,7 +92,7 @@ class TransformerArgsPreprocessor:
         timestep_scale_multiplier: int = 1000,
         positional_embedding_theta: float = 10000.0,
         rope_type: LTXRopeType = LTXRopeType.SPLIT,  # LTX-2 distilled uses SPLIT
-        compute_dtype: mx.Dtype = mx.float32,
+        compute_dtype: mx.Dtype = mx.bfloat16,
         prompt_adaln: Optional[AdaLayerNormSingle] = None,
         use_double_precision: bool = False,
     ):
@@ -453,7 +453,7 @@ class LTXModel(nn.Module):
         use_middle_indices_grid: bool = True,
         # RoPE type: LTX-2 distilled weights use SPLIT
         rope_type: LTXRopeType = LTXRopeType.SPLIT,
-        compute_dtype: mx.Dtype = mx.float32,
+        compute_dtype: mx.Dtype = mx.bfloat16,
         low_memory: bool = False,
         fast_mode: bool = False,
         cross_attention_adaln: bool = False,

@@ -183,6 +183,12 @@ BF16 is the default and is usually the best balance of memory and quality:
 python scripts/generate.py "Your prompt" --dtype bfloat16
 ```
 
+Precision exceptions are intentionally narrow:
+
+- Scheduler/time/position math and tiled VAE blending keep FP32 where needed for stability.
+- Audio VAE decode and the plain vocoder follow `--dtype`.
+- LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
+
 ### Low Memory Mode
 
 Aggressive optimization for systems with <32GB RAM:
@@ -244,6 +250,30 @@ python scripts/generate.py "Your prompt"
 
 # Custom output path
 python scripts/generate.py "Your prompt" --output my_video.mp4
+```
+
+### Latent Sidecars
+
+Use `--save-latents` to write final video/audio latents as an NPZ sidecar next to
+the requested output. The sidecar uses the same basename as the MP4.
+
+```bash
+python scripts/generate.py "Your prompt" \
+    --generate-audio \
+    --save-latents \
+    --output outputs/sample.mp4
+```
+
+Decode-only validation can read that sidecar without rerunning denoising:
+
+```bash
+python scripts/decode_latent_debug.py \
+    --latent outputs/sample.npz \
+    --weights weights/ltx-2/ltx-2.3-22b-distilled-1.1.safetensors \
+    --modes auto \
+    --decode-audio \
+    --show-memory \
+    --output-dir outputs/decode_tests
 ```
 
 ## Troubleshooting
@@ -361,9 +391,10 @@ uv run scripts/download_weights.py --weights gemma
 
 ### Audio Generation
 
-- Works with `text-to-video` pipeline only (`--generate-audio`)
-- Two-stage and distilled pipelines do not support audio
-- Audio quality is experimental
+- `--generate-audio` uses the AudioVideo one-stage path from the default CLI flow.
+- `--model-variant distilled` is supported; `--pipeline distilled` is a separate video-only pipeline.
+- Two-stage pipeline modes do not support audio generation.
+- LTX-2.3 audio quality is usable in current smoke tests, but still benefits from decode-only checks with `--save-latents` when changing precision or tiling code.
 
 ## Current Status
 

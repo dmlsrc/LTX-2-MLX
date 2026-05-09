@@ -1,8 +1,15 @@
-# LTX-2.3 MLX Audio Issues — Investigation Log
+# LTX-2.3 MLX Audio Issues — Historical Investigation Log
 
 **Date:** April 5, 2026  
-**Current State:** Backup 0577 — speech works at ~60% clarity  
+**Status:** Historical notes. The current `main`/dtype-cleanup path has moved beyond this state.
 **Reference:** ComfyUI (PyTorch+MPS) produces clear speech with same model/prompts
+
+> **Current note (May 2026):** This file is retained as a debugging record, not
+> as the current audio status. Recent LTX-2.3 AudioVideo smoke tests produce
+> clear audio, and the old echo artifact was traced to audio latent positions
+> being downcast. Those positions intentionally stay float32. Audio VAE decode
+> now follows the requested compute dtype; the LTX-2.3 Vocoder+BWE path keeps a
+> scoped float32 island, matching the Lightricks BWE precision caution.
 
 ---
 

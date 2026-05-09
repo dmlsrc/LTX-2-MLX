@@ -272,7 +272,7 @@ class AudioDecoder(nn.Module):
         sample_rate: int = 16000,
         mel_hop_length: int = 160,
         is_causal: bool = True,
-        compute_dtype: mx.Dtype = mx.float32,
+        compute_dtype: mx.Dtype = mx.bfloat16,
     ):
         super().__init__()
         self.ch = ch
@@ -371,9 +371,9 @@ class AudioDecoder(nn.Module):
         Returns:
             Mel spectrogram (B, out_ch, frames*4, mel_bins)
         """
-        # Always decode in fp32 — audio decoder feeds vocoder which has 108
-        # sequential convolutions where bf16 accumulation errors compound
-        sample = sample.astype(mx.float32)
+        # Match Lightricks: audio VAE decoder follows the requested/model dtype.
+        # The fp32 precision island belongs to the LTX-2.3 BWE vocoder wrapper.
+        sample = sample.astype(self.compute_dtype)
 
         # Denormalize latents first (matching PyTorch)
         sample = self._denormalize_latents(sample)

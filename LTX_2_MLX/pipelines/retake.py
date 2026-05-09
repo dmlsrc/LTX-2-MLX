@@ -57,7 +57,7 @@ class RetakeConfig:
     cfg_scale: float = 3.0
     seed: int = 42
     tiling_config: Optional[TilingConfig] = None
-    dtype: mx.Dtype = mx.float16
+    dtype: mx.Dtype = mx.bfloat16
 
     def __post_init__(self):
         if self.start_time >= self.end_time:

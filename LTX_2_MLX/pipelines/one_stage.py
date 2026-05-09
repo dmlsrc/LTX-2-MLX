@@ -229,6 +229,7 @@ class OneStagePipeline:
 
         # Convert mel spectrogram to waveform (vocoder takes log-mel directly)
         waveform = self.vocoder(mel_spectrogram)
+        waveform = waveform.astype(mx.float32)
         mx.eval(waveform)
 
         return waveform

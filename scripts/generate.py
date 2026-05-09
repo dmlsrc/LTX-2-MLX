@@ -334,7 +334,7 @@ def _read_checkpoint_config(checkpoint_path: str) -> dict:
 
 def create_vocoder_for_checkpoint(
     checkpoint_path: str,
-    compute_dtype: mx.Dtype = mx.float32,
+    compute_dtype: mx.Dtype = mx.bfloat16,
 ) -> tuple:
     """Create the appropriate vocoder (plain or BWE) based on checkpoint config.
 
@@ -399,6 +399,19 @@ def create_vocoder_for_checkpoint(
         hop_length=bwe_cfg.get("hop_length", 240),
     )
     return vocoder_with_bwe, True
+
+
+def print_audio_dtype_summary(compute_dtype: mx.Dtype, is_bwe: bool) -> None:
+    """Print the actual audio decode precision policy."""
+    dtype_name = compute_dtype_name(compute_dtype)
+    print(f"  Audio VAE decoder dtype: {dtype_name}")
+    if is_bwe:
+        print(
+            "  Vocoder+BWE dtype: FP32 island "
+            "(matches Lightricks BWE autocast caution)"
+        )
+    else:
+        print(f"  Vocoder dtype: {dtype_name}")
 
 
 def detect_model_version(checkpoint_path: str) -> str:
@@ -967,7 +980,7 @@ def load_vae_decoder(weights_path: str) -> VideoDecoder:
 def load_transformer(
     weights_path: str,
     num_layers: int = 48,
-    compute_dtype: mx.Dtype = mx.float32,
+    compute_dtype: mx.Dtype = mx.bfloat16,
     low_memory: bool = False,
     fast_mode: bool = False,
 ) -> LTXModel:
@@ -1011,7 +1024,7 @@ def load_transformer(
 def load_av_transformer(
     weights_path: str,
     num_layers: int = 48,
-    compute_dtype: mx.Dtype = mx.float32,
+    compute_dtype: mx.Dtype = mx.bfloat16,
     low_memory: bool = False,
     caption_channels: int | None = 3840,
     cross_attention_adaln: bool = False,
@@ -1525,9 +1538,17 @@ def generate_video(
         else:
             print("  Skipping weights load (placeholder)")
 
-        # DEBUG: Check if weights are loaded
-        print(f"DEBUG: initial_conv_weight stats - mean: {float(mx.mean(spatial_upscaler.initial_conv_weight)):.6f}, std: {float(mx.std(spatial_upscaler.initial_conv_weight.astype(mx.float32))):.6f}")
-        print(f"DEBUG: final_conv_weight stats - mean: {float(mx.mean(spatial_upscaler.final_conv_weight)):.6f}, std: {float(mx.std(spatial_upscaler.final_conv_weight.astype(mx.float32))):.6f}")
+        print("  Spatial upscaler weight stats:")
+        print(
+            "    initial_conv: "
+            f"mean={float(mx.mean(spatial_upscaler.initial_conv_weight)):.6f}, "
+            f"std={float(mx.std(spatial_upscaler.initial_conv_weight.astype(mx.float32))):.6f}"
+        )
+        print(
+            "    final_conv:   "
+            f"mean={float(mx.mean(spatial_upscaler.final_conv_weight)):.6f}, "
+            f"std={float(mx.std(spatial_upscaler.final_conv_weight.astype(mx.float32))):.6f}"
+        )
 
         # Load video encoder
         print("[3.5/5] Loading VAE encoder...")
@@ -1548,6 +1569,7 @@ def generate_video(
                 load_audio_decoder_weights(audio_decoder, weights_path)
 
             print("  Loading Vocoder...")
+            is_bwe = False
             if weights_path:
                 vocoder, is_bwe = create_vocoder_for_checkpoint(weights_path, compute_dtype)
                 if is_bwe:
@@ -1557,6 +1579,7 @@ def generate_video(
                     load_vocoder_weights(vocoder, weights_path)
             else:
                 vocoder = Vocoder(compute_dtype=compute_dtype)
+            print_audio_dtype_summary(compute_dtype, is_bwe)
             audio_sample_rate = vocoder.output_sample_rate if vocoder else 24000
 
         # Create two-stage pipeline
@@ -1875,6 +1898,7 @@ def generate_video(
                 load_audio_decoder_weights(audio_decoder, weights_path)
 
             print("  Loading Vocoder...")
+            is_bwe = False
             if weights_path:
                 vocoder, is_bwe = create_vocoder_for_checkpoint(weights_path, compute_dtype)
                 if is_bwe:
@@ -1884,6 +1908,7 @@ def generate_video(
                     load_vocoder_weights(vocoder, weights_path)
             else:
                 vocoder = Vocoder(compute_dtype=compute_dtype)
+            print_audio_dtype_summary(compute_dtype, is_bwe)
             audio_sample_rate = vocoder.output_sample_rate if vocoder else 24000
 
         # Create one-stage pipeline with audio support

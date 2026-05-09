@@ -62,7 +62,7 @@ class AudioEncoder(nn.Module):
         sample_rate: int = 16000,
         mel_hop_length: int = 160,
         is_causal: bool = True,
-        compute_dtype: mx.Dtype = mx.float32,
+        compute_dtype: mx.Dtype = mx.bfloat16,
     ):
         super().__init__()
         self.ch = ch

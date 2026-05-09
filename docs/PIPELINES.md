@@ -122,6 +122,9 @@ video = pipeline(keyframes=keyframes, ...)
 | `ic_lora` | Medium | High | 512p+ | Yes | Controlled gen |
 | `keyframe_interpolation` | Medium | High | 512p+ | Yes | Image animation |
 
+`--generate-audio` uses the AudioVideo one-stage path in the default CLI flow.
+That is separate from `--pipeline distilled`, which remains video-only.
+
 ## Recommended Settings by Use Case
 
 ### Fast Previews
@@ -155,6 +158,8 @@ python scripts/generate.py "Your prompt" \
 | `--height` | Video height (divisible by 32) | 480 |
 | `--width` | Video width (divisible by 32) | 704 |
 | `--frames` | Number of frames (N*8+1) | 97 |
+| `--duration` | Duration in seconds; overrides `--frames` and rounds up to a valid frame count | None |
+| `--fps` | Generation and output frame rate | 24 |
 | `--steps` | Denoising steps | 8 |
 | `--steps-stage1` | Stage 1 steps (two-stage pipeline) | 15 |
 | `--steps-stage2` | Stage 2 steps (two-stage pipeline) | 3 |
@@ -170,10 +175,19 @@ python scripts/generate.py "Your prompt" \
 | `--upscale-temporal` | Apply 2x temporal upscaling (legacy) | False |
 | `--generate-audio` | Generate synchronized audio (experimental) | False |
 | `--low-memory` | Aggressive memory optimization (~30% less) | False |
+| `--save-latents` | Save final video/audio latents as an NPZ sidecar next to the output | False |
 | `--skip-vae` | Skip VAE decoding (output latent visualization) | False |
 | `--no-gemma` | Use dummy embeddings (testing only) | False |
 | `--embedding` | Path to pre-computed text embedding (.npz) | None |
 | `--gemma-path` | Path to Gemma 3 weights | weights/gemma-3-12b |
+
+## Precision Policy
+
+- BF16 is the default compute dtype for model execution.
+- `--dtype float16` and `--dtype float32` are available for experiments.
+- Scheduler/time/position math and tiled VAE blending keep FP32 where needed for stability.
+- Audio VAE decode and the plain vocoder follow the configured compute dtype.
+- LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
 
 ## Frame Count
 

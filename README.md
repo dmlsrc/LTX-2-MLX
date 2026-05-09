@@ -112,6 +112,8 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 ## Optimization Tips
 
 - **Use default BF16 compute** - override with `--dtype float16` or `--dtype float32` only for experiments
+- **Audio follows compute dtype where safe** - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island matching Lightricks' precision caution
+- **Save final latents for decode-only tests** - add `--save-latents` to write an NPZ sidecar next to the requested output
 - **Use `--pipeline distilled`** - Fastest inference (8 steps)
 - **Use `--low-memory`** - For systems with <32GB RAM
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing

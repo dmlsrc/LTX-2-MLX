@@ -377,7 +377,7 @@ class SimpleVideoDecoder(nn.Module):
         decoder_blocks: Optional[List] = None,
         base_channels: int = 128,
         timestep_conditioning: bool = True,
-        compute_dtype: mx.Dtype = mx.float32,
+        compute_dtype: mx.Dtype = mx.bfloat16,
     ):
         super().__init__()
         self.compute_dtype = compute_dtype

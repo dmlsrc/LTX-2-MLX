@@ -31,7 +31,7 @@ class GenerationConfig:
 
     # Model configuration
     use_distilled: bool = False
-    precision: str = "float16"  # or "float32", "bfloat16"
+    precision: str = "bfloat16"  # or "float32", "float16"
 
     def __post_init__(self):
         # Validate frame count

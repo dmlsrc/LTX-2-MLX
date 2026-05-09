@@ -278,7 +278,7 @@ class SimpleVideoEncoder(nn.Module):
     Total compression: 1:192 (32x spatial from 8x d2s + 4x patchify, 8x temporal)
     """
 
-    def __init__(self, compute_dtype: mx.Dtype = mx.float32):
+    def __init__(self, compute_dtype: mx.Dtype = mx.bfloat16):
         super().__init__()
         self.compute_dtype = compute_dtype
         self.patch_size = 4
