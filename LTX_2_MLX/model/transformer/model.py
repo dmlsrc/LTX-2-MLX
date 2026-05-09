@@ -479,7 +479,7 @@ class LTXModel(nn.Module):
                 PyTorch default is 1, giving av_ca_factor = 1/1000.
             use_middle_indices_grid: Use middle of position bounds for RoPE.
             rope_type: Type of RoPE. LTX-2 distilled uses SPLIT.
-            compute_dtype: Dtype for computation (float32 or float16).
+            compute_dtype: Dtype for computation.
             low_memory: If True, use aggressive memory optimization (eval every 4 layers).
             fast_mode: If True, skip intermediate evals for faster inference (uses more memory).
         """
@@ -749,7 +749,7 @@ class LTXModel(nn.Module):
         """Process video output."""
         scale_shift_values = (
             self.scale_shift_table[None, None, :, :] + embedded_timestep[:, :, None, :]
-        )
+        ).astype(x.dtype)
         shift = scale_shift_values[:, :, 0, :]
         scale = scale_shift_values[:, :, 1, :]
         x = self.norm_out(x)
@@ -765,7 +765,7 @@ class LTXModel(nn.Module):
         """Process audio output."""
         scale_shift_values = (
             self.audio_scale_shift_table[None, None, :, :] + embedded_timestep[:, :, None, :]
-        )
+        ).astype(x.dtype)
         shift = scale_shift_values[:, :, 0, :]
         scale = scale_shift_values[:, :, 1, :]
         x = self.audio_norm_out(x)
@@ -830,11 +830,11 @@ class LTXModel(nn.Module):
                 # Create empty audio modality (video-only inference on AV model)
                 batch_size = video_args.x.shape[0] if video_args else 1
                 audio = Modality(
-                    latent=mx.zeros((batch_size, 0, self.audio_inner_dim)),
-                    context=mx.zeros((batch_size, 0, self.audio_inner_dim)),
+                    latent=mx.zeros((batch_size, 0, self.audio_inner_dim), dtype=self.compute_dtype),
+                    context=mx.zeros((batch_size, 0, self.audio_inner_dim), dtype=self.compute_dtype),
                     context_mask=None,
-                    timesteps=mx.zeros((batch_size,)),
-                    positions=mx.zeros((batch_size, 3, 0)),
+                    timesteps=mx.zeros((batch_size,), dtype=self.compute_dtype),
+                    positions=mx.zeros((batch_size, 3, 0), dtype=self.compute_dtype),
                     enabled=False,
                 )
             # Only preprocess if has tokens
@@ -843,10 +843,16 @@ class LTXModel(nn.Module):
             else:
                  # Minimal dummy args (should be handled by block enabled check, but safe fallback)
                 audio_args = TransformerArgs(
-                    x=mx.zeros((video_args.x.shape[0] if video_args else 1, 0, self.audio_inner_dim)),
-                    context=mx.zeros((1, 0, self.audio_inner_dim)),
-                    timesteps=mx.zeros((1, 0, 6, self.audio_inner_dim)),
-                    positional_embeddings=(mx.zeros((1,)), mx.zeros((1,))),
+                    x=mx.zeros(
+                        (video_args.x.shape[0] if video_args else 1, 0, self.audio_inner_dim),
+                        dtype=self.compute_dtype,
+                    ),
+                    context=mx.zeros((1, 0, self.audio_inner_dim), dtype=self.compute_dtype),
+                    timesteps=mx.zeros((1, 0, 6, self.audio_inner_dim), dtype=self.compute_dtype),
+                    positional_embeddings=(
+                        mx.zeros((1,), dtype=self.compute_dtype),
+                        mx.zeros((1,), dtype=self.compute_dtype),
+                    ),
                     enabled=False,
                 )
 
@@ -859,18 +865,17 @@ class LTXModel(nn.Module):
         video_out = None
         if self.model_type.is_video_enabled():
             video_out = self._process_video_output(video_args.x, video_args.embedded_timestep)
-            if self.compute_dtype != mx.float32:
-                video_out = video_out.astype(mx.float32)
 
         audio_out = None
         current_batch_size = video_out.shape[0] if video_out is not None else (audio.latent.shape[0] if audio else 1)
         if self.model_type.is_audio_enabled():
             if audio_args.enabled and audio_args.x.size > 0:
                 audio_out = self._process_audio_output(audio_args.x, audio_args.embedded_timestep)
-                if self.compute_dtype != mx.float32:
-                    audio_out = audio_out.astype(mx.float32)
             else:
-                audio_out = mx.zeros((current_batch_size, 0, self.AUDIO_OUT_CHANNELS))
+                audio_out = mx.zeros(
+                    (current_batch_size, 0, self.AUDIO_OUT_CHANNELS),
+                    dtype=self.compute_dtype,
+                )
 
         # --- Return Logic ---
         if self.model_type == LTXModelType.VideoOnly:

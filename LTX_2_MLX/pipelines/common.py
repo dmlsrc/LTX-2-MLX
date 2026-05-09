@@ -185,6 +185,7 @@ def post_process_latent(
     # Expand mask for broadcasting if needed: (B, T) -> (B, T, 1)
     if denoise_mask.ndim == 2 and denoised.ndim == 3:
         denoise_mask = mx.expand_dims(denoise_mask, axis=-1)
+    denoise_mask = denoise_mask.astype(denoised.dtype)
     return (denoised * denoise_mask + clean_latent * (1 - denoise_mask)).astype(
         denoised.dtype
     )
