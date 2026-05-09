@@ -14,6 +14,23 @@ import mlx.core as mx
 from ..loader import LoRAConfig
 
 
+SUPPORTED_COMPUTE_DTYPES = {
+    "bfloat16": mx.bfloat16,
+    "float16": mx.float16,
+    "float32": mx.float32,
+}
+
+
+def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
+    if not isinstance(dtype_name, str):
+        return dtype_name
+    try:
+        return SUPPORTED_COMPUTE_DTYPES[dtype_name.lower()]
+    except KeyError as exc:
+        valid = ", ".join(sorted(SUPPORTED_COMPUTE_DTYPES))
+        raise ValueError(f"Unsupported compute dtype '{dtype_name}'. Valid values: {valid}") from exc
+
+
 @dataclass
 class ModelLedger:
     """
@@ -28,7 +45,7 @@ class ModelLedger:
         spatial_upscaler_path: Path to spatial upscaler weights (optional).
         temporal_upscaler_path: Path to temporal upscaler weights (optional).
         loras: List of LoRA configurations to apply to transformer.
-        compute_dtype: Computation dtype (float32 or float16).
+        compute_dtype: Computation dtype.
     """
 
     checkpoint_path: Optional[str] = None
@@ -36,7 +53,7 @@ class ModelLedger:
     spatial_upscaler_path: Optional[str] = None
     temporal_upscaler_path: Optional[str] = None
     loras: List[LoRAConfig] = field(default_factory=list)
-    compute_dtype: mx.Dtype = mx.float32
+    compute_dtype: mx.Dtype = mx.bfloat16
 
     # Cached model instances
     _transformer: Optional[Any] = field(default=None, repr=False)
@@ -307,7 +324,7 @@ def create_model_ledger(
     spatial_upscaler_path: Optional[str] = None,
     temporal_upscaler_path: Optional[str] = None,
     loras: Optional[List[LoRAConfig]] = None,
-    use_fp16: bool = False,
+    dtype: str | mx.Dtype = "bfloat16",
 ) -> ModelLedger:
     """
     Create a ModelLedger with the given configuration.
@@ -318,18 +335,16 @@ def create_model_ledger(
         spatial_upscaler_path: Path to spatial upscaler (optional).
         temporal_upscaler_path: Path to temporal upscaler (optional).
         loras: List of LoRA configs (optional).
-        use_fp16: Use FP16 computation.
+        dtype: Compute dtype name.
 
     Returns:
         Configured ModelLedger instance.
     """
-    compute_dtype = mx.float16 if use_fp16 else mx.float32
-
     return ModelLedger(
         checkpoint_path=checkpoint_path,
         gemma_path=gemma_path,
         spatial_upscaler_path=spatial_upscaler_path,
         temporal_upscaler_path=temporal_upscaler_path,
         loras=loras or [],
-        compute_dtype=compute_dtype,
+        compute_dtype=parse_compute_dtype(dtype),
     )

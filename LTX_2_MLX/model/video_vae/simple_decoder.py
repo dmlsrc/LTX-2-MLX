@@ -2,6 +2,7 @@
 
 from typing import Optional, List, Tuple, Any
 
+import gc
 import mlx.core as mx
 import mlx.nn as nn
 import math
@@ -214,16 +215,18 @@ class ResBlock3d(nn.Module):
             time_emb = time_emb.reshape(b, 4, self.channels)
             # Add to table: (4, C) + (B, 4, C) -> (B, 4, C)
             ss_table = self.scale_shift_table[None, :, :] + time_emb
+            ss_table = ss_table.astype(x.dtype)
             # Reshape for broadcasting: (B, 4, C) -> extract rows
             shift1 = ss_table[:, 0, :][:, :, None, None, None]  # (B, C, 1, 1, 1)
             scale1 = 1 + ss_table[:, 1, :][:, :, None, None, None]
             shift2 = ss_table[:, 2, :][:, :, None, None, None]
             scale2 = 1 + ss_table[:, 3, :][:, :, None, None, None]
         else:
-            shift1 = self.scale_shift_table[0][None, :, None, None, None]
-            scale1 = 1 + self.scale_shift_table[1][None, :, None, None, None]
-            shift2 = self.scale_shift_table[2][None, :, None, None, None]
-            scale2 = 1 + self.scale_shift_table[3][None, :, None, None, None]
+            ss_table = self.scale_shift_table.astype(x.dtype)
+            shift1 = ss_table[0][None, :, None, None, None]
+            scale1 = 1 + ss_table[1][None, :, None, None, None]
+            shift2 = ss_table[2][None, :, None, None, None]
+            scale2 = 1 + ss_table[3][None, :, None, None, None]
 
         # Block 1: norm -> scale/shift -> activation -> conv1
         x = _pixel_norm(x)
@@ -491,11 +494,15 @@ class SimpleVideoDecoder(nn.Module):
         # Denormalize latent using per-channel statistics
         x = latent * self.std_of_means[None, :, None, None, None]
         x = x + self.mean_of_means[None, :, None, None, None]
+        if self.compute_dtype != mx.float32:
+            x = x.astype(self.compute_dtype)
 
         # Noise injection when timestep conditioning is enabled
         if self.timestep_conditioning and timestep is not None:
-            noise = mx.random.normal(x.shape) * self.decode_noise_scale
+            noise = mx.random.normal(x.shape).astype(x.dtype) * self.decode_noise_scale
             x = noise + (1.0 - self.decode_noise_scale) * x
+            if self.compute_dtype != mx.float32:
+                x = x.astype(self.compute_dtype)
 
         # Conv in
         x = self.conv_in(x, causal=causal)
@@ -532,11 +539,13 @@ class SimpleVideoDecoder(nn.Module):
             time_emb = self.last_time_embedder(t_emb)
             time_emb = time_emb.reshape(batch_size, 2, self.final_channels)
             ss_table = self.last_scale_shift_table[None, :, :] + time_emb
+            ss_table = ss_table.astype(x.dtype)
             shift = ss_table[:, 0, :][:, :, None, None, None]
             scale = 1 + ss_table[:, 1, :][:, :, None, None, None]
         else:
-            shift = self.last_scale_shift_table[0][None, :, None, None, None]
-            scale = 1 + self.last_scale_shift_table[1][None, :, None, None, None]
+            ss_table = self.last_scale_shift_table.astype(x.dtype)
+            shift = ss_table[0][None, :, None, None, None]
+            scale = 1 + ss_table[1][None, :, None, None, None]
 
         x = x * scale + shift
         x = nn.silu(x)
@@ -555,10 +564,6 @@ class SimpleVideoDecoder(nn.Module):
             pbar.update(1)
             pbar.set_description("unpatchify done")
             pbar.close()
-
-        # Cast output back to float32 for video export
-        if self.compute_dtype != mx.float32:
-            x = x.astype(mx.float32)
 
         return x
 
@@ -660,6 +665,10 @@ def load_vae_decoder_weights(decoder: SimpleVideoDecoder, weights_path: str) -> 
                     if val is not None:
                         layer = getattr(decoder.last_time_embedder, layer_name)
                         setattr(layer, suffix, val)
+
+    del weights
+    gc.collect()
+    mx.clear_cache()
 
     print(f"  Loaded {loaded_count} weight tensors")
 

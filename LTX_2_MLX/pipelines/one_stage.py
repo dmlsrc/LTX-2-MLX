@@ -10,10 +10,12 @@ This is the most common pipeline for high-quality video generation.
 """
 
 import gc
+import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 import mlx.core as mx
+import numpy as np
 
 from .common import (
     ImageCondition,
@@ -74,19 +76,13 @@ class OneStageCFGConfig:
     tiling_config: Optional[TilingConfig] = None
 
     def _get_tiling_config(self) -> Optional[TilingConfig]:
-        """Return tiling config, auto-enabling for larger generations."""
+        """Return tiling config, auto-enabling."""
         if self.tiling_config is not None:
             return self.tiling_config
-        # Auto-enable tiling for videos with many frames or high resolution
-        # to prevent Metal GPU watchdog timeouts
-        latent_frames = (self.num_frames - 1) // 8 + 1
-        latent_pixels = latent_frames * (self.height // 32) * (self.width // 32)
-        if latent_pixels > 4000:  # ~121 frames at 768x512 = 5,760
-            return TilingConfig.default()
-        return None
+        return TilingConfig.auto(self.height, self.width, self.num_frames)
 
     # Compute settings
-    dtype: mx.Dtype = mx.float32
+    dtype: mx.Dtype = mx.bfloat16
 
     # Audio configuration
     audio_enabled: bool = False
@@ -160,6 +156,37 @@ class OneStagePipeline:
         self.audio_patchifier = AudioPatchifier(patch_size=1)
         self.diffusion_step = EulerDiffusionStep()
         self.scheduler = LTX2Scheduler()
+
+    @staticmethod
+    def _latent_to_numpy(latent: mx.array) -> np.ndarray:
+        """Convert an MLX latent to a NumPy array suitable for npz storage."""
+        mx.eval(latent)
+        try:
+            return np.array(latent)
+        except (TypeError, RuntimeError):
+            return np.array(latent.astype(mx.float32))
+
+    @classmethod
+    def _save_final_latents(
+        cls,
+        path: str,
+        video_latent: mx.array,
+        audio_latent: Optional[mx.array] = None,
+    ) -> None:
+        """Save final video/audio latents as a sidecar npz file."""
+        arrays = {
+            "final_video_latent": cls._latent_to_numpy(video_latent),
+            "final_video_latent_mlx_dtype": str(video_latent.dtype),
+        }
+        if audio_latent is not None:
+            arrays["final_audio_latent"] = cls._latent_to_numpy(audio_latent)
+            arrays["final_audio_latent_mlx_dtype"] = str(audio_latent.dtype)
+
+        output_dir = os.path.dirname(path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        np.savez(path, **arrays)
+        print(f"  Saved final latents: {path}")
 
     def _create_video_tools(
         self,
@@ -748,6 +775,7 @@ class OneStagePipeline:
         temporal_upscaler=None,
         cross_attn_scale: float = 1.0,
         cross_attn_start_block: int = 40,
+        latent_save_path: Optional[str] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate video (and optionally audio) using single-stage CFG pipeline.
@@ -762,6 +790,7 @@ class OneStagePipeline:
                 Required when config.audio_enabled is True.
             negative_audio_encoding: Encoded negative prompt for audio [B, T, D].
                 Required when config.audio_enabled is True.
+            latent_save_path: Optional npz sidecar path for final video/audio latents.
 
         Returns:
             Tuple of (video, audio) where:
@@ -973,6 +1002,7 @@ class OneStagePipeline:
         video_state = video_tools.unpatchify(video_state)
 
         final_video_latent = video_state.latent
+        final_audio_latent = None
 
         # Apply temporal upscaler (2x frame interpolation) if provided
         if temporal_upscaler is not None:
@@ -992,28 +1022,44 @@ class OneStagePipeline:
             output_frames = final_video_latent.shape[2]
             print(f"  Temporal upscale complete: {output_frames} latent frames")
 
+        # Prepare final audio latent before unloading transformer and decoding.
+        if config.audio_enabled and audio_state is not None and audio_tools is not None:
+            audio_state = audio_tools.clear_conditioning(audio_state)
+            audio_state = audio_tools.unpatchify(audio_state)
+            final_audio_latent = audio_state.latent
+
         # Unload transformer before VAE decode to free memory
         del self.transformer
         self.transformer = None
         gc.collect()
         mx.clear_cache()
 
+        if latent_save_path is not None:
+            self._save_final_latents(
+                latent_save_path,
+                video_latent=final_video_latent,
+                audio_latent=final_audio_latent,
+            )
+            gc.collect()
+            mx.clear_cache()
+
         # Decode video (auto-tile for large generations to prevent Metal watchdog timeout)
         effective_tiling = config._get_tiling_config()
         if effective_tiling:
             print(f"  Using tiled VAE decoding (preventing GPU watchdog timeout)")
-            # decode_tiled returns an iterator/generator — collect and concatenate chunks
-            video_chunks = list(decode_tiled(final_video_latent, self.video_decoder, effective_tiling))
-            video = mx.concatenate(video_chunks, axis=2) if len(video_chunks) > 1 else video_chunks[0]
+            video = None
+            for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                mx.eval(video)
+                del chunk
+                gc.collect()
+                mx.clear_cache()
         else:
             video = decode_latent(final_video_latent, self.video_decoder)
 
         # Decode audio if enabled
         audio_waveform = None
-        if config.audio_enabled and audio_state is not None and audio_tools is not None:
-            audio_state = audio_tools.clear_conditioning(audio_state)
-            audio_state = audio_tools.unpatchify(audio_state)
-            final_audio_latent = audio_state.latent
+        if final_audio_latent is not None:
             audio_waveform = self._decode_audio(final_audio_latent)
 
         return video, audio_waveform

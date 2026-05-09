@@ -6,6 +6,8 @@ import gc
 import os
 import math
 import sys
+import threading
+import time
 from pathlib import Path
 
 import mlx.core as mx
@@ -47,6 +49,183 @@ from LTX_2_MLX.model.video_vae.simple_decoder import (
     decode_latent,
 )
 from LTX_2_MLX.core_utils import to_velocity
+
+
+SUPPORTED_COMPUTE_DTYPES = {
+    "bfloat16": mx.bfloat16,
+    "float16": mx.float16,
+    "float32": mx.float32,
+}
+
+
+def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
+    """Resolve a user-facing dtype name to an MLX dtype."""
+    if not isinstance(dtype_name, str):
+        return dtype_name
+    try:
+        return SUPPORTED_COMPUTE_DTYPES[dtype_name.lower()]
+    except KeyError as exc:
+        valid = ", ".join(sorted(SUPPORTED_COMPUTE_DTYPES))
+        raise ValueError(f"Unsupported compute dtype '{dtype_name}'. Valid values: {valid}") from exc
+
+
+def compute_dtype_name(dtype: mx.Dtype) -> str:
+    if dtype == mx.bfloat16:
+        return "BF16"
+    if dtype == mx.float16:
+        return "FP16"
+    if dtype == mx.float32:
+        return "FP32"
+    return str(dtype)
+
+
+def latent_sidecar_path(output_path: str) -> str:
+    """Use the requested output stem for the final-latents sidecar."""
+    return os.path.splitext(output_path)[0] + ".npz"
+
+
+def format_duration(seconds: float) -> str:
+    if seconds >= 60:
+        minutes = int(seconds // 60)
+        return f"{minutes}m {seconds - minutes * 60:04.1f}s"
+    return f"{seconds:.2f}s"
+
+
+def format_progress_duration(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    minutes = int(seconds // 60)
+    whole_seconds = int(round(seconds - minutes * 60))
+    if whole_seconds == 60:
+        minutes += 1
+        whole_seconds = 0
+    return f"{minutes}m {whole_seconds:02d}s"
+
+
+class RunTimings:
+    def __init__(self):
+        self.started_at = time.perf_counter()
+        self.last_mark = self.started_at
+        self.sections: list[tuple[str, float]] = []
+
+    def mark(self, label: str) -> None:
+        now = time.perf_counter()
+        self.sections.append((label, now - self.last_mark))
+        self.last_mark = now
+
+    def print_summary(self) -> None:
+        total = time.perf_counter() - self.started_at
+        if not self.sections:
+            return
+
+        width = max(len(label) for label, _ in self.sections + [("total", total)])
+        print("\nTiming summary:")
+        for label, seconds in self.sections:
+            print(f"  {label:<{width}}  {format_duration(seconds)}")
+        print(f"  {'total':<{width}}  {format_duration(total)}")
+
+
+class DenoiseProgress:
+    def __init__(self, label: str = "Denoising", width: int = 28, total: int | None = None):
+        self.label = label
+        self.width = width
+        self.started_at = time.perf_counter()
+        self.step = 0
+        self.total = total or 0
+        self.spinner_index = 0
+        encoding = (sys.stdout.encoding or "").lower()
+        self.spinner = "◐◓◑◒" if "utf" in encoding else "|/-\\"
+        self.use_color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._rendered = False
+        self._finished = False
+        self._newline_printed = False
+        self._last_line_len = 0
+
+    def _color(self, code: str) -> str:
+        return f"\033[{code}m" if self.use_color else ""
+
+    def start(self) -> None:
+        self.started_at = time.perf_counter()
+        self._render()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def _spin(self) -> None:
+        while not self._stop.wait(0.12):
+            self._render()
+
+    def update(self, step: int, total: int) -> None:
+        with self._lock:
+            if self._finished:
+                return
+            self.total = total
+            self.step = max(0, min(step, total))
+        self._render()
+
+    def _render(self, final: bool = False) -> None:
+        with self._lock:
+            if self._finished and not final:
+                return
+            step = self.step
+            total = self.total
+            spinner = self.spinner[self.spinner_index % len(self.spinner)]
+            self.spinner_index += 1
+
+        elapsed = time.perf_counter() - self.started_at
+        progress = step / total if total else 1.0
+        filled = min(self.width, int(round(progress * self.width)))
+        bar = "#" * filled + "-" * (self.width - filled)
+        eta = elapsed * (total - step) / step if step > 0 and total else 0.0
+        rate = step / elapsed if elapsed > 0 else 0.0
+        if step == 0:
+            pace = "warming up"
+        else:
+            seconds_per_step = elapsed / step
+            pace = f"avg {seconds_per_step:.1f}s/it" if seconds_per_step >= 1.0 else f"avg {rate:.2f} it/s"
+        cyan = self._color("36")
+        green = self._color("32")
+        yellow = self._color("33")
+        reset = self._color("0")
+
+        line = (
+            f"\r  {cyan}{spinner} {self.label}{reset} "
+            f"{green}[{bar}]{reset} {step:>3}/{total:<3} "
+            f"{progress * 100:5.1f}% "
+            f"| ELAP {format_progress_duration(elapsed)} "
+            f"| ETA {format_progress_duration(eta)} "
+            f"| {yellow}{pace}{reset}"
+        )
+        if sys.stdout.isatty():
+            print("\r\033[2K" + line[1:], end="", flush=True)
+        else:
+            padding = " " * max(0, self._last_line_len - len(line))
+            print(line + padding, end="", flush=True)
+        self._last_line_len = len(line)
+        self._rendered = True
+
+    def finish(self) -> None:
+        self._stop.set()
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and self._thread is not threading.current_thread()
+        ):
+            self._thread.join(timeout=1.0)
+
+        with self._lock:
+            already_finished = self._finished
+            self._finished = True
+            needs_newline = self._rendered and not self._newline_printed
+
+        if not already_finished:
+            self._render(final=True)
+
+        if needs_newline:
+            print(flush=True)
+            with self._lock:
+                self._newline_printed = True
 
 
 def batched_cfg_forward(
@@ -801,10 +980,9 @@ def load_transformer(
         low_memory: If True, use aggressive memory optimization.
         fast_mode: If True, skip intermediate evaluations.
     """
-    dtype_name = "FP16" if compute_dtype == mx.float16 else ("BF16" if compute_dtype == mx.bfloat16 else "FP32")
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
-    print(f"Loading transformer ({dtype_name}{mem_str}{fast_str})...")
+    print(f"Loading transformer ({compute_dtype_name(compute_dtype)}{mem_str}{fast_str})...")
 
     model = LTXModel(
         model_type=LTXModelType.VideoOnly,
@@ -847,10 +1025,9 @@ def load_av_transformer(
         cross_attention_adaln: V2 cross-attention AdaLN (prompt_adaln_single).
         apply_gated_attention: V2 per-head gating in attention.
     """
-    dtype_name = "FP16" if compute_dtype == mx.float16 else ("BF16" if compute_dtype == mx.bfloat16 else "FP32")
     mem_str = " (low memory)" if low_memory else ""
     v2_str = " (V2)" if cross_attention_adaln else ""
-    print(f"Loading AudioVideo transformer ({dtype_name}{mem_str}{v2_str})...")
+    print(f"Loading AudioVideo transformer ({compute_dtype_name(compute_dtype)}{mem_str}{v2_str})...")
 
     model = LTXAVModel(
         model_type=LTXModelType.AudioVideo,
@@ -972,7 +1149,7 @@ def generate_video(
     embedding_path: str | None = None,
     gemma_path: str = "weights/gemma-3-12b",
     use_gemma: bool = True,
-    use_fp16: bool = True,  # FP16 by default for memory efficiency
+    dtype: str | mx.Dtype = "bfloat16",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
     spatial_upscaler_weights: str = None,
@@ -1005,6 +1182,7 @@ def generate_video(
     canny_high: int = 200,
     control_strength: float = 0.95,
     save_control: bool = False,
+    save_latents: bool = False,
     ge_gamma: float = 0.0,
     output_fps: float = NATIVE_FPS,
     output_speed: float = 1.0,
@@ -1023,8 +1201,8 @@ def generate_video(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    # Determine compute dtype - FP16 by default for memory efficiency (~50% reduction)
-    compute_dtype = mx.float16 if use_fp16 else mx.float32
+    compute_dtype = parse_compute_dtype(dtype)
+    timings = RunTimings()
 
     print(f"\n{'='*50}")
     print(f"LTX-2 MLX Video Generation")
@@ -1033,8 +1211,7 @@ def generate_video(
     print(f"Resolution: {width}x{height}, {num_frames} frames")
     print(f"Steps: {num_steps}, CFG: {cfg_scale}, Seed: {seed}")
     print(f"Model variant: {model_variant}")
-    if use_fp16:
-        print(f"Compute dtype: FP16 (memory optimized)")
+    print(f"Compute dtype: {compute_dtype_name(compute_dtype)}")
     if skip_vae:
         print(f"VAE decoding: SKIPPED")
     if upscale_spatial:
@@ -1043,6 +1220,8 @@ def generate_video(
         print(f"Temporal upscaling: 2x (frames will be ~{num_frames*2})")
     if generate_audio:
         print(f"Audio generation: ENABLED (stereo 24kHz)")
+    if save_latents:
+        print(f"Final latents: ENABLED")
     if low_memory:
         print(f"Low memory mode: ENABLED (sequential CFG, aggressive eval)")
     if fast_mode:
@@ -1082,6 +1261,7 @@ def generate_video(
         print("\n[0/5] Enhancing prompt...")
         prompt = enhance_prompt(prompt, gemma_path)
         print(f"  Using enhanced prompt for generation")
+    timings.mark("setup")
 
     # Get text encoding
     # Initialize audio encodings (used only when generate_audio=True or V2.3)
@@ -1168,6 +1348,7 @@ def generate_video(
         if use_av_encoder:
             null_audio_encoding = null_encoding
         print("  Using DUMMY encoding (test mode - output will be random)")
+    timings.mark("prompt encoding")
 
     # Load model
     # V2.3 always uses the AV transformer (dual video/audio cross-attention)
@@ -1201,6 +1382,7 @@ def generate_video(
         else:
             model = None
             print("  Skipping model load (placeholder mode)")
+    timings.mark("transformer load")
 
     # Apply LoRA if provided
     if lora_path and model is not None:
@@ -1265,6 +1447,7 @@ def generate_video(
     if stg_scale > 0:
         stg_guider = STGGuider(scale=stg_scale)
         print(f"  STG guidance enabled (scale={stg_scale})")
+    timings.mark("guidance setup")
 
     # Load VAE decoder
     vae_decoder = None
@@ -1289,6 +1472,7 @@ def generate_video(
              print("  Skipping weights load (placeholder)")
     else:
         print("\n[3/5] VAE decoder skipped by user")
+    timings.mark("vae decoder load")
 
     # === TWO-STAGE PIPELINE ===
     # Use dedicated two-stage pipeline for higher quality generation
@@ -1660,6 +1844,8 @@ def generate_video(
     # V2.3 always uses this path (AV transformer) even without audio generation
     if use_av_encoder:
         print("\n=== Using Audio-Video Pipeline ===")
+        if save_latents:
+            print(f"  Latent sidecar: {latent_sidecar_path(output_path)}")
 
         if model is None:
             if use_placeholder:
@@ -1739,12 +1925,18 @@ def generate_video(
                 frame_index=0,
                 strength=image_strength,
             )]
+        timings.mark("av pipeline prep")
 
         # Run pipeline with audio
         print(f"\n[5/5] Running audio-video generation ({num_steps} steps)...")
 
+        denoise_progress = DenoiseProgress(total=num_steps)
+        denoise_progress.start()
+
         def progress_callback(step: int, total: int):
-            print(f"\r  Denoising: {step}/{total}", end="", flush=True)
+            denoise_progress.update(step, total)
+            if step >= total:
+                denoise_progress.finish()
 
         video, audio_waveform = av_pipeline(
             positive_encoding=text_encoding,
@@ -1754,8 +1946,10 @@ def generate_video(
             callback=progress_callback,
             positive_audio_encoding=text_audio_encoding,
             negative_audio_encoding=null_audio_encoding,
+            latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
         )
-        print()  # newline after progress
+        denoise_progress.finish()
+        timings.mark("generation + decode")
 
         # Convert to frames list for save_video
         video_np = np.array(video)
@@ -1773,6 +1967,7 @@ def generate_video(
 
         if audio_waveform is not None:
             print(f"  Generated audio: {audio_waveform.shape}")
+        timings.mark("frame conversion")
 
         # Save video with audio
         print(f"\nSaving video to {output_path}...")
@@ -1781,10 +1976,15 @@ def generate_video(
         else:
             save_video(frames, output_path, fps=output_fps, speed=output_speed)
         print(f"Done! Video saved to {output_path}")
+        timings.mark("output save")
+        timings.print_summary()
         return
 
     # === STANDARD PIPELINE (one-stage, distilled, video-only) ===
     # Note: Audio generation is handled by the AUDIO-VIDEO PIPELINE above
+    if save_latents:
+        print("  WARNING: --save-latents is currently supported only on the Audio-Video pipeline path")
+
     # Initialize noise
     print("\n[4/5] Initializing latent noise...")
     latent = mx.random.normal(shape=(1, 128, latent_frames, latent_height, latent_width))
@@ -2412,16 +2612,10 @@ def main():
         help="Use dummy embeddings instead of real Gemma encoding (for testing)"
     )
     parser.add_argument(
-        "--fp16",
-        action="store_true",
-        default=True,
-        help="Use FP16 computation (default, ~50%% memory reduction)"
-    )
-    parser.add_argument(
-        "--fp32", "--no-fp16",
-        action="store_true",
-        dest="fp32",
-        help="Use FP32 computation instead of FP16 (higher memory usage)"
+        "--dtype",
+        choices=sorted(SUPPORTED_COMPUTE_DTYPES),
+        default="bfloat16",
+        help="Compute dtype for model execution (default: bfloat16)"
     )
     parser.add_argument(
         "--model-variant",
@@ -2588,6 +2782,11 @@ def main():
         help="Save the preprocessed control signal video for debugging"
     )
     parser.add_argument(
+        "--save-latents",
+        action="store_true",
+        help="Save final video/audio latents as an NPZ sidecar next to the requested output"
+    )
+    parser.add_argument(
         "--tiled-vae",
         action="store_true",
         help="Use tiled VAE decoding for lower memory usage"
@@ -2676,7 +2875,7 @@ def main():
         embedding_path=args.embedding,
         gemma_path=args.gemma_path,
         use_gemma=not args.no_gemma,
-        use_fp16=not args.fp32,  # FP16 is default, --fp32 overrides
+        dtype=args.dtype,
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
         spatial_upscaler_weights=args.spatial_upscaler_weights,
@@ -2714,6 +2913,7 @@ def main():
         canny_high=args.canny_high,
         control_strength=args.control_strength,
         save_control=args.save_control,
+        save_latents=args.save_latents,
         # GE (Gradient Estimation) parameter
         ge_gamma=args.ge_gamma,
         # Output FPS and speed

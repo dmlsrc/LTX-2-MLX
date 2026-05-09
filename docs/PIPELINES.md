@@ -59,7 +59,7 @@ python scripts/generate.py "A cat walking" \
     --cfg 5.0 --steps-stage1 15 \
     --spatial-upscaler-weights weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors \
     --distilled-lora weights/ltx-2/ltx-2-19b-distilled-lora-384.safetensors \
-    --fp16
+    --dtype bfloat16
 ```
 
 > **Note**: Resolution is automatically adjusted to be divisible by 64 (required for the two-stage pipeline).
@@ -136,7 +136,7 @@ python scripts/generate.py "Your prompt" \
 ```bash
 python scripts/generate.py "Your prompt" \
     --pipeline one-stage --height 480 --width 704 --frames 65 \
-    --steps 15 --cfg 4.0 --fp16
+    --steps 15 --cfg 4.0 --dtype bfloat16
 ```
 
 ### High Resolution
@@ -144,7 +144,7 @@ python scripts/generate.py "Your prompt" \
 ```bash
 python scripts/generate.py "Your prompt" \
     --pipeline two-stage --height 768 --width 1024 --frames 65 \
-    --steps-stage1 15 --cfg 5.0 --fp16
+    --steps-stage1 15 --cfg 5.0 --dtype bfloat16
 ```
 
 ## Command Line Options
@@ -162,7 +162,7 @@ python scripts/generate.py "Your prompt" \
 | `--seed` | Random seed | 42 |
 | `--output` | Output video path | outputs/output.mp4 |
 | `--weights` | Path to weights file | weights/ltx-2/ltx-2-19b-distilled.safetensors |
-| `--fp16` | Use FP16 computation (~50% memory reduction) | True |
+| `--dtype` | Compute dtype: `bfloat16`, `float16`, or `float32` | bfloat16 |
 | `--model-variant` | `distilled` (fast) or `dev` (quality) | distilled |
 | `--spatial-upscaler-weights` | Path to spatial upscaler weights (for two-stage) | None |
 | `--temporal-upscaler-weights` | Path to temporal upscaler weights | None |

@@ -1,9 +1,24 @@
-"""Tiled VAE decoding for memory-efficient high-resolution video generation."""
+"""Tiled VAE decoding for memory-efficient high-resolution video generation.
 
+This implementation keeps spatial and temporal tiling enabled by default. The
+video VAE is causal in time, so temporal tiles require extra left context and
+careful output mapping. Tile accumulation is done in FP32, and overlapping
+regions are updated with slice assignment rather than scatter-style
+`.at(...).add(...)`, which can corrupt overlapping tiled output on some MLX
+paths.
+"""
+
+from __future__ import annotations
+
+import gc
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
 import mlx.core as mx
+
+
+DEFAULT_TEMPORAL_SCALE = 8
+DEFAULT_SPATIAL_SCALE = 32
 
 
 def compute_trapezoidal_mask_1d(
@@ -12,241 +27,374 @@ def compute_trapezoidal_mask_1d(
     ramp_right: int,
     left_starts_from_0: bool = False,
 ) -> mx.array:
-    """
-    Generate a 1D trapezoidal blending mask with linear ramps.
-
-    Args:
-        length: Output length of the mask.
-        ramp_left: Fade-in length on the left.
-        ramp_right: Fade-out length on the right.
-        left_starts_from_0: Whether the ramp starts from 0 or first non-zero value.
-            Useful for temporal tiles where the first tile is causal.
-
-    Returns:
-        A 1D tensor of shape (length,) with values in [0, 1].
-    """
+    """Create a 1D blend mask with optional left and right ramps."""
     if length <= 0:
-        raise ValueError("Mask length must be positive.")
+        raise ValueError(f"Mask length must be positive, got {length}")
 
-    ramp_left = max(0, min(ramp_left, length))
-    ramp_right = max(0, min(ramp_right, length))
+    ramp_left = max(0, min(int(ramp_left), length))
+    ramp_right = max(0, min(int(ramp_right), length))
 
-    mask = mx.ones((length,))
+    values = [1.0] * length
 
     if ramp_left > 0:
-        interval_length = ramp_left + 1 if left_starts_from_0 else ramp_left + 2
-        fade_in = mx.linspace(0.0, 1.0, interval_length)[:-1]
+        count = ramp_left + 1 if left_starts_from_0 else ramp_left + 2
+        fade = [i / (count - 1) for i in range(count)]
+        fade = fade[:-1]
         if not left_starts_from_0:
-            fade_in = fade_in[1:]
-        # Replace first ramp_left elements
-        mask_before = fade_in
-        mask_after = mask[ramp_left:]
-        mask = mx.concatenate([mask_before, mask_after])
+            fade = fade[1:]
+        for i, v in enumerate(fade[:ramp_left]):
+            values[i] *= v
 
     if ramp_right > 0:
-        fade_out = mx.linspace(1.0, 0.0, ramp_right + 2)[1:-1]
-        # Replace last ramp_right elements
-        mask_before = mask[:-ramp_right]
-        mask = mx.concatenate([mask_before, fade_out])
+        fade = [(ramp_right + 1 - i) / (ramp_right + 1) for i in range(1, ramp_right + 1)]
+        start = length - ramp_right
+        for i, v in enumerate(fade):
+            values[start + i] *= v
 
-    return mx.clip(mask, 0, 1)
+    return mx.clip(mx.array(values, dtype=mx.float32), 0.0, 1.0)
 
 
 @dataclass(frozen=True)
 class SpatialTilingConfig:
-    """Configuration for dividing each frame into spatial tiles with optional overlap.
-
-    Args:
-        tile_size_in_pixels: Size of each tile in pixels. Must be at least 64 and divisible by 32.
-        tile_overlap_in_pixels: Overlap between tiles in pixels. Must be divisible by 32.
-    """
+    """Spatial tile configuration in decoded-pixel coordinates."""
 
     tile_size_in_pixels: int
     tile_overlap_in_pixels: int = 0
 
     def __post_init__(self) -> None:
         if self.tile_size_in_pixels < 64:
-            raise ValueError(f"tile_size_in_pixels must be at least 64, got {self.tile_size_in_pixels}")
-        if self.tile_size_in_pixels % 32 != 0:
-            raise ValueError(f"tile_size_in_pixels must be divisible by 32, got {self.tile_size_in_pixels}")
-        if self.tile_overlap_in_pixels % 32 != 0:
-            raise ValueError(f"tile_overlap_in_pixels must be divisible by 32, got {self.tile_overlap_in_pixels}")
+            raise ValueError(
+                f"tile_size_in_pixels must be at least 64, got {self.tile_size_in_pixels}"
+            )
+        if self.tile_size_in_pixels % DEFAULT_SPATIAL_SCALE != 0:
+            raise ValueError(
+                f"tile_size_in_pixels must be divisible by {DEFAULT_SPATIAL_SCALE}, "
+                f"got {self.tile_size_in_pixels}"
+            )
+        if self.tile_overlap_in_pixels % DEFAULT_SPATIAL_SCALE != 0:
+            raise ValueError(
+                f"tile_overlap_in_pixels must be divisible by {DEFAULT_SPATIAL_SCALE}, "
+                f"got {self.tile_overlap_in_pixels}"
+            )
         if self.tile_overlap_in_pixels >= self.tile_size_in_pixels:
             raise ValueError(
-                f"Overlap must be less than tile size, got {self.tile_overlap_in_pixels} and {self.tile_size_in_pixels}"
+                "Spatial overlap must be smaller than tile size, got "
+                f"{self.tile_overlap_in_pixels} and {self.tile_size_in_pixels}"
             )
 
 
 @dataclass(frozen=True)
 class TemporalTilingConfig:
-    """Configuration for dividing a video into temporal tiles with optional overlap.
-
-    Args:
-        tile_size_in_frames: Number of frames in each tile. Must be at least 16 and divisible by 8.
-        tile_overlap_in_frames: Number of overlapping frames between consecutive tiles.
-    """
+    """Temporal tile configuration in decoded-frame coordinates."""
 
     tile_size_in_frames: int
     tile_overlap_in_frames: int = 0
 
     def __post_init__(self) -> None:
         if self.tile_size_in_frames < 16:
-            raise ValueError(f"tile_size_in_frames must be at least 16, got {self.tile_size_in_frames}")
-        if self.tile_size_in_frames % 8 != 0:
-            raise ValueError(f"tile_size_in_frames must be divisible by 8, got {self.tile_size_in_frames}")
-        if self.tile_overlap_in_frames % 8 != 0:
-            raise ValueError(f"tile_overlap_in_frames must be divisible by 8, got {self.tile_overlap_in_frames}")
+            raise ValueError(
+                f"tile_size_in_frames must be at least 16, got {self.tile_size_in_frames}"
+            )
+        if self.tile_size_in_frames % DEFAULT_TEMPORAL_SCALE != 0:
+            raise ValueError(
+                f"tile_size_in_frames must be divisible by {DEFAULT_TEMPORAL_SCALE}, "
+                f"got {self.tile_size_in_frames}"
+            )
+        if self.tile_overlap_in_frames % DEFAULT_TEMPORAL_SCALE != 0:
+            raise ValueError(
+                f"tile_overlap_in_frames must be divisible by {DEFAULT_TEMPORAL_SCALE}, "
+                f"got {self.tile_overlap_in_frames}"
+            )
         if self.tile_overlap_in_frames >= self.tile_size_in_frames:
             raise ValueError(
-                f"Overlap must be less than tile size, got {self.tile_overlap_in_frames} and {self.tile_size_in_frames}"
+                "Temporal overlap must be smaller than tile size, got "
+                f"{self.tile_overlap_in_frames} and {self.tile_size_in_frames}"
             )
 
 
 @dataclass(frozen=True)
 class TilingConfig:
-    """Configuration for splitting video into tiles with optional overlap.
-
-    Attributes:
-        spatial_config: Configuration for splitting spatial dimensions into tiles.
-        temporal_config: Configuration for splitting temporal dimension into tiles.
-    """
+    """Configuration for tiled VAE decoding."""
 
     spatial_config: Optional[SpatialTilingConfig] = None
     temporal_config: Optional[TemporalTilingConfig] = None
 
     @classmethod
     def default(cls) -> "TilingConfig":
+        """Default tiled decode: spatial 512/64 and temporal 64/24."""
         return cls(
-            spatial_config=SpatialTilingConfig(tile_size_in_pixels=512, tile_overlap_in_pixels=64),
-            temporal_config=TemporalTilingConfig(tile_size_in_frames=64, tile_overlap_in_frames=24),
+            spatial_config=SpatialTilingConfig(
+                tile_size_in_pixels=512,
+                tile_overlap_in_pixels=64,
+            ),
+            temporal_config=TemporalTilingConfig(
+                tile_size_in_frames=64,
+                tile_overlap_in_frames=24,
+            ),
+        )
+
+    @classmethod
+    def auto(
+        cls,
+        height: int,
+        width: int,
+        num_frames: int,
+        spatial_threshold: int = 512,
+        temporal_threshold: int = 65,
+    ) -> Optional["TilingConfig"]:
+        """Match mlx-video's auto tiling policy for LTX VAE decode."""
+        needs_spatial = height > spatial_threshold or width > spatial_threshold
+        needs_temporal = num_frames > temporal_threshold
+
+        if not needs_spatial and not needs_temporal:
+            return None
+
+        return cls(
+            spatial_config=(
+                SpatialTilingConfig(tile_size_in_pixels=512, tile_overlap_in_pixels=64)
+                if needs_spatial
+                else None
+            ),
+            temporal_config=(
+                TemporalTilingConfig(tile_size_in_frames=64, tile_overlap_in_frames=24)
+                if needs_temporal
+                else None
+            ),
+        )
+
+    @classmethod
+    def spatial_only(cls, tile_size: int = 512, overlap: int = 64) -> "TilingConfig":
+        return cls(
+            spatial_config=SpatialTilingConfig(
+                tile_size_in_pixels=tile_size,
+                tile_overlap_in_pixels=overlap,
+            ),
+            temporal_config=None,
+        )
+
+    @classmethod
+    def temporal_only(cls, tile_size: int = 64, overlap: int = 24) -> "TilingConfig":
+        return cls(
+            spatial_config=None,
+            temporal_config=TemporalTilingConfig(
+                tile_size_in_frames=tile_size,
+                tile_overlap_in_frames=overlap,
+            ),
+        )
+
+    @classmethod
+    def aggressive(cls) -> "TilingConfig":
+        return cls(
+            spatial_config=SpatialTilingConfig(
+                tile_size_in_pixels=256,
+                tile_overlap_in_pixels=64,
+            ),
+            temporal_config=None,
+        )
+
+    @classmethod
+    def conservative(cls) -> "TilingConfig":
+        return cls(
+            spatial_config=SpatialTilingConfig(
+                tile_size_in_pixels=768,
+                tile_overlap_in_pixels=64,
+            ),
+            temporal_config=None,
+        )
+
+    @classmethod
+    def test_small_both(cls) -> "TilingConfig":
+        """Small-video test config: forces both spatial and temporal tiling.
+
+        Useful for debugging with 256x256, 4-second generations. Do not use as
+        the production default.
+        """
+        return cls(
+            spatial_config=SpatialTilingConfig(
+                tile_size_in_pixels=128,
+                tile_overlap_in_pixels=32,
+            ),
+            temporal_config=TemporalTilingConfig(
+                tile_size_in_frames=32,
+                tile_overlap_in_frames=8,
+            ),
         )
 
 
-@dataclass
-class TileSpec:
-    """Specification for a single tile."""
-
-    # Input coordinates (slice of latent to decode)
-    in_t_start: int
-    in_t_end: int
-    in_h_start: int
-    in_h_end: int
-    in_w_start: int
-    in_w_end: int
-
-    # Output coordinates (where to place decoded pixels)
-    out_t_start: int
-    out_t_end: int
-    out_h_start: int
-    out_h_end: int
-    out_w_start: int
-    out_w_end: int
-
-    # Ramp sizes for blending
-    ramp_t_left: int
-    ramp_t_right: int
-    ramp_h_left: int
-    ramp_h_right: int
-    ramp_w_left: int
-    ramp_w_right: int
+@dataclass(frozen=True)
+class AxisTiles:
+    starts: List[int]
+    ends: List[int]
+    left_ramps: List[int]
+    right_ramps: List[int]
 
 
-def generate_tile_specs(
-    latent_shape: Tuple[int, int, int, int, int],
-    tiling_config: TilingConfig,
-    scale_factors: Tuple[int, int, int] = (8, 32, 32),
-) -> List[TileSpec]:
+def _split_axis(length: int, tile_size: int, overlap: int) -> AxisTiles:
+    """Split an axis into overlapping tiles in latent coordinates."""
+    if length <= 0:
+        raise ValueError(f"Axis length must be positive, got {length}")
+    if tile_size <= 0:
+        raise ValueError(f"Tile size must be positive, got {tile_size}")
+    if overlap < 0 or overlap >= tile_size:
+        raise ValueError(f"Invalid overlap {overlap} for tile size {tile_size}")
+
+    if length <= tile_size + overlap:
+        return AxisTiles([0], [length], [0], [0])
+
+    stride = tile_size - overlap
+    starts: List[int] = []
+    ends: List[int] = []
+
+    pos = 0
+    while True:
+        start = pos
+        end = min(start + tile_size, length)
+
+        if end == length:
+            start = max(0, length - tile_size)
+
+        if starts and start <= starts[-1]:
+            break
+
+        starts.append(start)
+        ends.append(end)
+
+        if end >= length:
+            break
+
+        pos += stride
+
+    left = [0 if i == 0 else overlap for i in range(len(starts))]
+    right = [0 if i == len(starts) - 1 else overlap for i in range(len(starts))]
+    return AxisTiles(starts, ends, left, right)
+
+
+def _split_temporal_axis(length: int, tile_size: int, overlap: int) -> AxisTiles:
+    """Split temporal latent axis, adding left context after tile 0.
+
+    The VAE is causal in time. Later temporal tiles need one latent frame of left
+    context so their earliest decoded frames are not decoded as if the tile were
+    the beginning of the whole video.
     """
-    Generate tile specifications for tiled decoding.
+    base = _split_axis(length, tile_size, overlap)
 
-    Args:
-        latent_shape: Shape of latent tensor (B, C, T, H, W).
-        tiling_config: Tiling configuration.
-        scale_factors: Upscaling factors (temporal, height, width).
+    starts = list(base.starts)
+    left = list(base.left_ramps)
 
-    Returns:
-        List of TileSpec objects.
+    for i in range(1, len(starts)):
+        if starts[i] > 0:
+            starts[i] -= 1
+            left[i] += 1
+
+    return AxisTiles(starts, list(base.ends), left, list(base.right_ramps))
+
+
+def _temporal_output_slice(
+    start_latent: int,
+    end_latent: int,
+    left_ramp_latent: int,
+    right_ramp_latent: int,
+    scale: int,
+) -> Tuple[slice, mx.array]:
+    """Map a temporal latent interval to decoded-frame interval and mask."""
+    start = 0 if start_latent == 0 else start_latent * scale
+    stop = 1 if end_latent <= 1 else 1 + (end_latent - 1) * scale
+
+    left = 0
+    if left_ramp_latent > 0:
+        left = 1 + (left_ramp_latent - 1) * scale
+
+    right = right_ramp_latent * scale
+
+    mask = compute_trapezoidal_mask_1d(
+        stop - start,
+        left,
+        right,
+        left_starts_from_0=True,
+    )
+    return slice(start, stop), mask
+
+
+def _spatial_output_slice(
+    start_latent: int,
+    end_latent: int,
+    left_ramp_latent: int,
+    right_ramp_latent: int,
+    scale: int,
+) -> Tuple[slice, mx.array]:
+    """Map a spatial latent interval to decoded-pixel interval and mask."""
+    start = start_latent * scale
+    stop = end_latent * scale
+    mask = compute_trapezoidal_mask_1d(
+        stop - start,
+        left_ramp_latent * scale,
+        right_ramp_latent * scale,
+        left_starts_from_0=False,
+    )
+    return slice(start, stop), mask
+
+
+def _assign_add_5d(
+    arr: mx.array,
+    update: mx.array,
+    t_slice: slice,
+    h_slice: slice,
+    w_slice: slice,
+) -> mx.array:
+    """Add update into arr using direct slice assignment.
+
+    This deliberately avoids scatter-style ``.at(...).add(...)`` because
+    overlapping multidimensional updates produced corrupted tiled VAE output in
+    practice.
     """
-    _, _, t, h, w = latent_shape
-    scale_t, scale_h, scale_w = scale_factors
+    current = arr[:, :, t_slice, h_slice, w_slice]
+    arr[:, :, t_slice, h_slice, w_slice] = current + update
+    return arr
 
-    tiles = []
 
-    # Calculate latent tile sizes
-    if tiling_config.spatial_config:
-        spatial_cfg = tiling_config.spatial_config
-        tile_h_latent = spatial_cfg.tile_size_in_pixels // scale_h
-        tile_w_latent = spatial_cfg.tile_size_in_pixels // scale_w
-        overlap_h_latent = spatial_cfg.tile_overlap_in_pixels // scale_h
-        overlap_w_latent = spatial_cfg.tile_overlap_in_pixels // scale_w
-    else:
-        tile_h_latent = h
-        tile_w_latent = w
-        overlap_h_latent = 0
-        overlap_w_latent = 0
+def _merge_temporal_pending(
+    pending: Optional[mx.array],
+    pending_weights: Optional[mx.array],
+    pending_start: int,
+    chunk: mx.array,
+    chunk_weights: mx.array,
+    chunk_start: int,
+) -> Tuple[mx.array, mx.array, int]:
+    """Merge a temporal chunk into the rolling output accumulator."""
+    if pending is None or pending_weights is None:
+        return chunk, chunk_weights, chunk_start
 
-    if tiling_config.temporal_config:
-        temporal_cfg = tiling_config.temporal_config
-        tile_t_latent = temporal_cfg.tile_size_in_frames // scale_t
-        overlap_t_latent = temporal_cfg.tile_overlap_in_frames // scale_t
-    else:
-        tile_t_latent = t
-        overlap_t_latent = 0
+    pending_end = pending_start + pending.shape[2]
+    chunk_end = chunk_start + chunk.shape[2]
+    merged_start = min(pending_start, chunk_start)
+    merged_end = max(pending_end, chunk_end)
+    merged_t = merged_end - merged_start
 
-    # Generate tile coordinates
-    def gen_tiles_1d(length: int, tile_size: int, overlap: int) -> List[Tuple[int, int, int, int]]:
-        """Generate (start, end, ramp_left, ramp_right) for each tile."""
-        if length <= tile_size:
-            return [(0, length, 0, 0)]
+    b, c, _t, h, w = pending.shape
+    merged = mx.zeros((b, c, merged_t, h, w), dtype=mx.float32)
+    merged_weights = mx.zeros((1, 1, merged_t, h, w), dtype=mx.float32)
 
-        tiles_1d = []
-        stride = tile_size - overlap
-        pos = 0
-        while pos < length:
-            end = min(pos + tile_size, length)
-            start = max(0, end - tile_size)
+    pending_slice = slice(pending_start - merged_start, pending_end - merged_start)
+    chunk_slice = slice(chunk_start - merged_start, chunk_end - merged_start)
 
-            # Ramps for blending
-            ramp_left = overlap if start > 0 else 0
-            ramp_right = overlap if end < length else 0
-
-            tiles_1d.append((start, end, ramp_left, ramp_right))
-
-            if end >= length:
-                break
-            pos += stride
-
-        return tiles_1d
-
-    t_tiles = gen_tiles_1d(t, tile_t_latent, overlap_t_latent)
-    h_tiles = gen_tiles_1d(h, tile_h_latent, overlap_h_latent)
-    w_tiles = gen_tiles_1d(w, tile_w_latent, overlap_w_latent)
-
-    # Generate all tile combinations
-    for t_start, t_end, ramp_t_l, ramp_t_r in t_tiles:
-        for h_start, h_end, ramp_h_l, ramp_h_r in h_tiles:
-            for w_start, w_end, ramp_w_l, ramp_w_r in w_tiles:
-                # Convert latent coordinates to pixel coordinates
-                out_t_start = t_start * scale_t if t_start > 0 else 0
-                out_t_end = (t_end - 1) * scale_t + 1 if t_end > 1 else 1
-                out_h_start = h_start * scale_h
-                out_h_end = h_end * scale_h
-                out_w_start = w_start * scale_w
-                out_w_end = w_end * scale_w
-
-                tiles.append(TileSpec(
-                    in_t_start=t_start, in_t_end=t_end,
-                    in_h_start=h_start, in_h_end=h_end,
-                    in_w_start=w_start, in_w_end=w_end,
-                    out_t_start=out_t_start, out_t_end=out_t_end,
-                    out_h_start=out_h_start, out_h_end=out_h_end,
-                    out_w_start=out_w_start, out_w_end=out_w_end,
-                    ramp_t_left=ramp_t_l * scale_t, ramp_t_right=ramp_t_r * scale_t,
-                    ramp_h_left=ramp_h_l * scale_h, ramp_h_right=ramp_h_r * scale_h,
-                    ramp_w_left=ramp_w_l * scale_w, ramp_w_right=ramp_w_r * scale_w,
-                ))
-
-    return tiles
+    merged = _assign_add_5d(merged, pending, pending_slice, slice(0, h), slice(0, w))
+    merged_weights = _assign_add_5d(
+        merged_weights,
+        pending_weights,
+        pending_slice,
+        slice(0, h),
+        slice(0, w),
+    )
+    merged = _assign_add_5d(merged, chunk, chunk_slice, slice(0, h), slice(0, w))
+    merged_weights = _assign_add_5d(
+        merged_weights,
+        chunk_weights,
+        chunk_slice,
+        slice(0, h),
+        slice(0, w),
+    )
+    mx.eval(merged, merged_weights)
+    return merged, merged_weights, merged_start
 
 
 def decode_tiled(
@@ -257,94 +405,169 @@ def decode_tiled(
     show_progress: bool = True,
     key: Optional[mx.array] = None,
 ) -> Iterator[mx.array]:
-    """
-    Decode a latent tensor using tiled processing.
+    """Decode a latent tensor by tiles and blend overlaps."""
+    del key  # Reserved for API compatibility.
 
-    Splits the latent tensor into tiles, decodes each tile individually,
-    and yields video chunks as they become available.
+    b, _c, latent_t, latent_h, latent_w = latent.shape
+    scale_t, scale_h, scale_w = (
+        DEFAULT_TEMPORAL_SCALE,
+        DEFAULT_SPATIAL_SCALE,
+        DEFAULT_SPATIAL_SCALE,
+    )
 
-    Args:
-        latent: Input latent tensor (B, C, T, H, W).
-        decoder_fn: Function to decode a latent tile, takes (latent, timestep).
-        tiling_config: Tiling configuration.
-        timestep: Timestep for decoder conditioning.
-        show_progress: Whether to show progress bar.
-        key: Optional random key for deterministic decoding (reserved for future use).
+    out_t = 1 + (latent_t - 1) * scale_t
+    out_h = latent_h * scale_h
+    out_w = latent_w * scale_w
 
-    Yields:
-        Decoded video chunks (B, 3, T_chunk, H, W).
-    """
-    b, c, t, h, w = latent.shape
+    if tiling_config.temporal_config is not None:
+        tc = tiling_config.temporal_config
+        temporal_tile = tc.tile_size_in_frames // scale_t
+        temporal_overlap = tc.tile_overlap_in_frames // scale_t
+        t_tiles = _split_temporal_axis(latent_t, temporal_tile, temporal_overlap)
+    else:
+        t_tiles = AxisTiles([0], [latent_t], [0], [0])
 
-    # Generate tile specifications
-    tiles = generate_tile_specs(latent.shape, tiling_config)
+    if tiling_config.spatial_config is not None:
+        sc = tiling_config.spatial_config
+        spatial_tile = sc.tile_size_in_pixels // scale_h
+        spatial_overlap = sc.tile_overlap_in_pixels // scale_h
+        h_tiles = _split_axis(latent_h, spatial_tile, spatial_overlap)
+        w_tiles = _split_axis(latent_w, spatial_tile, spatial_overlap)
+    else:
+        h_tiles = AxisTiles([0], [latent_h], [0], [0])
+        w_tiles = AxisTiles([0], [latent_w], [0], [0])
+
+    temporal_count = len(t_tiles.starts)
+    spatial_count = len(h_tiles.starts) * len(w_tiles.starts)
+    total_jobs = temporal_count * spatial_count
 
     if show_progress:
+        print(
+            "  Tiled VAE decode: "
+            f"temporal={temporal_count}, "
+            f"spatial={len(h_tiles.starts)}x{len(w_tiles.starts)}, "
+            f"total={total_jobs}"
+        )
         try:
             from tqdm import tqdm
-            tiles = list(tqdm(tiles, desc="Tiled decode", ncols=80))
         except ImportError:
-            pass
+            tqdm = None
+    else:
+        tqdm = None
 
-    # Calculate output shape
-    scale_t, scale_h, scale_w = 8, 32, 32
-    out_t = (t - 1) * scale_t + 1
-    out_h = h * scale_h
-    out_w = w * scale_w
+    pending: Optional[mx.array] = None
+    pending_weights: Optional[mx.array] = None
+    pending_start = 0
 
-    # Process tiles and yield the final blended result
-    output = mx.zeros((b, 3, out_t, out_h, out_w))
-    weights = mx.zeros((1, 1, out_t, out_h, out_w))
+    progress = tqdm(total=total_jobs, desc="Tiled decode", ncols=80) if tqdm else None
 
-    for tile_spec in tiles:
-        # Extract and decode tile
-        tile_latent = latent[
-            :, :,
-            tile_spec.in_t_start:tile_spec.in_t_end,
-            tile_spec.in_h_start:tile_spec.in_h_end,
-            tile_spec.in_w_start:tile_spec.in_w_end,
-        ]
+    try:
+        for ti in range(temporal_count):
+            t0, t1 = t_tiles.starts[ti], t_tiles.ends[ti]
 
-        decoded_tile = decoder_fn(tile_latent, timestep=timestep)
-        mx.eval(decoded_tile)
+            out_t_slice, mask_t = _temporal_output_slice(
+                t0, t1, t_tiles.left_ramps[ti], t_tiles.right_ramps[ti], scale_t
+            )
+            chunk_t = out_t_slice.stop - out_t_slice.start
+            chunk = mx.zeros((b, 3, chunk_t, out_h, out_w), dtype=mx.float32)
+            chunk_weights = mx.zeros((1, 1, chunk_t, out_h, out_w), dtype=mx.float32)
+            mx.eval(chunk, chunk_weights)
 
-        # Get actual decoded dimensions
-        _, _, dt, dh, dw = decoded_tile.shape
-        tile_t = min(dt, tile_spec.out_t_end - tile_spec.out_t_start)
-        tile_h = min(dh, tile_spec.out_h_end - tile_spec.out_h_start)
-        tile_w = min(dw, tile_spec.out_w_end - tile_spec.out_w_start)
+            for hi in range(len(h_tiles.starts)):
+                h0, h1 = h_tiles.starts[hi], h_tiles.ends[hi]
+                out_h_slice, mask_h = _spatial_output_slice(
+                    h0, h1, h_tiles.left_ramps[hi], h_tiles.right_ramps[hi], scale_h
+                )
 
-        # Generate blending mask
-        mask_t = compute_trapezoidal_mask_1d(
-            tile_t, min(tile_spec.ramp_t_left, tile_t), min(tile_spec.ramp_t_right, tile_t),
-            left_starts_from_0=(tile_spec.out_t_start == 0)
-        )
-        mask_h = compute_trapezoidal_mask_1d(
-            tile_h, min(tile_spec.ramp_h_left, tile_h), min(tile_spec.ramp_h_right, tile_h)
-        )
-        mask_w = compute_trapezoidal_mask_1d(
-            tile_w, min(tile_spec.ramp_w_left, tile_w), min(tile_spec.ramp_w_right, tile_w)
-        )
+                for wi in range(len(w_tiles.starts)):
+                    w0, w1 = w_tiles.starts[wi], w_tiles.ends[wi]
+                    out_w_slice, mask_w = _spatial_output_slice(
+                        w0,
+                        w1,
+                        w_tiles.left_ramps[wi],
+                        w_tiles.right_ramps[wi],
+                        scale_w,
+                    )
 
-        # Create 5D mask
-        mask = mask_t[None, None, :, None, None] * mask_h[None, None, None, :, None] * mask_w[None, None, None, None, :]
+                    tile_latent = latent[:, :, t0:t1, h0:h1, w0:w1]
+                    decoded = decoder_fn(
+                        tile_latent,
+                        timestep=timestep,
+                        show_progress=False,
+                    )
+                    mx.eval(decoded)
 
-        # Slice decoded tile to actual size
-        decoded_slice = decoded_tile[:, :, :tile_t, :tile_h, :tile_w]
+                    expected_h = out_h_slice.stop - out_h_slice.start
+                    expected_w = out_w_slice.stop - out_w_slice.start
 
-        # Update output and weights using slicing
-        # This is inefficient but necessary without scatter operations
-        out_t_slice = slice(tile_spec.out_t_start, tile_spec.out_t_start + tile_t)
-        out_h_slice = slice(tile_spec.out_h_start, tile_spec.out_h_start + tile_h)
-        out_w_slice = slice(tile_spec.out_w_start, tile_spec.out_w_start + tile_w)
+                    actual_t = min(decoded.shape[2], chunk_t)
+                    actual_h = min(decoded.shape[3], expected_h)
+                    actual_w = min(decoded.shape[4], expected_w)
 
-        # Accumulate weighted tile into output buffers
-        output = output.at[:, :, out_t_slice, out_h_slice, out_w_slice].add(decoded_slice * mask)
-        weights = weights.at[:, :, out_t_slice, out_h_slice, out_w_slice].add(mask)
+                    decoded = decoded[:, :, :actual_t, :actual_h, :actual_w].astype(mx.float32)
 
-    # Normalize by weights
-    output = output / mx.maximum(weights, 1e-8)
+                    mask = (
+                        mask_t[:actual_t].reshape(1, 1, actual_t, 1, 1)
+                        * mask_h[:actual_h].reshape(1, 1, 1, actual_h, 1)
+                        * mask_w[:actual_w].reshape(1, 1, 1, 1, actual_w)
+                    ).astype(mx.float32)
 
-    yield output
+                    actual_t_slice = slice(0, actual_t)
+                    actual_h_slice = slice(out_h_slice.start, out_h_slice.start + actual_h)
+                    actual_w_slice = slice(out_w_slice.start, out_w_slice.start + actual_w)
 
+                    chunk = _assign_add_5d(
+                        chunk,
+                        decoded * mask,
+                        actual_t_slice,
+                        actual_h_slice,
+                        actual_w_slice,
+                    )
+                    chunk_weights = _assign_add_5d(
+                        chunk_weights,
+                        mask,
+                        actual_t_slice,
+                        actual_h_slice,
+                        actual_w_slice,
+                    )
 
+                    mx.eval(chunk, chunk_weights)
+                    del decoded, mask, tile_latent
+                    mx.clear_cache()
+                    if progress is not None:
+                        progress.update(1)
+
+            if pending is not None and pending_weights is not None:
+                pending_end = pending_start + pending.shape[2]
+                ready_t = max(0, min(out_t_slice.start, pending_end) - pending_start)
+                if ready_t > 0:
+                    ready = pending[:, :, :ready_t]
+                    ready_weights = pending_weights[:, :, :ready_t]
+                    ready = ready / mx.maximum(ready_weights, 1e-8)
+                    mx.eval(ready)
+                    yield ready
+                    del ready, ready_weights
+                    pending = pending[:, :, ready_t:]
+                    pending_weights = pending_weights[:, :, ready_t:]
+                    pending_start += ready_t
+                    mx.eval(pending, pending_weights)
+
+            pending, pending_weights, pending_start = _merge_temporal_pending(
+                pending,
+                pending_weights,
+                pending_start,
+                chunk,
+                chunk_weights,
+                out_t_slice.start,
+            )
+            del chunk, chunk_weights
+            gc.collect()
+            mx.clear_cache()
+
+        if pending is not None and pending_weights is not None and pending.shape[2] > 0:
+            pending = pending / mx.maximum(pending_weights, 1e-8)
+            mx.eval(pending)
+            yield pending
+    finally:
+        if progress is not None:
+            progress.close()

@@ -165,7 +165,7 @@ python scripts/generate.py "A waterfall in a tropical forest" \
     --frames 65 \
     --steps-stage1 15 \
     --cfg 5.0 \
-    --fp16
+    --dtype bfloat16
 ```
 
 **Characteristics:**
@@ -175,12 +175,12 @@ python scripts/generate.py "A waterfall in a tropical forest" \
 
 ## Memory Optimization
 
-### FP16 Mode
+### Compute Dtype
 
-Reduce memory usage by ~50%:
+BF16 is the default and is usually the best balance of memory and quality:
 
 ```bash
-python scripts/generate.py "Your prompt" --fp16
+python scripts/generate.py "Your prompt" --dtype bfloat16
 ```
 
 ### Low Memory Mode
@@ -250,7 +250,7 @@ python scripts/generate.py "Your prompt" --output my_video.mp4
 
 ### Out of Memory
 
-- Use `--fp16` flag
+- Use the default BF16 compute dtype, or try `--dtype float16` for experiments
 - Reduce resolution: `--height 256 --width 384`
 - Reduce frames: `--frames 17`
 - Use `--low-memory` flag
@@ -337,7 +337,7 @@ python scripts/generate.py "A cat walking" --no-gemma --height 128 --width 128
 
 ### Gemma 3 Requirements
 
-LTX-2 requires **Gemma 3 12B** (~25GB download, ~12GB in memory as FP16):
+LTX-2 requires **Gemma 3 12B** (~25GB download, ~12GB in memory at 16-bit precision):
 
 ```bash
 uv run scripts/download_weights.py --weights gemma
@@ -353,7 +353,7 @@ uv run scripts/download_weights.py --weights gemma
 
 | Configuration | RAM Required |
 |--------------|--------------|
-| Text-to-Video (480×704, 97 frames) | ~28GB (FP32), ~18GB (FP16) |
+| Text-to-Video (480×704, 97 frames) | ~18GB at default BF16, higher with `--dtype float32` |
 | Two-Stage (960×1408, 97 frames) | ~44GB (sequential), ~59GB (parallel) |
 | With Audio Generation | Add ~6GB |
 
