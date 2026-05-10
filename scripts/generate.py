@@ -58,6 +58,8 @@ SUPPORTED_COMPUTE_DTYPES = {
     "float16": mx.float16,
     "float32": mx.float32,
 }
+FF_QUANTIZE_TARGETS = ("project_in", "project_out")
+FF_QUANTIZE_MODES = ("affine", "mxfp4", "mxfp8", "nvfp4")
 
 
 def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
@@ -69,6 +71,135 @@ def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
     except KeyError as exc:
         valid = ", ".join(sorted(SUPPORTED_COMPUTE_DTYPES))
         raise ValueError(f"Unsupported compute dtype '{dtype_name}'. Valid values: {valid}") from exc
+
+
+def parse_profile_transformer_steps(value: str | None) -> tuple[int, ...]:
+    """Parse a comma-separated 1-based denoise-step list for profiling."""
+    if value is None or value.strip() == "":
+        return ()
+
+    steps = []
+    for raw_step in value.split(","):
+        raw_step = raw_step.strip()
+        if not raw_step:
+            continue
+        try:
+            step = int(raw_step)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid denoise step '{raw_step}' in --profile-transformer-steps"
+            ) from exc
+        if step <= 0:
+            raise argparse.ArgumentTypeError(
+                "--profile-transformer-steps uses 1-based positive step numbers"
+            )
+        steps.append(step)
+
+    return tuple(sorted(set(steps)))
+
+
+def parse_profile_transformer_blocks(value: str | None) -> tuple[int, ...]:
+    """Parse a comma-separated 0-based transformer-block list for profiling."""
+    if value is None or value.strip() == "":
+        return ()
+
+    blocks = []
+    for raw_block in value.split(","):
+        raw_block = raw_block.strip()
+        if not raw_block:
+            continue
+        try:
+            block = int(raw_block)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid transformer block '{raw_block}' in --profile-transformer-blocks"
+            ) from exc
+        if block < 0:
+            raise argparse.ArgumentTypeError(
+                "--profile-transformer-blocks uses 0-based non-negative block numbers"
+            )
+        blocks.append(block)
+
+    return tuple(sorted(set(blocks)))
+
+
+def parse_transformer_layer_selection(value: str | None) -> tuple[int, ...]:
+    """Parse comma-separated 0-based layers and inclusive ranges."""
+    if value is None or value.strip() == "":
+        return ()
+
+    layers = []
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_raw, end_raw = part.split("-", 1)
+            try:
+                start = int(start_raw.strip())
+                end = int(end_raw.strip())
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid layer range '{part}'"
+                ) from exc
+            if start < 0 or end < 0 or end < start:
+                raise argparse.ArgumentTypeError(
+                    "--video-ff-quantize-layers uses non-negative ranges like 40-47"
+                )
+            layers.extend(range(start, end + 1))
+            continue
+
+        try:
+            layer = int(part)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid layer '{part}' in --video-ff-quantize-layers"
+            ) from exc
+        if layer < 0:
+            raise argparse.ArgumentTypeError(
+                "--video-ff-quantize-layers uses 0-based non-negative layer numbers"
+            )
+        layers.append(layer)
+
+    return tuple(sorted(set(layers)))
+
+
+def parse_video_ff_quantize_specs(value: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse comma-separated target:mode video FF quantization specs."""
+    if value is None or value.strip() == "":
+        return ()
+
+    specs = []
+    seen_targets = set()
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            raw_target, raw_mode = part.split(":", 1)
+            mode = raw_mode.strip().lower()
+        else:
+            raw_target = part
+            mode = "mxfp8"
+        target = raw_target.strip().lower().replace("-", "_")
+        if target not in FF_QUANTIZE_TARGETS:
+            valid = ", ".join(FF_QUANTIZE_TARGETS)
+            raise argparse.ArgumentTypeError(
+                f"Invalid video FF quantization target '{raw_target}'. Valid values: {valid}"
+            )
+        if mode not in FF_QUANTIZE_MODES:
+            valid = ", ".join(FF_QUANTIZE_MODES)
+            raise argparse.ArgumentTypeError(
+                f"Invalid video FF quantization mode '{mode}'. Valid values: {valid}"
+            )
+        if target in seen_targets:
+            raise argparse.ArgumentTypeError(
+                f"Duplicate video FF quantization target '{target}'"
+            )
+        seen_targets.add(target)
+        specs.append((target, mode))
+
+    return tuple(specs)
 
 
 def compute_dtype_name(dtype: mx.Dtype) -> str:
@@ -1216,6 +1347,11 @@ def load_transformer(
     compute_dtype: mx.Dtype = mx.bfloat16,
     low_memory: bool = False,
     fast_mode: bool = False,
+    profile_transformer_once: bool = False,
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_group_size: int | None = None,
+    video_ff_quantize_bits: int | None = None,
+    video_ff_quantize_layers: tuple[int, ...] = (),
 ) -> LTXModel:
     """Load transformer with weights.
 
@@ -1225,10 +1361,12 @@ def load_transformer(
         compute_dtype: Dtype for computation.
         low_memory: If True, use aggressive memory optimization.
         fast_mode: If True, skip intermediate evaluations.
+        profile_transformer_once: If True, print one forced-eval transformer timing trace.
     """
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
-    print(f"Loading transformer ({compute_dtype_name(compute_dtype)}{mem_str}{fast_str})...")
+    profile_str = " (profile first call)" if profile_transformer_once else ""
+    print(f"Loading transformer ({compute_dtype_name(compute_dtype)}{mem_str}{fast_str}{profile_str})...")
 
     model = LTXModel(
         model_type=LTXModelType.VideoOnly,
@@ -1243,6 +1381,7 @@ def load_transformer(
         compute_dtype=compute_dtype,
         low_memory=low_memory,
         fast_mode=fast_mode,
+        profile_transformer_once=profile_transformer_once,
     )
 
     # Load weights
@@ -1250,6 +1389,26 @@ def load_transformer(
         load_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
+    if video_ff_quantize_specs:
+        count = model.enable_video_ff_quantization(
+            quantization_specs=video_ff_quantize_specs,
+            group_size=video_ff_quantize_group_size,
+            bits=video_ff_quantize_bits,
+            layers=video_ff_quantize_layers,
+        )
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_quantize_layers)
+            if video_ff_quantize_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{mode}" for target, mode in video_ff_quantize_specs)
+        print(
+            "  Experimental video FF quantization: "
+            f"{count} projections, specs={spec_str}, "
+            f"group_size={video_ff_quantize_group_size or 'default'}, "
+            f"bits={video_ff_quantize_bits or 'default'}, "
+            f"layers={layer_str}"
+        )
 
     return model
 
@@ -1259,6 +1418,12 @@ def load_av_transformer(
     num_layers: int = 48,
     compute_dtype: mx.Dtype = mx.bfloat16,
     low_memory: bool = False,
+    fast_mode: bool = False,
+    profile_transformer_once: bool = False,
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_group_size: int | None = None,
+    video_ff_quantize_bits: int | None = None,
+    video_ff_quantize_layers: tuple[int, ...] = (),
     caption_channels: int | None = 3840,
     cross_attention_adaln: bool = False,
     apply_gated_attention: bool = False,
@@ -1266,14 +1431,18 @@ def load_av_transformer(
     """Load AudioVideo transformer with weights.
 
     Args:
+        fast_mode: If True, skip intermediate evaluations.
+        profile_transformer_once: If True, print one forced-eval transformer timing trace.
         caption_channels: Caption embedding dim (3840 for V1/2.0, None for V2/2.3
             where the feature extractor projects directly to transformer dims).
         cross_attention_adaln: V2 cross-attention AdaLN (prompt_adaln_single).
         apply_gated_attention: V2 per-head gating in attention.
     """
     mem_str = " (low memory)" if low_memory else ""
+    fast_str = " (fast mode)" if fast_mode else ""
+    profile_str = " (profile first call)" if profile_transformer_once else ""
     v2_str = " (V2)" if cross_attention_adaln else ""
-    print(f"Loading AudioVideo transformer ({compute_dtype_name(compute_dtype)}{mem_str}{v2_str})...")
+    print(f"Loading AudioVideo transformer ({compute_dtype_name(compute_dtype)}{mem_str}{fast_str}{profile_str}{v2_str})...")
 
     model = LTXAVModel(
         model_type=LTXModelType.AudioVideo,
@@ -1287,6 +1456,8 @@ def load_av_transformer(
         positional_embedding_theta=10000.0,
         compute_dtype=compute_dtype,
         low_memory=low_memory,
+        fast_mode=fast_mode,
+        profile_transformer_once=profile_transformer_once,
         cross_attention_adaln=cross_attention_adaln,
         apply_gated_attention=apply_gated_attention,
         av_ca_timestep_scale_multiplier=1000,
@@ -1297,6 +1468,26 @@ def load_av_transformer(
         load_av_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
+    if video_ff_quantize_specs:
+        count = model.enable_video_ff_quantization(
+            quantization_specs=video_ff_quantize_specs,
+            group_size=video_ff_quantize_group_size,
+            bits=video_ff_quantize_bits,
+            layers=video_ff_quantize_layers,
+        )
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_quantize_layers)
+            if video_ff_quantize_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{mode}" for target, mode in video_ff_quantize_specs)
+        print(
+            "  Experimental video FF quantization: "
+            f"{count} projections, specs={spec_str}, "
+            f"group_size={video_ff_quantize_group_size or 'default'}, "
+            f"bits={video_ff_quantize_bits or 'default'}, "
+            f"layers={layer_str}"
+        )
 
     return model
 
@@ -1405,6 +1596,13 @@ def generate_video(
     generate_audio: bool = False,
     low_memory: bool = False,
     fast_mode: bool = False,
+    profile_transformer_once: bool = False,
+    profile_transformer_steps: tuple[int, ...] = (),
+    profile_transformer_blocks: tuple[int, ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_group_size: int | None = None,
+    video_ff_quantize_bits: int | None = None,
+    video_ff_quantize_layers: tuple[int, ...] = (),
     # New parameters
     image_path: str = None,
     image_strength: float = 0.95,
@@ -1451,6 +1649,25 @@ def generate_video(
         os.makedirs(output_dir, exist_ok=True)
 
     compute_dtype = parse_compute_dtype(dtype)
+    requested_profile_steps = set(profile_transformer_steps or ())
+    if profile_transformer_once:
+        requested_profile_steps.add(1)
+    active_profile_steps = tuple(
+        step for step in sorted(requested_profile_steps)
+        if step <= num_steps
+    )
+    ignored_profile_steps = tuple(
+        step for step in sorted(requested_profile_steps)
+        if step > num_steps
+    )
+    active_profile_blocks = tuple(
+        block for block in sorted(set(profile_transformer_blocks or ()))
+        if block < 48
+    )
+    ignored_profile_blocks = tuple(
+        block for block in sorted(set(profile_transformer_blocks or ()))
+        if block >= 48
+    )
     timings = RunTimings()
     run_metadata = None
     if save_run_log:
@@ -1489,6 +1706,18 @@ def generate_video(
                 "generate_audio": generate_audio,
                 "low_memory": low_memory,
                 "fast_mode": fast_mode,
+                "profile_transformer_once": profile_transformer_once,
+                "profile_transformer_steps": list(profile_transformer_steps or ()),
+                "profile_transformer_blocks": list(profile_transformer_blocks or ()),
+                "active_profile_transformer_steps": list(active_profile_steps),
+                "active_profile_transformer_blocks": list(active_profile_blocks),
+                "video_ff_quantize_specs": [
+                    {"target": target, "mode": mode}
+                    for target, mode in video_ff_quantize_specs
+                ],
+                "video_ff_quantize_group_size": video_ff_quantize_group_size,
+                "video_ff_quantize_bits": video_ff_quantize_bits,
+                "video_ff_quantize_layers": list(video_ff_quantize_layers),
                 "save_latents": save_latents,
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
@@ -1557,6 +1786,32 @@ def generate_video(
         print(f"Low memory mode: ENABLED (sequential CFG, aggressive eval)")
     if fast_mode:
         print(f"Fast mode: ENABLED (no intermediate evals)")
+    if video_ff_quantize_specs:
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_quantize_layers)
+            if video_ff_quantize_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{mode}" for target, mode in video_ff_quantize_specs)
+        print(
+            "Experimental video FF quantization: ENABLED "
+            f"(specs={spec_str}, "
+            f"group_size={video_ff_quantize_group_size or 'default'}, "
+            f"bits={video_ff_quantize_bits or 'default'}, "
+            f"layers={layer_str})"
+        )
+    if active_profile_steps:
+        steps_str = ", ".join(str(step) for step in active_profile_steps)
+        print(f"Transformer profile: ENABLED (denoise steps {steps_str}, forced eval diagnostics)")
+        if active_profile_blocks:
+            blocks_str = ", ".join(str(block) for block in active_profile_blocks)
+            print(f"Transformer block detail: ENABLED (blocks {blocks_str})")
+    if ignored_profile_steps:
+        steps_str = ", ".join(str(step) for step in ignored_profile_steps)
+        print(f"Transformer profile: ignoring out-of-range steps {steps_str} for {num_steps} denoise steps")
+    if ignored_profile_blocks:
+        blocks_str = ", ".join(str(block) for block in ignored_profile_blocks)
+        print(f"Transformer profile: ignoring out-of-range blocks {blocks_str} for 48 transformer blocks")
     if stg_scale > 0:
         print(f"STG guidance: scale={stg_scale}, mode={stg_mode}")
     if apg_scale != 1.0:
@@ -1714,6 +1969,11 @@ def generate_video(
             model = load_av_transformer(
                 weights_path, num_layers=48, compute_dtype=compute_dtype,
                 low_memory=low_memory,
+                fast_mode=fast_mode,
+                video_ff_quantize_specs=video_ff_quantize_specs,
+                video_ff_quantize_group_size=video_ff_quantize_group_size,
+                video_ff_quantize_bits=video_ff_quantize_bits,
+                video_ff_quantize_layers=video_ff_quantize_layers,
                 caption_channels=None if v2 else 3840,
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
@@ -1724,7 +1984,18 @@ def generate_video(
     else:
         print("\n[2/5] Loading transformer...")
         if not use_placeholder and weights_path:
-            velocity_model = load_transformer(weights_path, num_layers=48, compute_dtype=compute_dtype, low_memory=low_memory, fast_mode=fast_mode)
+            velocity_model = load_transformer(
+                weights_path,
+                num_layers=48,
+                compute_dtype=compute_dtype,
+                low_memory=low_memory,
+                fast_mode=fast_mode,
+                profile_transformer_once=1 in active_profile_steps,
+                video_ff_quantize_specs=video_ff_quantize_specs,
+                video_ff_quantize_group_size=video_ff_quantize_group_size,
+                video_ff_quantize_bits=video_ff_quantize_bits,
+                video_ff_quantize_layers=video_ff_quantize_layers,
+            )
 
             # Apply cross-attention scaling if specified (improves text conditioning)
             if cross_attn_scale != 1.0:
@@ -2282,6 +2553,8 @@ def generate_video(
             audio_cfg_scale=audio_cfg_scale if audio_cfg_scale is not None else (1.0 if model_variant == "distilled" else 7.0),
             rescale_scale=rescale_scale if rescale_scale is not None else (0.0 if model_variant == "distilled" else 0.7),
             dtype=compute_dtype,
+            profile_transformer_steps=active_profile_steps,
+            profile_transformer_blocks=active_profile_blocks,
             audio_enabled=generate_audio,
         )
 
@@ -3085,6 +3358,59 @@ def main():
              "the GPU is already fully utilized, so this typically doesn't help."
     )
     parser.add_argument(
+        "--profile-transformer-once",
+        action="store_true",
+        help="Diagnostic: profile the first denoise transformer call with forced eval checkpoints. "
+             "This perturbs timing and is intended for hotspot analysis, not final benchmark runs."
+    )
+    parser.add_argument(
+        "--profile-transformer-steps",
+        type=parse_profile_transformer_steps,
+        default=(),
+        metavar="STEPS",
+        help="Diagnostic: comma-separated 1-based denoise steps to profile, e.g. '1,2,8'. "
+             "Each profiled step inserts forced eval checkpoints and perturbs timing."
+    )
+    parser.add_argument(
+        "--profile-transformer-blocks",
+        type=parse_profile_transformer_blocks,
+        default=(),
+        metavar="BLOCKS",
+        help="Diagnostic: comma-separated 0-based transformer blocks to profile in detail "
+             "within selected --profile-transformer-steps, e.g. '0,40,47'."
+    )
+    parser.add_argument(
+        "--video-ff-quantize",
+        type=parse_video_ff_quantize_specs,
+        default=(),
+        metavar="TARGET:MODE[,TARGET:MODE]",
+        help="Experimental shortcut that enables video FF quantization with per-target "
+             "modes, e.g. 'project_in:mxfp8' or 'project_in:mxfp8,project_out:mxfp8'. "
+             "Targets without a mode default to mxfp8."
+    )
+    parser.add_argument(
+        "--video-ff-quantize-layers",
+        type=parse_transformer_layer_selection,
+        default=(),
+        metavar="LAYERS",
+        help="Optional 0-based layer list/ranges for --video-ff-quantize, "
+             "for example '40-47' or '32,40-47'. Leave unset to quantize all video layers."
+    )
+    parser.add_argument(
+        "--video-ff-quantize-group-size",
+        type=int,
+        default=None,
+        help="Optional group size for --video-ff-quantize. "
+             "Leave unset to use MLX defaults for the selected mode."
+    )
+    parser.add_argument(
+        "--video-ff-quantize-bits",
+        type=int,
+        default=None,
+        help="Optional bit width for --video-ff-quantize. "
+             "Leave unset to use MLX defaults for the selected mode."
+    )
+    parser.add_argument(
         "--image",
         type=str,
         default=None,
@@ -3326,6 +3652,13 @@ def main():
         generate_audio=args.generate_audio,
         low_memory=args.low_memory,
         fast_mode=args.fast_mode,
+        profile_transformer_once=args.profile_transformer_once,
+        profile_transformer_steps=args.profile_transformer_steps,
+        profile_transformer_blocks=args.profile_transformer_blocks,
+        video_ff_quantize_specs=args.video_ff_quantize,
+        video_ff_quantize_group_size=args.video_ff_quantize_group_size,
+        video_ff_quantize_bits=args.video_ff_quantize_bits,
+        video_ff_quantize_layers=args.video_ff_quantize_layers,
         # New parameters
         image_path=args.image,
         image_strength=args.image_strength,

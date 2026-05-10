@@ -53,6 +53,84 @@ class FeedForward(nn.Module):
         x = self.project_out(x)
         return x
 
+    def _quantized_linear_arrays(self, linear: nn.QuantizedLinear) -> list[mx.array]:
+        arrays = [linear.weight, linear.scales]
+        biases = linear.get("biases")
+        if biases is not None:
+            arrays.append(biases)
+        bias = linear.get("bias")
+        if bias is not None:
+            arrays.append(bias)
+        return arrays
+
+    def quantize_project_in(
+        self,
+        mode: str = "mxfp8",
+        group_size: int | None = None,
+        bits: int | None = None,
+    ) -> list[mx.array]:
+        """Replace the input projection with an MLX quantized linear layer."""
+        self.project_in.proj = nn.QuantizedLinear.from_linear(
+            self.project_in.proj,
+            group_size=group_size,
+            bits=bits,
+            mode=mode,
+        )
+
+        return self._quantized_linear_arrays(self.project_in.proj)
+
+    def quantize_project_out(
+        self,
+        mode: str = "mxfp8",
+        group_size: int | None = None,
+        bits: int | None = None,
+    ) -> list[mx.array]:
+        """Replace the output projection with an MLX quantized linear layer."""
+        self.project_out = nn.QuantizedLinear.from_linear(
+            self.project_out,
+            group_size=group_size,
+            bits=bits,
+            mode=mode,
+        )
+
+        return self._quantized_linear_arrays(self.project_out)
+
+    def quantize_projections(
+        self,
+        targets: tuple[str, ...] = ("project_out",),
+        mode: str = "mxfp8",
+        group_size: int | None = None,
+        bits: int | None = None,
+    ) -> list[mx.array]:
+        """Replace selected feed-forward projections with quantized linear layers."""
+        arrays: list[mx.array] = []
+        for target in targets:
+            if target == "project_in":
+                arrays.extend(self.quantize_project_in(
+                    mode=mode,
+                    group_size=group_size,
+                    bits=bits,
+                ))
+            elif target == "project_out":
+                arrays.extend(self.quantize_project_out(
+                    mode=mode,
+                    group_size=group_size,
+                    bits=bits,
+                ))
+            else:
+                raise ValueError(f"Unsupported FF quantization target: {target}")
+        return arrays
+
+    def profile(self, x: mx.array, prefix: str, mark_profile) -> mx.array:
+        """Forward pass with forced-eval timing checkpoints for diagnostics."""
+        x = self.project_in.proj(x)
+        mark_profile(f"{prefix} project_in", x)
+        x = nn.gelu_approx(x)
+        mark_profile(f"{prefix} gelu", x)
+        x = self.project_out(x)
+        mark_profile(f"{prefix} project_out", x)
+        return x
+
 
 class SwiGLU(nn.Module):
     """

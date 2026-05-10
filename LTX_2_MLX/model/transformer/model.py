@@ -1,5 +1,6 @@
 """LTX-2 Transformer Model for MLX (Unified Video/Audio)."""
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Optional, Tuple, Union
@@ -456,6 +457,7 @@ class LTXModel(nn.Module):
         compute_dtype: mx.Dtype = mx.bfloat16,
         low_memory: bool = False,
         fast_mode: bool = False,
+        profile_transformer_once: bool = False,
         cross_attention_adaln: bool = False,
         apply_gated_attention: bool = False,
     ):
@@ -482,6 +484,7 @@ class LTXModel(nn.Module):
             compute_dtype: Dtype for computation.
             low_memory: If True, use aggressive memory optimization (eval every 4 layers).
             fast_mode: If True, skip intermediate evals for faster inference (uses more memory).
+            profile_transformer_once: If True, print one forced-eval transformer timing trace.
         """
         super().__init__()
 
@@ -494,6 +497,9 @@ class LTXModel(nn.Module):
         self.compute_dtype = compute_dtype
         self.low_memory = low_memory
         self.fast_mode = fast_mode
+        self.profile_transformer_once = profile_transformer_once
+        self.profile_transformer_label: Optional[str] = None
+        self.profile_transformer_blocks: Tuple[int, ...] = ()
         self.cross_attention_adaln = cross_attention_adaln
         
         # Eval frequency setup
@@ -699,15 +705,97 @@ class LTXModel(nn.Module):
             else:
                 self._audio_args_preprocessor = audio_simple_preprocessor
 
+    def enable_video_ff_quantization(
+        self,
+        quantization_specs: Tuple[Tuple[str, str], ...],
+        group_size: int | None = None,
+        bits: int | None = None,
+        layers: Tuple[int, ...] = (),
+    ) -> int:
+        """Quantize selected video feed-forward projections in-place for experiments."""
+        arrays: List[mx.array] = []
+        count = 0
+        selected_layers = set(layers)
+        for i, block in enumerate(self.transformer_blocks):
+            if selected_layers and i not in selected_layers:
+                continue
+            ff = getattr(block, "ff", None)
+            if ff is None:
+                continue
+            for target, target_mode in quantization_specs:
+                arrays.extend(ff.quantize_projections(
+                    targets=(target,),
+                    mode=target_mode,
+                    group_size=group_size,
+                    bits=bits,
+                ))
+            count += len(quantization_specs)
+
+        if arrays:
+            mx.eval(*arrays)
+        return count
+
     # Audio layer debug: set to a directory path to capture per-layer audio states
     _audio_layer_debug_dir: Optional[str] = None
     _audio_layer_debug_done: bool = False
+
+    def _collect_profile_arrays(
+        self,
+        args: Optional[TransformerArgs],
+    ) -> List[mx.array]:
+        """Collect representative arrays that materialize a preprocessor/output stage."""
+        if args is None:
+            return []
+
+        arrays = [args.x, args.context, args.timesteps]
+        if args.embedded_timestep is not None:
+            arrays.append(args.embedded_timestep)
+        if args.positional_embeddings is not None:
+            arrays.extend(args.positional_embeddings)
+        if args.cross_positional_embeddings is not None:
+            arrays.extend(args.cross_positional_embeddings)
+        if args.cross_scale_shift_timestep is not None:
+            arrays.append(args.cross_scale_shift_timestep)
+        if args.cross_gate_timestep is not None:
+            arrays.append(args.cross_gate_timestep)
+        if args.prompt_timestep is not None:
+            arrays.append(args.prompt_timestep)
+        return arrays
+
+    def _print_transformer_profile(self, events: List[Tuple[str, float]]) -> None:
+        """Print a compact selected-call transformer profile."""
+        total = sum(seconds for _, seconds in events)
+        label = f" {self.profile_transformer_label}" if self.profile_transformer_label else ""
+        print(f"\n  Transformer profile{label} (forced eval diagnostics):")
+        for name, seconds in events:
+            pct = (seconds / total * 100.0) if total > 0 else 0.0
+            print(f"    {name:<24} {seconds:7.2f}s  {pct:5.1f}%")
+        print(f"    {'profiled total':<24} {total:7.2f}s")
+        self.profile_transformer_label = None
+
+    def _print_transformer_block_profiles(
+        self,
+        traces: List[Tuple[int, List[Tuple[str, float]]]],
+    ) -> None:
+        """Print detailed profiles for selected transformer blocks."""
+        if not traces:
+            return
+        label = f" {self.profile_transformer_label}" if self.profile_transformer_label else ""
+        for block_idx, events in traces:
+            total = sum(seconds for _, seconds in events)
+            print(f"\n  Transformer block {block_idx:02d} profile{label} (forced eval diagnostics):")
+            for name, seconds in events:
+                pct = (seconds / total * 100.0) if total > 0 else 0.0
+                print(f"    {name:<24} {seconds:7.2f}s  {pct:5.1f}%")
+            print(f"    {'profiled total':<24} {total:7.2f}s")
 
     def _process_transformer_blocks(
         self,
         video_args: Optional[TransformerArgs] = None,
         audio_args: Optional[TransformerArgs] = None,
         perturbations: Optional[BatchedPerturbationConfig] = None,
+        profile_events: Optional[List[Tuple[str, float]]] = None,
+        profile_block_traces: Optional[List[Tuple[int, List[Tuple[str, float]]]]] = None,
     ) -> Tuple[Optional[TransformerArgs], Optional[TransformerArgs]]:
         """Process transformer blocks."""
         capture = (
@@ -716,9 +804,38 @@ class LTXModel(nn.Module):
             and audio_args is not None
             and audio_args.enabled
         )
+        profile_group_size = 8
+        profile_group_start = 0
+        profile_group_started_at = time.perf_counter() if profile_events is not None else 0.0
+        profile_block_ids = (
+            set(self.profile_transformer_blocks)
+            if profile_events is not None
+            else set()
+        )
 
         for i, block in enumerate(self.transformer_blocks):
-            video_args, audio_args = block(video_args, audio_args, perturbations=perturbations)
+            block_profile_events = [] if i in profile_block_ids else None
+            if block_profile_events is not None:
+                arrays = []
+                if video_args is not None:
+                    arrays.append(video_args.x)
+                if audio_args is not None and audio_args.enabled:
+                    arrays.append(audio_args.x)
+                started_at = time.perf_counter()
+                if arrays:
+                    mx.eval(*arrays)
+                block_profile_events.append(("entry sync", time.perf_counter() - started_at))
+            video_args, audio_args = block(
+                video_args,
+                audio_args,
+                perturbations=perturbations,
+                profile_events=block_profile_events,
+            )
+            if (
+                block_profile_events is not None
+                and profile_block_traces is not None
+            ):
+                profile_block_traces.append((i, block_profile_events))
 
             # Reduce eval frequency for performance
             if self._eval_frequency > 0 and (i + 1) % self._eval_frequency == 0:
@@ -726,6 +843,24 @@ class LTXModel(nn.Module):
                     mx.eval(video_args.x)
                 if audio_args is not None:
                     mx.eval(audio_args.x)
+
+            if profile_events is not None and (
+                (i + 1) % profile_group_size == 0 or i == len(self.transformer_blocks) - 1
+            ):
+                arrays = []
+                if video_args is not None:
+                    arrays.append(video_args.x)
+                if audio_args is not None and audio_args.enabled:
+                    arrays.append(audio_args.x)
+                if arrays:
+                    mx.eval(*arrays)
+                now = time.perf_counter()
+                profile_events.append((
+                    f"blocks {profile_group_start:02d}-{i:02d}",
+                    now - profile_group_started_at,
+                ))
+                profile_group_start = i + 1
+                profile_group_started_at = now
 
             # Capture audio state after each block (first denoising step only)
             if capture and audio_args is not None:
@@ -794,6 +929,14 @@ class LTXModel(nn.Module):
             AudioOnly: audio_velocity
             AudioVideo: (video_velocity, audio_velocity)
         """
+        profile_this_call = self.profile_transformer_once
+        self.profile_transformer_once = False
+        profile_events: Optional[List[Tuple[str, float]]] = [] if profile_this_call else None
+        profile_block_traces: Optional[List[Tuple[int, List[Tuple[str, float]]]]] = (
+            [] if profile_this_call and self.profile_transformer_blocks else None
+        )
+        profile_started_at = time.perf_counter() if profile_events is not None else 0.0
+
         # --- Type Casting ---
         if self.compute_dtype != mx.float32:
             if video is not None:
@@ -816,6 +959,10 @@ class LTXModel(nn.Module):
                     enabled=audio.enabled,
                     sigma=audio.sigma,
                 )
+        if profile_events is not None:
+            now = time.perf_counter()
+            profile_events.append(("input dtype wrappers", now - profile_started_at))
+            profile_started_at = now
 
         # --- Preprocessing ---
         video_args = None
@@ -855,11 +1002,24 @@ class LTXModel(nn.Module):
                     ),
                     enabled=False,
                 )
+        if profile_events is not None:
+            arrays = self._collect_profile_arrays(video_args) + self._collect_profile_arrays(audio_args)
+            if arrays:
+                mx.eval(*arrays)
+            now = time.perf_counter()
+            profile_events.append(("preprocess", now - profile_started_at))
+            profile_started_at = now
 
         # --- Transformer Blocks ---
         video_args, audio_args = self._process_transformer_blocks(
-            video_args, audio_args, perturbations=perturbations
+            video_args,
+            audio_args,
+            perturbations=perturbations,
+            profile_events=profile_events,
+            profile_block_traces=profile_block_traces,
         )
+        if profile_events is not None:
+            profile_started_at = time.perf_counter()
 
         # --- Output Processing ---
         video_out = None
@@ -876,6 +1036,20 @@ class LTXModel(nn.Module):
                     (current_batch_size, 0, self.AUDIO_OUT_CHANNELS),
                     dtype=self.compute_dtype,
                 )
+        if profile_events is not None:
+            arrays = []
+            if video_out is not None:
+                arrays.append(video_out)
+            if audio_out is not None:
+                arrays.append(audio_out)
+            if arrays:
+                mx.eval(*arrays)
+            now = time.perf_counter()
+            profile_events.append(("output projection", now - profile_started_at))
+            if profile_block_traces is not None:
+                self._print_transformer_block_profiles(profile_block_traces)
+            self._print_transformer_profile(profile_events)
+            self.profile_transformer_blocks = ()
 
         # --- Return Logic ---
         if self.model_type == LTXModelType.VideoOnly:

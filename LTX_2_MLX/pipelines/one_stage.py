@@ -11,6 +11,7 @@ This is the most common pipeline for high-quality video generation.
 
 import gc
 import os
+import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
@@ -83,6 +84,9 @@ class OneStageCFGConfig:
 
     # Compute settings
     dtype: mx.Dtype = mx.bfloat16
+    profile_transformer_once: bool = False
+    profile_transformer_steps: Tuple[int, ...] = ()
+    profile_transformer_blocks: Tuple[int, ...] = ()
 
     # Audio configuration
     audio_enabled: bool = False
@@ -156,6 +160,26 @@ class OneStagePipeline:
         self.audio_patchifier = AudioPatchifier(patch_size=1)
         self.diffusion_step = EulerDiffusionStep()
         self.scheduler = LTX2Scheduler()
+
+    def _velocity_transformer(self):
+        """Return the wrapped velocity model when the pipeline uses X0Model."""
+        return (
+            self.transformer.velocity_model
+            if hasattr(self.transformer, "velocity_model")
+            else self.transformer
+        )
+
+    def _profile_next_transformer_call(
+        self,
+        label: str,
+        blocks: Tuple[int, ...] = (),
+    ) -> None:
+        """Arm the inner transformer profiler for the next model call."""
+        model = self._velocity_transformer()
+        if hasattr(model, "profile_transformer_once"):
+            model.profile_transformer_once = True
+            model.profile_transformer_label = label
+            model.profile_transformer_blocks = blocks
 
     @staticmethod
     def _latent_to_numpy(latent: mx.array) -> np.ndarray:
@@ -512,24 +536,57 @@ class OneStagePipeline:
         ge_gamma: float = 0.0,
         cross_attn_scale: float = 1.0,
         cross_attn_start_block: int = 40,
+        profile_steps: Tuple[int, ...] = (),
+        profile_blocks: Tuple[int, ...] = (),
     ) -> Tuple[LatentState, LatentState]:
         """Run joint audio-video denoising loop with separate guidance per modality."""
         num_steps = len(sigmas) - 1
         need_cfg = video_guider.enabled() or audio_guider.enabled()
         prev_velocity = None
+        profile_step_set = set(profile_steps)
+
+        def print_profile(step: int, events: List[Tuple[str, float]]) -> None:
+            total = sum(seconds for _, seconds in events)
+            print(f"\n  AV denoise step {step} profile (forced eval diagnostics):")
+            for name, seconds in events:
+                pct = (seconds / total * 100.0) if total > 0 else 0.0
+                print(f"    {name:<24} {seconds:7.2f}s  {pct:5.1f}%")
+            print(f"    {'profiled total':<24} {total:7.2f}s")
 
         if cross_attn_scale != 1.0:
             self._apply_cross_attn_scales(cross_attn_scale, cross_attn_start_block)
             print(f"  Cross-attn scaling: {cross_attn_scale}x on blocks {cross_attn_start_block}-47")
 
         for step_idx in range(num_steps):
+            profile_step = step_idx + 1
+            profile_events = [] if profile_step in profile_step_set else None
+            profile_started_at = time.perf_counter() if profile_events is not None else 0.0
+
+            def mark_profile(name: str, *arrays: mx.array) -> None:
+                nonlocal profile_started_at
+                if profile_events is None:
+                    return
+                if arrays:
+                    mx.eval(*arrays)
+                now = time.perf_counter()
+                profile_events.append((name, now - profile_started_at))
+                profile_started_at = now
+
             sigma = float(sigmas[step_idx])
 
             pos_video_modality = modality_from_state(video_state, positive_video_context, sigma)
             pos_audio_modality = audio_modality_from_state(audio_state, positive_audio_context, sigma)
+            mark_profile("modality setup")
+
+            if profile_events is not None:
+                self._profile_next_transformer_call(
+                    f"step {profile_step}",
+                    blocks=profile_blocks,
+                )
             pos_video_denoised, pos_audio_denoised = self.transformer(
                 pos_video_modality, pos_audio_modality
             )
+            mark_profile("positive transformer", pos_video_denoised, pos_audio_denoised)
 
             if need_cfg:
                 neg_video_modality = modality_from_state(video_state, negative_video_context, sigma)
@@ -537,6 +594,7 @@ class OneStagePipeline:
                 neg_video_denoised, neg_audio_denoised = self.transformer(
                     neg_video_modality, neg_audio_modality
                 )
+                mark_profile("negative transformer", neg_video_denoised, neg_audio_denoised)
                 video_denoised = video_guider.guide(pos_video_denoised, neg_video_denoised)
                 audio_denoised = audio_guider.guide(pos_audio_denoised, neg_audio_denoised)
             else:
@@ -553,6 +611,7 @@ class OneStagePipeline:
                 perturbed_video_denoised, _ = self.transformer(
                     pos_video_modality, pos_audio_modality, perturbations=stg_perturbations
                 )
+                mark_profile("stg transformer", perturbed_video_denoised)
                 video_denoised = stg_guider.guide(video_denoised, perturbed_video_denoised)
 
             if ge_gamma > 0 and sigma > 0:
@@ -569,6 +628,7 @@ class OneStagePipeline:
             audio_denoised = post_process_latent(
                 audio_denoised, audio_state.denoise_mask, audio_state.clean_latent
             )
+            mark_profile("guidance/postprocess", video_denoised, audio_denoised)
 
             new_video_latent = stepper.step(
                 sample=video_state.latent,
@@ -582,12 +642,16 @@ class OneStagePipeline:
                 sigmas=sigmas,
                 step_index=step_idx,
             )
+            mark_profile("scheduler step", new_video_latent, new_audio_latent)
 
             video_state = video_state.replace(latent=new_video_latent)
             audio_state = audio_state.replace(latent=new_audio_latent)
 
             mx.eval(video_state.latent)
             mx.eval(audio_state.latent)
+            mark_profile("state eval")
+            if profile_events is not None:
+                print_profile(profile_step, profile_events)
 
             if callback:
                 callback(step_idx + 1, num_steps)
@@ -874,6 +938,11 @@ class OneStagePipeline:
         # Add noise to video
         video_state = noiser(video_state, noise_scale=1.0)
 
+        profile_steps = set(config.profile_transformer_steps)
+        if config.profile_transformer_once:
+            profile_steps.add(1)
+        profile_blocks = tuple(sorted(set(config.profile_transformer_blocks)))
+
         # Keep an internal audio state for AV checkpoints when requested.
         audio_state = None
         audio_tools = None
@@ -950,6 +1019,8 @@ class OneStagePipeline:
                     ge_gamma=ge_gamma,
                     cross_attn_scale=cross_attn_scale,
                     cross_attn_start_block=cross_attn_start_block,
+                    profile_steps=tuple(sorted(profile_steps)),
+                    profile_blocks=profile_blocks,
                 )
         else:
             # Set up STG if enabled

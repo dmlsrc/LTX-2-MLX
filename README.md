@@ -121,6 +121,8 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **Use `--pipeline distilled`** - Fastest inference (8 steps)
 - **Use `--low-memory`** - For systems with <32GB RAM
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing
+- **Research denoise speed carefully** - `--video-ff-quantize project_out:mxfp8` can A/B weight-only quantized video FF projections, and `--video-ff-quantize-layers 40-47` narrows it to selected layers; this is non-canonical and needs quality checks
+- **Track denoise-speed experiments** - see [Performance Optimization Notes](docs/PERFORMANCE.md) for MLX runtime optimization ideas and benchmark rules
 
 See [Usage Guide](docs/USAGE.md) for memory requirements and benchmarks.
 
@@ -149,6 +151,7 @@ See [Lightricks prompting guide](https://ltx.video/blog/how-to-prompt-for-ltx-2)
 - [Usage Guide](docs/USAGE.md) - Options, examples, troubleshooting
 - [Pipelines](docs/PIPELINES.md) - All 6 pipelines explained
 - [Architecture](docs/ARCHITECTURE.md) - Model architecture details
+- [Performance Optimization Notes](docs/PERFORMANCE.md) - Denoise-speed benchmark ideas and implementation candidates
 - [Parity Testing](docs/PARITY.md) - PyTorch/MLX verification (97%+ correlation)
 - [Technical Report](https://arxiv.org/abs/2601.03233) - Official Lightricks paper
 
