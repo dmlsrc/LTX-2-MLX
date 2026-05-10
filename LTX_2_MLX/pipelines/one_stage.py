@@ -129,8 +129,8 @@ class OneStagePipeline:
     def __init__(
         self,
         transformer: LTXModel,
-        video_encoder: SimpleVideoEncoder,
-        video_decoder: SimpleVideoDecoder,
+        video_encoder: Optional[SimpleVideoEncoder],
+        video_decoder: Optional[SimpleVideoDecoder],
         audio_decoder: Optional[AudioDecoder] = None,
         vocoder: Optional[Vocoder] = None,
     ):
@@ -139,8 +139,8 @@ class OneStagePipeline:
 
         Args:
             transformer: LTX transformer model (LTXModel for video-only, LTXAVModel for audio+video).
-            video_encoder: VAE encoder for encoding images.
-            video_decoder: VAE decoder for decoding latents to video.
+            video_encoder: Optional VAE encoder for image conditioning.
+            video_decoder: Optional VAE decoder for decoding latents to video.
             audio_decoder: Optional audio VAE decoder for decoding audio latents to mel spectrograms.
             vocoder: Optional vocoder for converting mel spectrograms to waveforms.
         """
@@ -245,7 +245,7 @@ class OneStagePipeline:
             Audio waveform tensor [B, channels, samples].
         """
         if self.audio_decoder is None or self.vocoder is None:
-            raise ValueError("Audio decoder and vocoder required for audio decoding")
+            raise ValueError("Audio decoder and vocoder required for audio decode.")
 
         # Decode latent to mel spectrogram (output is log-mel, which vocoder expects)
         mel_spectrogram = self.audio_decoder(audio_latent)
@@ -918,6 +918,8 @@ class OneStagePipeline:
         video_tools = self._create_video_tools(latent_shape, config.fps)
 
         # Create image conditionings
+        if images and self.video_encoder is None:
+            raise ValueError("Video encoder required when image conditioning is provided")
         conditionings = create_image_conditionings(
             images,
             self.video_encoder,
@@ -1081,6 +1083,8 @@ class OneStagePipeline:
 
         # Apply temporal upscaler (2x frame interpolation) if provided
         if temporal_upscaler is not None:
+            if self.video_decoder is None:
+                raise ValueError("Video decoder required for temporal upscaling.")
             input_frames = final_video_latent.shape[2]
             print(f"  Temporal upscaling: {input_frames} → {input_frames * 2 - 1} latent frames...")
             # Un-normalize latent (upscaler trained on raw latents)
@@ -1119,6 +1123,8 @@ class OneStagePipeline:
             mx.clear_cache()
 
         # Decode video (auto-tile for large generations to prevent Metal watchdog timeout)
+        if self.video_decoder is None:
+            raise ValueError("Video decoder required for VAE decode.")
         effective_tiling = config._get_tiling_config()
         if effective_tiling:
             print(f"  Using tiled VAE decoding (preventing GPU watchdog timeout)")
@@ -1142,8 +1148,8 @@ class OneStagePipeline:
 
 def create_one_stage_pipeline(
     transformer: LTXModel,
-    video_encoder: SimpleVideoEncoder,
-    video_decoder: SimpleVideoDecoder,
+    video_encoder: Optional[SimpleVideoEncoder],
+    video_decoder: Optional[SimpleVideoDecoder],
     audio_decoder: Optional[AudioDecoder] = None,
     vocoder: Optional[Vocoder] = None,
 ) -> OneStagePipeline:
@@ -1152,8 +1158,8 @@ def create_one_stage_pipeline(
 
     Args:
         transformer: LTX transformer model (LTXModel or LTXAVModel).
-        video_encoder: VAE encoder.
-        video_decoder: VAE decoder.
+        video_encoder: Optional VAE encoder.
+        video_decoder: Optional VAE decoder.
         audio_decoder: Optional audio VAE decoder (required for audio generation).
         vocoder: Optional vocoder (required for audio generation).
 

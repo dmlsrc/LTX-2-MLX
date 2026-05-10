@@ -16,6 +16,15 @@ from .weight_converter import (
     save_mlx_weights,
     transpose_linear_weights,
 )
+from .transformer_cache import (
+    ComponentCacheResult,
+    TransformerCacheResult,
+    component_cache_paths,
+    default_transformer_cache_root,
+    load_component_weights_cached,
+    load_transformer_weights_cached,
+    transformer_cache_paths,
+)
 from .lora_loader import (
     LoRAConfig,
     load_lora_weights,
@@ -47,6 +56,13 @@ __all__ = [
     "load_av_transformer_weights",
     "save_mlx_weights",
     "load_mlx_weights",
+    "ComponentCacheResult",
+    "TransformerCacheResult",
+    "component_cache_paths",
+    "default_transformer_cache_root",
+    "load_component_weights_cached",
+    "load_transformer_weights_cached",
+    "transformer_cache_paths",
     # LoRA
     "LoRAConfig",
     "load_lora_weights",

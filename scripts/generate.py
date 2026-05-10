@@ -42,7 +42,13 @@ from LTX_2_MLX.components import DISTILLED_SIGMA_VALUES, VideoLatentPatchifier, 
 from LTX_2_MLX.components.guiders import LtxAPGGuider, LegacyStatefulAPGGuider, STGGuider
 from LTX_2_MLX.components.perturbations import create_batched_stg_config
 from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
-from LTX_2_MLX.loader import load_transformer_weights, load_av_transformer_weights, LoRAConfig
+from LTX_2_MLX.loader import (
+    LoRAConfig,
+    load_av_transformer_weights,
+    load_component_weights_cached,
+    load_transformer_weights,
+    load_transformer_weights_cached,
+)
 from LTX_2_MLX.loader.lora_loader import fuse_lora_into_weights
 from mlx.utils import tree_flatten
 from LTX_2_MLX.model.video_vae.simple_decoder import (
@@ -1055,6 +1061,7 @@ def encode_av_gemma_batch(
     prompts: list,
     gemma_path: str,
     ltx_weights_path: str,
+    ltx_config_path: str | None = None,
     max_length: int = 1024,
 ) -> list:
     """
@@ -1067,7 +1074,8 @@ def encode_av_gemma_batch(
     Args:
         prompts: List of text prompts to encode.
         gemma_path: Path to Gemma 3 weights directory.
-        ltx_weights_path: Path to LTX-2 AudioVideo weights.
+        ltx_weights_path: Path to LTX-2 AudioVideo text-connector weights.
+        ltx_config_path: Optional original checkpoint path for metadata/config reads.
         max_length: Maximum token length (applied to first prompt, others match).
 
     Returns:
@@ -1088,9 +1096,10 @@ def encode_av_gemma_batch(
     load_gemma3_weights(gemma, gemma_path)
 
     print(f"  Loading AV text encoder projection...")
-    if is_v2_model(ltx_weights_path):
+    config_path = ltx_config_path or ltx_weights_path
+    if is_v2_model(config_path):
         print(f"  Detected LTX-2.3 (V2) model — using V2 text encoder")
-        text_encoder = create_av_text_encoder_v2_from_checkpoint(ltx_weights_path)
+        text_encoder = create_av_text_encoder_v2_from_checkpoint(config_path)
         load_av_text_encoder_v2_weights(text_encoder, ltx_weights_path)
     else:
         text_encoder = create_av_text_encoder()
@@ -1445,6 +1454,8 @@ def load_transformer(
     video_ff_layout_layers: tuple[int, ...] = (),
     video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
     video_attn_layout_layers: tuple[int, ...] = (),
+    weights_cache_mode: str = "off",
+    weights_cache_dir: str | None = None,
 ) -> LTXModel:
     """Load transformer with weights.
 
@@ -1477,9 +1488,25 @@ def load_transformer(
         profile_transformer_once=profile_transformer_once,
     )
 
+    layouts_loaded_from_cache = False
+
     # Load weights
     if weights_path and os.path.exists(weights_path):
-        load_transformer_weights(model, weights_path)
+        if weights_cache_mode != "off":
+            load_transformer_weights_cached(
+                model,
+                weights_path,
+                cache_mode=weights_cache_mode,
+                cache_root=weights_cache_dir,
+                include_audio=False,
+                video_ff_layout_specs=video_ff_layout_specs,
+                video_ff_layout_layers=video_ff_layout_layers,
+                video_attn_layout_specs=video_attn_layout_specs,
+                video_attn_layout_layers=video_attn_layout_layers,
+            )
+            layouts_loaded_from_cache = True
+        else:
+            load_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
     if video_ff_quantize_specs:
@@ -1502,7 +1529,7 @@ def load_transformer(
             f"bits={video_ff_quantize_bits or 'default'}, "
             f"layers={layer_str}"
         )
-    if video_ff_layout_specs:
+    if video_ff_layout_specs and not layouts_loaded_from_cache:
         count = model.apply_video_ff_layout(
             layout_specs=video_ff_layout_specs,
             layers=video_ff_layout_layers,
@@ -1517,7 +1544,18 @@ def load_transformer(
             "  Experimental video FF layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
         )
-    if video_attn_layout_specs:
+    elif video_ff_layout_specs:
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_layout_layers)
+            if video_ff_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
+        print(
+            "  Experimental video FF layout: "
+            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
+        )
+    if video_attn_layout_specs and not layouts_loaded_from_cache:
         count = model.apply_video_attn_layout(
             layout_specs=video_attn_layout_specs,
             layers=video_attn_layout_layers,
@@ -1531,6 +1569,17 @@ def load_transformer(
         print(
             "  Experimental video attention layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
+        )
+    elif video_attn_layout_specs:
+        layer_str = (
+            ",".join(str(layer) for layer in video_attn_layout_layers)
+            if video_attn_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
+        print(
+            "  Experimental video attention layout: "
+            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
 
     return model
@@ -1554,6 +1603,8 @@ def load_av_transformer(
     caption_channels: int | None = 3840,
     cross_attention_adaln: bool = False,
     apply_gated_attention: bool = False,
+    weights_cache_mode: str = "off",
+    weights_cache_dir: str | None = None,
 ) -> LTXAVModel:
     """Load AudioVideo transformer with weights.
 
@@ -1590,9 +1641,25 @@ def load_av_transformer(
         av_ca_timestep_scale_multiplier=1000,
     )
 
+    layouts_loaded_from_cache = False
+
     # Load weights (including audio components)
     if weights_path and os.path.exists(weights_path):
-        load_av_transformer_weights(model, weights_path)
+        if weights_cache_mode != "off":
+            load_transformer_weights_cached(
+                model,
+                weights_path,
+                cache_mode=weights_cache_mode,
+                cache_root=weights_cache_dir,
+                include_audio=True,
+                video_ff_layout_specs=video_ff_layout_specs,
+                video_ff_layout_layers=video_ff_layout_layers,
+                video_attn_layout_specs=video_attn_layout_specs,
+                video_attn_layout_layers=video_attn_layout_layers,
+            )
+            layouts_loaded_from_cache = True
+        else:
+            load_av_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
     if video_ff_quantize_specs:
@@ -1615,7 +1682,7 @@ def load_av_transformer(
             f"bits={video_ff_quantize_bits or 'default'}, "
             f"layers={layer_str}"
         )
-    if video_ff_layout_specs:
+    if video_ff_layout_specs and not layouts_loaded_from_cache:
         count = model.apply_video_ff_layout(
             layout_specs=video_ff_layout_specs,
             layers=video_ff_layout_layers,
@@ -1630,7 +1697,18 @@ def load_av_transformer(
             "  Experimental video FF layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
         )
-    if video_attn_layout_specs:
+    elif video_ff_layout_specs:
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_layout_layers)
+            if video_ff_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
+        print(
+            "  Experimental video FF layout: "
+            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
+        )
+    if video_attn_layout_specs and not layouts_loaded_from_cache:
         count = model.apply_video_attn_layout(
             layout_specs=video_attn_layout_specs,
             layers=video_attn_layout_layers,
@@ -1644,6 +1722,17 @@ def load_av_transformer(
         print(
             "  Experimental video attention layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
+        )
+    elif video_attn_layout_specs:
+        layer_str = (
+            ",".join(str(layer) for layer in video_attn_layout_layers)
+            if video_attn_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
+        print(
+            "  Experimental video attention layout: "
+            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
 
     return model
@@ -1764,6 +1853,8 @@ def generate_video(
     video_ff_layout_layers: tuple[int, ...] = (),
     video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
     video_attn_layout_layers: tuple[int, ...] = (),
+    weights_cache_mode: str = "off",
+    weights_cache_dir: str | None = None,
     # New parameters
     image_path: str = None,
     image_strength: float = 0.95,
@@ -1891,6 +1982,8 @@ def generate_video(
                     for target, layout in video_attn_layout_specs
                 ],
                 "video_attn_layout_layers": list(video_attn_layout_layers),
+                "weights_cache_mode": weights_cache_mode,
+                "weights_cache_dir": weights_cache_dir,
                 "save_latents": save_latents,
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
@@ -1995,6 +2088,12 @@ def generate_video(
             "Experimental video attention layout: ENABLED "
             f"(specs={spec_str}, layers={layer_str})"
         )
+    if weights_cache_mode != "off":
+        cache_dir_str = weights_cache_dir or "default"
+        print(
+            "Weights cache: ENABLED "
+            f"(mode={weights_cache_mode}, dir={cache_dir_str})"
+        )
     if active_profile_steps:
         steps_str = ", ".join(str(step) for step in active_profile_steps)
         print(f"Transformer profile: ENABLED (denoise steps {steps_str}, forced eval diagnostics)")
@@ -2052,6 +2151,22 @@ def generate_video(
     # V2.3 always uses the AV text encoder (dual video/audio embeddings)
     v2 = weights_path and is_v2_model(weights_path)
     use_av_encoder = generate_audio or v2
+    component_weights_path = weights_path
+    text_weights_path = weights_path
+    if (
+        weights_path
+        and weights_cache_mode == "auto"
+        and not use_placeholder
+        and not embedding_path
+        and use_gemma
+    ):
+        component_cache = load_component_weights_cached(
+            weights_path,
+            cache_mode="auto" if weights_cache_mode == "rebuild" else weights_cache_mode,
+            cache_root=weights_cache_dir,
+        )
+        component_weights_path = str(component_cache.cache_path)
+        text_weights_path = component_weights_path
 
     print("\n[1/5] Encoding prompt...")
     if embedding_path:
@@ -2088,7 +2203,8 @@ def generate_video(
             results = encode_av_gemma_batch(
                 prompts=[prompt, neg_prompt],
                 gemma_path=gemma_path,
-                ltx_weights_path=weights_path,
+                ltx_weights_path=text_weights_path,
+                ltx_config_path=weights_path,
             )
             if results is None or results[0][0] is None:
                 print("  ERROR: Failed to encode prompt with AV encoder")
@@ -2107,7 +2223,7 @@ def generate_video(
             text_encoding, text_mask = encode_with_gemma(
                 prompt=prompt,
                 gemma_path=gemma_path,
-                ltx_weights_path=weights_path,
+                ltx_weights_path=text_weights_path,
                 use_early_layers_only=early_layers_only,
             )
             if text_encoding is None:
@@ -2119,7 +2235,7 @@ def generate_video(
             null_encoding, null_mask = encode_with_gemma(
                 prompt=neg_prompt,
                 gemma_path=gemma_path,
-                ltx_weights_path=weights_path,
+                ltx_weights_path=text_weights_path,
                 max_length=text_encoding.shape[1],
                 use_early_layers_only=early_layers_only,
             )
@@ -2173,6 +2289,8 @@ def generate_video(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                weights_cache_mode=weights_cache_mode,
+                weights_cache_dir=weights_cache_dir,
                 caption_channels=None if v2 else 3840,
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
@@ -2198,6 +2316,8 @@ def generate_video(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                weights_cache_mode=weights_cache_mode,
+                weights_cache_dir=weights_cache_dir,
             )
 
             # Apply cross-attention scaling if specified (improves text conditioning)
@@ -2213,6 +2333,19 @@ def generate_video(
             model = None
             print("  Skipping model load (placeholder mode)")
     timings.mark("transformer load")
+
+    if (
+        component_weights_path == weights_path
+        and weights_path
+        and weights_cache_mode != "off"
+        and not use_placeholder
+    ):
+        component_cache = load_component_weights_cached(
+            weights_path,
+            cache_mode="auto" if weights_cache_mode == "rebuild" else weights_cache_mode,
+            cache_root=weights_cache_dir,
+        )
+        component_weights_path = str(component_cache.cache_path)
 
     # Apply LoRA if provided
     if lora_path and model is not None:
@@ -2279,7 +2412,7 @@ def generate_video(
         print(f"  STG guidance enabled (scale={stg_scale})")
     timings.mark("guidance setup")
 
-    # Load VAE decoder
+    # Load VAE decoder.
     vae_decoder = None
     if not skip_vae:
         print(f"\n[3/5] Loading VAE decoder...")
@@ -2290,6 +2423,7 @@ def generate_video(
         timestep_cond = vae_config.get("timestep_conditioning", True)
         if decoder_blocks:
             print(f"  VAE config: {len(decoder_blocks)} blocks, base_ch={base_channels}, timestep={timestep_cond}")
+
         vae_decoder = SimpleVideoDecoder(
             decoder_blocks=decoder_blocks,
             base_channels=base_channels,
@@ -2298,9 +2432,9 @@ def generate_video(
             spatial_padding_mode=vae_spatial_padding,
         )
         if weights_path and not use_placeholder:
-             load_vae_decoder_weights(vae_decoder, weights_path)
+            load_vae_decoder_weights(vae_decoder, component_weights_path)
         elif use_placeholder:
-             print("  Skipping weights load (placeholder)")
+            print("  Skipping weights load (placeholder)")
     else:
         print("\n[3/5] VAE decoder skipped by user")
     timings.mark("vae decoder load")
@@ -2372,7 +2506,7 @@ def generate_video(
         print("[3.5/5] Loading VAE encoder...")
         video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
         if not use_placeholder:
-            load_vae_encoder_weights(video_encoder, weights_path)
+            load_vae_encoder_weights(video_encoder, component_weights_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -2384,7 +2518,7 @@ def generate_video(
             print("  Loading Audio VAE decoder...")
             audio_decoder = AudioDecoder(compute_dtype=compute_dtype)
             if weights_path:
-                load_audio_decoder_weights(audio_decoder, weights_path)
+                load_audio_decoder_weights(audio_decoder, component_weights_path)
 
             print("  Loading Vocoder...")
             is_bwe = False
@@ -2392,9 +2526,9 @@ def generate_video(
                 vocoder, is_bwe = create_vocoder_for_checkpoint(weights_path, compute_dtype)
                 if is_bwe:
                     print("  Detected BWE vocoder (LTX-2.3)")
-                    load_vocoder_with_bwe_weights(vocoder, weights_path)
+                    load_vocoder_with_bwe_weights(vocoder, component_weights_path)
                 else:
-                    load_vocoder_weights(vocoder, weights_path)
+                    load_vocoder_weights(vocoder, component_weights_path)
             else:
                 vocoder = Vocoder(compute_dtype=compute_dtype)
             print_audio_dtype_summary(compute_dtype, is_bwe)
@@ -2500,7 +2634,7 @@ def generate_video(
         print("[3.5/5] Loading VAE encoder...")
         video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
         if weights_path and not use_placeholder:
-            load_vae_encoder_weights(video_encoder, weights_path)
+            load_vae_encoder_weights(video_encoder, component_weights_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -2624,7 +2758,7 @@ def generate_video(
         print("[3.5/5] Loading VAE encoder...")
         video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
         if weights_path and not use_placeholder:
-            load_vae_encoder_weights(video_encoder, weights_path)
+            load_vae_encoder_weights(video_encoder, component_weights_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -2697,15 +2831,28 @@ def generate_video(
         if vae_decoder is None and not use_placeholder:
             raise ValueError("AV pipeline requires VAE decoder")
 
-        # Load VAE encoder (needed for image conditioning)
-        print("[3.5/5] Loading VAE encoder...")
-        video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
-        if weights_path and not use_placeholder:
-            load_vae_encoder_weights(video_encoder, weights_path)
-        else:
-            print("  Skipping weights load (placeholder)")
+        # Create image conditionings if provided. The VAE encoder is needed only
+        # for image conditioning, so text-only/video-audio runs can skip it.
+        images = []
+        if image_path:
+            print(f"  Image conditioning: {image_path} (strength={image_strength})")
+            images = [ImageCondition(
+                image_path=image_path,
+                frame_index=0,
+                strength=image_strength,
+            )]
 
-        # Load audio components only when audio generation is requested
+        video_encoder = None
+        if images:
+            print("[3.5/5] Loading VAE encoder...")
+            video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
+            if weights_path and not use_placeholder:
+                load_vae_encoder_weights(video_encoder, component_weights_path)
+            else:
+                print("  Skipping weights load (placeholder)")
+        else:
+            print("[3.5/5] VAE encoder skipped (no image conditioning)")
+
         audio_decoder = None
         vocoder = None
         audio_sample_rate = 24000
@@ -2713,7 +2860,7 @@ def generate_video(
             print("  Loading Audio VAE decoder...")
             audio_decoder = AudioDecoder(compute_dtype=compute_dtype)
             if weights_path:
-                load_audio_decoder_weights(audio_decoder, weights_path)
+                load_audio_decoder_weights(audio_decoder, component_weights_path)
 
             print("  Loading Vocoder...")
             is_bwe = False
@@ -2721,9 +2868,9 @@ def generate_video(
                 vocoder, is_bwe = create_vocoder_for_checkpoint(weights_path, compute_dtype)
                 if is_bwe:
                     print("  Detected BWE vocoder (LTX-2.3)")
-                    load_vocoder_with_bwe_weights(vocoder, weights_path)
+                    load_vocoder_with_bwe_weights(vocoder, component_weights_path)
                 else:
-                    load_vocoder_weights(vocoder, weights_path)
+                    load_vocoder_weights(vocoder, component_weights_path)
             else:
                 vocoder = Vocoder(compute_dtype=compute_dtype)
             print_audio_dtype_summary(compute_dtype, is_bwe)
@@ -2761,15 +2908,6 @@ def generate_video(
             audio_enabled=generate_audio,
         )
 
-        # Create image conditionings if provided
-        images = []
-        if image_path:
-            print(f"  Image conditioning: {image_path} (strength={image_strength})")
-            images = [ImageCondition(
-                image_path=image_path,
-                frame_index=0,
-                strength=image_strength,
-            )]
         timings.mark("av pipeline prep")
 
         # Run pipeline with audio
@@ -3460,6 +3598,27 @@ def main():
         help="Path to weights"
     )
     parser.add_argument(
+        "--weights-cache",
+        choices=["off", "auto", "rebuild"],
+        default="off",
+        help=(
+            "Optional disposable converted-weight cache. 'auto' builds on first "
+            "use and reuses matching transformer/component artifacts; 'rebuild' "
+            "forces fresh cache files; 'off' loads stock weights directly."
+        ),
+    )
+    parser.add_argument(
+        "--weights-cache-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory for --weights-cache artifacts. Defaults to "
+            "$LTX_MLX_WEIGHTS_CACHE_DIR, then /Users/Shared/huggingface/mlx/"
+            "LTX-2-MLX-cache when available. The older "
+            "$LTX_MLX_TRANSFORMER_CACHE_DIR is still honored."
+        ),
+    )
+    parser.add_argument(
         "--placeholder",
         action="store_true",
         help="Use placeholder inference (skip model loading)"
@@ -3899,6 +4058,8 @@ def main():
         video_ff_layout_layers=args.video_ff_layout_layers,
         video_attn_layout_specs=args.video_attn_layout,
         video_attn_layout_layers=args.video_attn_layout_layers,
+        weights_cache_mode=args.weights_cache,
+        weights_cache_dir=args.weights_cache_dir,
         # New parameters
         image_path=args.image,
         image_strength=args.image_strength,
