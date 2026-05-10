@@ -189,6 +189,24 @@ Precision exceptions are intentionally narrow:
 - Audio VAE decode and the plain vocoder follow `--dtype`.
 - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
 
+### VAE Spatial Padding
+
+The decoder defaults to `--vae-spatial-padding reflect`, matching the released
+Lightricks VAE behavior. `--vae-spatial-padding zero` is an opt-in,
+non-canonical decode mode that changes only the VAE decoder's spatial
+convolution boundary condition:
+
+```bash
+python scripts/generate.py "Your prompt" \
+    --vae-spatial-padding zero
+```
+
+Saved-latent A/B tests on motion-heavy bakery and talking-subject clips showed
+`zero` substantially reduced edge ghosting, background flicker, and boundary
+smearing versus `reflect`, with no meaningful decode-time cost. Keep `reflect`
+when you need closest parity with the released decoder; try `zero` when visual
+stability at frame boundaries matters more than strict canonical behavior.
+
 ### Low Memory Mode
 
 Aggressive optimization for systems with <32GB RAM:
@@ -271,10 +289,26 @@ python scripts/decode_latent_debug.py \
     --latent outputs/sample.npz \
     --weights weights/ltx-2/ltx-2.3-22b-distilled-1.1.safetensors \
     --modes auto \
+    --vae-spatial-padding zero \
     --decode-audio \
     --show-memory \
     --output-dir outputs/decode_tests
 ```
+
+For VAE boundary/padding A/B checks, `probe_vae_boundary.py` can mux the saved
+audio into each variant so the results can be judged as complete clips:
+
+```bash
+python scripts/probe_vae_boundary.py \
+    --latent outputs/sample.npz \
+    --weights weights/ltx-2/ltx-2.3-22b-distilled-1.1.safetensors \
+    --variants orig orig_zero_convpad \
+    --decode-audio \
+    --output-dir outputs/boundary_probe
+```
+
+The useful comparison is usually `orig` versus `orig_zero_convpad`: those modes
+decode the same latent while changing only the decoder's spatial padding policy.
 
 ## Troubleshooting
 

@@ -1163,6 +1163,7 @@ def generate_video(
     gemma_path: str = "weights/gemma-3-12b",
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
+    vae_spatial_padding: str = "reflect",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
     spatial_upscaler_weights: str = None,
@@ -1227,6 +1228,10 @@ def generate_video(
     print(f"Compute dtype: {compute_dtype_name(compute_dtype)}")
     if skip_vae:
         print(f"VAE decoding: SKIPPED")
+    elif vae_spatial_padding == "zero":
+        print("VAE spatial padding: zero (experimental boundary-flicker mitigation)")
+    else:
+        print("VAE spatial padding: reflect")
     if upscale_spatial:
         print(f"Spatial upscaling: 2x (output will be {width*2}x{height*2})")
     if upscale_temporal:
@@ -1478,6 +1483,7 @@ def generate_video(
             base_channels=base_channels,
             timestep_conditioning=timestep_cond,
             compute_dtype=compute_dtype,
+            spatial_padding_mode=vae_spatial_padding,
         )
         if weights_path and not use_placeholder:
              load_vae_decoder_weights(vae_decoder, weights_path)
@@ -2643,6 +2649,16 @@ def main():
         help="Compute dtype for model execution (default: bfloat16)"
     )
     parser.add_argument(
+        "--vae-spatial-padding",
+        choices=["reflect", "zero"],
+        default="reflect",
+        help=(
+            "Spatial padding mode for VAE decoder convolutions. reflect matches the "
+            "released Lightricks decoder; zero is an experimental mitigation for "
+            "edge/background flicker."
+        ),
+    )
+    parser.add_argument(
         "--model-variant",
         type=str,
         choices=["distilled", "dev"],
@@ -2901,6 +2917,7 @@ def main():
         gemma_path=args.gemma_path,
         use_gemma=not args.no_gemma,
         dtype=args.dtype,
+        vae_spatial_padding=args.vae_spatial_padding,
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
         spatial_upscaler_weights=args.spatial_upscaler_weights,

@@ -160,7 +160,7 @@ def load_latents(path: str, mx_mod: Any, latent_dtype: str = "auto"):
     return latent, audio_latent
 
 
-def make_decoder(weights_path: str, compute_dtype: Any):
+def make_decoder(weights_path: str, compute_dtype: Any, spatial_padding_mode: str = "reflect"):
     from scripts.generate import get_vae_config
     from LTX_2_MLX.model.video_vae.simple_decoder import SimpleVideoDecoder, load_vae_decoder_weights
 
@@ -179,6 +179,7 @@ def make_decoder(weights_path: str, compute_dtype: Any):
         base_channels=base_channels,
         timestep_conditioning=timestep_conditioning,
         compute_dtype=compute_dtype,
+        spatial_padding_mode=spatial_padding_mode,
     )
     load_vae_decoder_weights(decoder, weights_path)
     gc.collect()
@@ -483,6 +484,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Dtype to cast loaded video latent to. auto uses final_video_latent_mlx_dtype.",
     )
     parser.add_argument(
+        "--vae-spatial-padding",
+        choices=["reflect", "zero"],
+        default="reflect",
+        help=(
+            "Spatial padding mode for VAE decoder convolutions. reflect matches the "
+            "released Lightricks decoder; zero is an experimental edge-flicker mitigation."
+        ),
+    )
+    parser.add_argument(
         "--modes",
         nargs="+",
         default=["auto"],
@@ -510,8 +520,9 @@ def main(argv: list[str] | None = None) -> None:
         latent, audio_latent = load_latents(args.latent, mx, args.latent_dtype)
     compute_dtype = parse_dtype(mx, args.vae_dtype)
     print(f"VAE compute dtype: {args.vae_dtype}")
+    print(f"VAE spatial padding: {args.vae_spatial_padding}")
     with Timer(timings, "load vae decoder"):
-        decoder = make_decoder(args.weights, compute_dtype)
+        decoder = make_decoder(args.weights, compute_dtype, args.vae_spatial_padding)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

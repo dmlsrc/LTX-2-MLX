@@ -10,6 +10,16 @@ import math
 from .ops import unpatchify
 
 
+_SPATIAL_PADDING_MODES = {"reflect", "zero"}
+
+
+def _validate_spatial_padding_mode(mode: str) -> str:
+    if mode not in _SPATIAL_PADDING_MODES:
+        allowed = ", ".join(sorted(_SPATIAL_PADDING_MODES))
+        raise ValueError(f"Unsupported VAE spatial padding mode {mode!r}; expected one of: {allowed}")
+    return mode
+
+
 def get_timestep_embedding(timesteps: mx.array, embedding_dim: int = 256) -> mx.array:
     """
     Create sinusoidal timestep embeddings.
@@ -76,17 +86,22 @@ class Conv3dSimple(nn.Module):
         out_channels: int,
         kernel_size: int = 3,
         padding: int = 1,
+        spatial_padding_mode: str = "reflect",
     ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
         self.padding = padding
+        self.spatial_padding_mode = _validate_spatial_padding_mode(spatial_padding_mode)
 
         # PyTorch weight format: (out_C, in_C, T, H, W)
         k = kernel_size
         self.weight = mx.zeros((out_channels, in_channels, k, k, k))
         self.bias = mx.zeros((out_channels,))
+
+    def set_spatial_padding_mode(self, mode: str) -> None:
+        self.spatial_padding_mode = _validate_spatial_padding_mode(mode)
 
     def __call__(self, x: mx.array, causal: bool = True) -> mx.array:
         """
@@ -103,19 +118,23 @@ class Conv3dSimple(nn.Module):
         p = self.padding
         k = self.kernel_size
 
-        # Spatial padding with reflect mode (matches PyTorch decoder_spatial_padding_mode=REFLECT)
         if p > 0:
-            # MLX doesn't have native reflect padding, so we implement it manually
-            # Reflect padding mirrors the edge pixels: [1,2,3] with pad=2 -> [3,2,1,2,3,2,1]
-            # For spatial dimensions (H and W)
-            # Pad height (dim 3)
-            h_pad_top = x[:, :, :, 1:p+1, :][:, :, :, ::-1, :]  # Reflect top edge
-            h_pad_bot = x[:, :, :, -(p+1):-1, :][:, :, :, ::-1, :]  # Reflect bottom edge
-            x = mx.concatenate([h_pad_top, x, h_pad_bot], axis=3)
-            # Pad width (dim 4)
-            w_pad_left = x[:, :, :, :, 1:p+1][:, :, :, :, ::-1]  # Reflect left edge
-            w_pad_right = x[:, :, :, :, -(p+1):-1][:, :, :, :, ::-1]  # Reflect right edge
-            x = mx.concatenate([w_pad_left, x, w_pad_right], axis=4)
+            if self.spatial_padding_mode == "reflect":
+                # Matches PyTorch decoder_spatial_padding_mode=REFLECT.
+                h_pad_top = x[:, :, :, 1 : p + 1, :][:, :, :, ::-1, :]
+                h_pad_bot = x[:, :, :, -(p + 1) : -1, :][:, :, :, ::-1, :]
+                x = mx.concatenate([h_pad_top, x, h_pad_bot], axis=3)
+                w_pad_left = x[:, :, :, :, 1 : p + 1][:, :, :, :, ::-1]
+                w_pad_right = x[:, :, :, :, -(p + 1) : -1][:, :, :, :, ::-1]
+                x = mx.concatenate([w_pad_left, x, w_pad_right], axis=4)
+            elif self.spatial_padding_mode == "zero":
+                top = mx.zeros((b, c, t, p, w), dtype=x.dtype)
+                bottom = mx.zeros((b, c, t, p, w), dtype=x.dtype)
+                x = mx.concatenate([top, x, bottom], axis=3)
+                _, _, _, h2, _ = x.shape
+                left = mx.zeros((b, c, t, h2, p), dtype=x.dtype)
+                right = mx.zeros((b, c, t, h2, p), dtype=x.dtype)
+                x = mx.concatenate([left, x, right], axis=4)
 
         # Temporal padding: need k-1 total padding to preserve temporal dim
         t_pad_needed = k - 1
@@ -378,10 +397,12 @@ class SimpleVideoDecoder(nn.Module):
         base_channels: int = 128,
         timestep_conditioning: bool = True,
         compute_dtype: mx.Dtype = mx.bfloat16,
+        spatial_padding_mode: str = "reflect",
     ):
         super().__init__()
         self.compute_dtype = compute_dtype
         self.timestep_conditioning = timestep_conditioning
+        self.spatial_padding_mode = _validate_spatial_padding_mode(spatial_padding_mode)
 
         if decoder_blocks is None:
             decoder_blocks = _DEFAULT_DECODER_BLOCKS
@@ -445,6 +466,25 @@ class SimpleVideoDecoder(nn.Module):
         else:
             self.timestep_scale_multiplier = None
             self.last_time_embedder = None
+
+        self.set_spatial_padding_mode(self.spatial_padding_mode)
+
+    def _iter_convs(self):
+        yield self.conv_in
+        yield self.conv_out
+        for block in self.up_blocks:
+            if isinstance(block, ResBlockGroup):
+                for res_block in block.res_blocks:
+                    yield res_block.conv1
+                    yield res_block.conv2
+            elif isinstance(block, DepthToSpaceUpsample3d):
+                yield block.conv
+
+    def set_spatial_padding_mode(self, mode: str) -> None:
+        """Set spatial padding mode for every decoder convolution."""
+        self.spatial_padding_mode = _validate_spatial_padding_mode(mode)
+        for conv in self._iter_convs():
+            conv.set_spatial_padding_mode(self.spatial_padding_mode)
 
     def __call__(
         self,

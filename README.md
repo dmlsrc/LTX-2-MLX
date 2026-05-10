@@ -113,6 +113,7 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 
 - **Use default BF16 compute** - override with `--dtype float16` or `--dtype float32` only for experiments
 - **Audio follows compute dtype where safe** - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island matching Lightricks' precision caution
+- **Try `--vae-spatial-padding zero` for edge artifacts** - opt-in, non-canonical VAE decode mode that has tested much cleaner than the default on boundary/background flicker A/Bs
 - **Save final latents for decode-only tests** - add `--save-latents` to write an NPZ sidecar next to the requested output
 - **Use `--pipeline distilled`** - Fastest inference (8 steps)
 - **Use `--low-memory`** - For systems with <32GB RAM
