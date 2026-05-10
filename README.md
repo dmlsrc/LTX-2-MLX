@@ -115,6 +115,9 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **Audio follows compute dtype where safe** - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island matching Lightricks' precision caution
 - **Try `--vae-spatial-padding zero` for edge artifacts** - opt-in, non-canonical VAE decode mode that has tested much cleaner than the default on boundary/background flicker A/Bs
 - **Save final latents for decode-only tests** - add `--save-latents` to write an NPZ sidecar next to the requested output
+- **Save text conditioning for denoise A/Bs** - add `--save-text-embeddings` to write the positive/negative AV text encoder outputs as an `_text.npz` sidecar that can be reused with `--embedding`
+- **Save run metadata for reproducibility** - add `--save-run-log` to write params, argv, outputs, and timings as an `_run.json` sidecar, starting before the long generation step
+- **Save all reproducibility sidecars** - add `--save-all-sidecars` to turn on final latents, text conditioning, and run metadata together
 - **Use `--pipeline distilled`** - Fastest inference (8 steps)
 - **Use `--low-memory`** - For systems with <32GB RAM
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing

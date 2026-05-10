@@ -3,11 +3,13 @@
 
 import argparse
 import gc
+import json
 import os
 import math
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import mlx.core as mx
@@ -84,6 +86,91 @@ def latent_sidecar_path(output_path: str) -> str:
     return os.path.splitext(output_path)[0] + ".npz"
 
 
+def text_sidecar_path(output_path: str) -> str:
+    """Use the requested output stem for the text-conditioning sidecar."""
+    return os.path.splitext(output_path)[0] + "_text.npz"
+
+
+def run_log_sidecar_path(output_path: str) -> str:
+    """Use the requested output stem for the run metadata sidecar."""
+    return os.path.splitext(output_path)[0] + "_run.json"
+
+
+def mlx_array_to_numpy(array: mx.array) -> np.ndarray:
+    """Convert an MLX array to NumPy, preserving dtype where NumPy supports it."""
+    mx.eval(array)
+    try:
+        return np.array(array)
+    except (TypeError, RuntimeError):
+        return np.array(array.astype(mx.float32))
+
+
+def save_text_conditioning_sidecar(
+    path: str,
+    positive_video_encoding: mx.array,
+    negative_video_encoding: mx.array,
+    positive_mask: mx.array,
+    negative_mask: mx.array,
+    positive_audio_encoding: mx.array | None = None,
+    negative_audio_encoding: mx.array | None = None,
+    prompt: str | None = None,
+    negative_prompt: str | None = None,
+) -> None:
+    """Save text/video/audio conditioning tensors for later A/B diagnostics."""
+    arrays = {
+        "schema_version": np.array(1, dtype=np.int32),
+        "prompt": np.array(prompt or ""),
+        "negative_prompt": np.array(negative_prompt or ""),
+        "positive_video_encoding": mlx_array_to_numpy(positive_video_encoding),
+        "positive_video_encoding_mlx_dtype": str(positive_video_encoding.dtype),
+        "negative_video_encoding": mlx_array_to_numpy(negative_video_encoding),
+        "negative_video_encoding_mlx_dtype": str(negative_video_encoding.dtype),
+        "positive_attention_mask": mlx_array_to_numpy(positive_mask),
+        "positive_attention_mask_mlx_dtype": str(positive_mask.dtype),
+        "negative_attention_mask": mlx_array_to_numpy(negative_mask),
+        "negative_attention_mask_mlx_dtype": str(negative_mask.dtype),
+    }
+    if positive_audio_encoding is not None:
+        arrays["positive_audio_encoding"] = mlx_array_to_numpy(positive_audio_encoding)
+        arrays["positive_audio_encoding_mlx_dtype"] = str(positive_audio_encoding.dtype)
+    if negative_audio_encoding is not None:
+        arrays["negative_audio_encoding"] = mlx_array_to_numpy(negative_audio_encoding)
+        arrays["negative_audio_encoding_mlx_dtype"] = str(negative_audio_encoding.dtype)
+
+    output_dir = os.path.dirname(path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    np.savez(path, **arrays)
+    print(f"  Saved text conditioning: {path}")
+
+
+def save_run_log_sidecar(
+    path: str,
+    payload: dict,
+    timings: "RunTimings",
+    status: str,
+    outputs: dict | None = None,
+) -> None:
+    """Save human-readable run metadata and timing information."""
+    log = dict(payload)
+    now = datetime.now(timezone.utc).isoformat()
+    log["status"] = status
+    log["updated_at"] = now
+    if status != "started":
+        log["finished_at"] = now
+    log["timings"] = timings.to_dict()
+    if outputs:
+        log["outputs"] = outputs
+
+    output_dir = os.path.dirname(path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print(f"  Saved run log: {path}")
+
+
 def format_duration(seconds: float) -> str:
     if seconds >= 60:
         minutes = int(seconds // 60)
@@ -122,6 +209,16 @@ class RunTimings:
         for label, seconds in self.sections:
             print(f"  {label:<{width}}  {format_duration(seconds)}")
         print(f"  {'total':<{width}}  {format_duration(total)}")
+
+    def to_dict(self) -> dict:
+        total = time.perf_counter() - self.started_at
+        return {
+            "sections": [
+                {"label": label, "seconds": seconds}
+                for label, seconds in self.sections
+            ],
+            "total_seconds": total,
+        }
 
 
 class DenoiseProgress:
@@ -837,7 +934,7 @@ def encode_av_gemma_batch(
         # Diagnostic: check encoding statistics for anomalies
         import numpy as _np
         for name, enc in [("video", av_output.video_encoding), ("audio", av_output.audio_encoding)]:
-            arr = _np.array(enc[0])
+            arr = _np.array(enc[0].astype(mx.float32))
             real_part = arr[:real_token_count]
             reg_part = arr[real_token_count:]
             print(f"    {name} real[:{real_token_count}]: mean={real_part.mean():.4f} std={real_part.std():.4f} "
@@ -974,6 +1071,108 @@ def load_text_embedding(embedding_path: str) -> tuple:
         print(f"  Original prompt: {data['prompt']}")
 
     return embedding, mask
+
+
+def _npz_scalar_str(data: np.lib.npyio.NpzFile, key: str) -> str | None:
+    if key not in data.files:
+        return None
+    value = data[key]
+    if isinstance(value, np.ndarray) and value.shape == ():
+        return str(value.item())
+    return str(value)
+
+
+def _mlx_dtype_from_metadata(dtype_name: str | None) -> mx.Dtype | None:
+    if not dtype_name:
+        return None
+    normalized = dtype_name.lower()
+    if "bfloat16" in normalized:
+        return mx.bfloat16
+    if "float16" in normalized:
+        return mx.float16
+    if "float32" in normalized:
+        return mx.float32
+    if "int32" in normalized:
+        return mx.int32
+    if "int64" in normalized:
+        return mx.int64
+    if "bool" in normalized:
+        return mx.bool_
+    return None
+
+
+def _load_mlx_npz_array(
+    data: np.lib.npyio.NpzFile,
+    key: str,
+    dtype_key: str | None = None,
+) -> mx.array:
+    array = mx.array(data[key])
+    dtype = _mlx_dtype_from_metadata(_npz_scalar_str(data, dtype_key) if dtype_key else None)
+    if dtype is not None and array.dtype != dtype:
+        array = array.astype(dtype)
+    return array
+
+
+def load_text_conditioning(embedding_path: str, use_av_encoder: bool) -> dict:
+    """Load legacy text embeddings or the richer `_text.npz` conditioning sidecar."""
+    data = np.load(embedding_path)
+
+    if "positive_video_encoding" not in data.files:
+        embedding, mask = load_text_embedding(embedding_path)
+        loaded = {
+            "format": "legacy",
+            "positive_video_encoding": embedding,
+            "positive_attention_mask": mask,
+            "negative_video_encoding": None,
+            "negative_attention_mask": None,
+            "positive_audio_encoding": None,
+            "negative_audio_encoding": None,
+        }
+        if use_av_encoder:
+            print("  WARNING: Legacy pre-computed embeddings do not include audio conditioning.")
+        return loaded
+
+    loaded = {
+        "format": "text_conditioning",
+        "positive_video_encoding": _load_mlx_npz_array(
+            data,
+            "positive_video_encoding",
+            "positive_video_encoding_mlx_dtype",
+        ),
+        "positive_attention_mask": _load_mlx_npz_array(
+            data,
+            "positive_attention_mask",
+            "positive_attention_mask_mlx_dtype",
+        ),
+        "negative_video_encoding": _load_mlx_npz_array(
+            data,
+            "negative_video_encoding",
+            "negative_video_encoding_mlx_dtype",
+        ) if "negative_video_encoding" in data.files else None,
+        "negative_attention_mask": _load_mlx_npz_array(
+            data,
+            "negative_attention_mask",
+            "negative_attention_mask_mlx_dtype",
+        ) if "negative_attention_mask" in data.files else None,
+        "positive_audio_encoding": _load_mlx_npz_array(
+            data,
+            "positive_audio_encoding",
+            "positive_audio_encoding_mlx_dtype",
+        ) if "positive_audio_encoding" in data.files else None,
+        "negative_audio_encoding": _load_mlx_npz_array(
+            data,
+            "negative_audio_encoding",
+            "negative_audio_encoding_mlx_dtype",
+        ) if "negative_audio_encoding" in data.files else None,
+    }
+
+    print(f"  Loaded text conditioning from {embedding_path}")
+    print(f"  Video shape: {loaded['positive_video_encoding'].shape}")
+    if loaded["positive_audio_encoding"] is not None:
+        print(f"  Audio shape: {loaded['positive_audio_encoding'].shape}")
+    if _npz_scalar_str(data, "prompt"):
+        print(f"  Original prompt: {_npz_scalar_str(data, 'prompt')}")
+    return loaded
 
 
 def load_vae_decoder(weights_path: str) -> VideoDecoder:
@@ -1231,6 +1430,8 @@ def generate_video(
     control_strength: float = 0.95,
     save_control: bool = False,
     save_latents: bool = False,
+    save_text_embeddings: bool = False,
+    save_run_log: bool = False,
     ge_gamma: float = 0.0,
     output_fps: float = NATIVE_FPS,
     output_speed: float = 1.0,
@@ -1251,6 +1452,68 @@ def generate_video(
 
     compute_dtype = parse_compute_dtype(dtype)
     timings = RunTimings()
+    run_metadata = None
+    if save_run_log:
+        run_metadata = {
+            "schema_version": 1,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "argv": sys.argv[:],
+            "cwd": os.getcwd(),
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "output_path": output_path,
+            "sidecars": {
+                "run_log": run_log_sidecar_path(output_path),
+                "final_latents": latent_sidecar_path(output_path) if save_latents else None,
+                "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
+            },
+            "parameters": {
+                "height": height,
+                "width": width,
+                "num_frames": num_frames,
+                "num_steps": num_steps,
+                "cfg_scale": cfg_scale,
+                "guidance_rescale": guidance_rescale,
+                "seed": seed,
+                "weights_path": weights_path,
+                "gemma_path": gemma_path,
+                "embedding_path": embedding_path,
+                "use_gemma": use_gemma,
+                "use_placeholder": use_placeholder,
+                "skip_vae": skip_vae,
+                "dtype": dtype if isinstance(dtype, str) else str(dtype),
+                "compute_dtype": compute_dtype_name(compute_dtype),
+                "vae_spatial_padding": vae_spatial_padding,
+                "model_variant": model_variant,
+                "pipeline_type": pipeline_type,
+                "generate_audio": generate_audio,
+                "low_memory": low_memory,
+                "fast_mode": fast_mode,
+                "save_latents": save_latents,
+                "save_text_embeddings": save_text_embeddings,
+                "save_run_log": save_run_log,
+                "output_fps": output_fps,
+                "output_speed": output_speed,
+                "image_path": image_path,
+                "image_strength": image_strength,
+                "lora_path": lora_path,
+                "lora_strength": lora_strength,
+                "upscale_spatial": upscale_spatial,
+                "upscale_temporal": upscale_temporal,
+                "stg_scale": stg_scale,
+                "stg_mode": stg_mode,
+                "apg_scale": apg_scale,
+                "apg_eta": apg_eta,
+                "apg_norm_threshold": apg_norm_threshold,
+                "apg_momentum": apg_momentum,
+                "control_video": control_video,
+                "control_type": control_type,
+                "control_strength": control_strength,
+                "ge_gamma": ge_gamma,
+                "audio_cfg_scale": audio_cfg_scale,
+                "rescale_scale": rescale_scale,
+            },
+        }
 
     print(f"\n{'='*50}")
     print(f"LTX-2 MLX Video Generation")
@@ -1274,6 +1537,22 @@ def generate_video(
         print(f"Audio generation: ENABLED (stereo 24kHz)")
     if save_latents:
         print(f"Final latents: ENABLED")
+    if save_text_embeddings:
+        print(f"Text conditioning sidecar: ENABLED")
+    if save_run_log:
+        print(f"Run log sidecar: ENABLED")
+        save_run_log_sidecar(
+            run_log_sidecar_path(output_path),
+            run_metadata,
+            timings,
+            status="started",
+            outputs={
+                "video": output_path,
+                "audio_wav": os.path.splitext(output_path)[0] + ".wav" if generate_audio else None,
+                "final_latents": latent_sidecar_path(output_path) if save_latents else None,
+                "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
+            },
+        )
     if low_memory:
         print(f"Low memory mode: ENABLED (sequential CFG, aggressive eval)")
     if fast_mode:
@@ -1326,16 +1605,24 @@ def generate_video(
 
     print("\n[1/5] Encoding prompt...")
     if embedding_path:
-        text_encoding, text_mask = load_text_embedding(embedding_path)
+        loaded_conditioning = load_text_conditioning(embedding_path, use_av_encoder)
+        text_encoding = loaded_conditioning["positive_video_encoding"]
+        text_mask = loaded_conditioning["positive_attention_mask"]
+        null_encoding = loaded_conditioning["negative_video_encoding"]
+        null_mask = loaded_conditioning["negative_attention_mask"]
+        text_audio_encoding = loaded_conditioning["positive_audio_encoding"]
+        null_audio_encoding = loaded_conditioning["negative_audio_encoding"]
+
+        if null_encoding is None or null_mask is None:
+            null_encoding, null_mask = create_null_text_encoding(
+                batch_size=1, max_tokens=text_encoding.shape[1], embed_dim=text_encoding.shape[2],
+            )
         if use_av_encoder:
-            print("  WARNING: Pre-computed embeddings don't include audio encoding. Audio quality may be degraded.")
-            text_audio_encoding = text_encoding  # Fallback: use video encoding for audio
-        # Still need null encoding for CFG
-        null_encoding, null_mask = create_null_text_encoding(
-            batch_size=1, max_tokens=text_encoding.shape[1], embed_dim=text_encoding.shape[2],
-        )
-        if use_av_encoder:
-            null_audio_encoding = null_encoding
+            if text_audio_encoding is None:
+                print("  WARNING: Pre-computed embeddings don't include positive audio conditioning. Reusing video conditioning.")
+                text_audio_encoding = text_encoding
+            if null_audio_encoding is None:
+                null_audio_encoding = null_encoding
     elif use_gemma:
         # Check if Gemma weights exist
         if not os.path.exists(gemma_path):
@@ -1401,6 +1688,23 @@ def generate_video(
             null_audio_encoding = null_encoding
         print("  Using DUMMY encoding (test mode - output will be random)")
     timings.mark("prompt encoding")
+
+    if save_text_embeddings:
+        if text_encoding is None or null_encoding is None or text_mask is None or null_mask is None:
+            print("  WARNING: Text conditioning sidecar requested, but text encodings are unavailable")
+        else:
+            save_text_conditioning_sidecar(
+                text_sidecar_path(output_path),
+                positive_video_encoding=text_encoding,
+                negative_video_encoding=null_encoding,
+                positive_mask=text_mask,
+                negative_mask=null_mask,
+                positive_audio_encoding=text_audio_encoding,
+                negative_audio_encoding=null_audio_encoding,
+                prompt=prompt,
+                negative_prompt=negative_prompt or "",
+            )
+            timings.mark("text sidecar save")
 
     # Load model
     # V2.3 always uses the AV transformer (dual video/audio cross-attention)
@@ -2042,6 +2346,20 @@ def generate_video(
             save_video(frames, output_path, fps=output_fps, speed=output_speed)
         print(f"Done! Video saved to {output_path}")
         timings.mark("output save")
+        if save_run_log and run_metadata is not None:
+            save_run_log_sidecar(
+                run_log_sidecar_path(output_path),
+                run_metadata,
+                timings,
+                status="completed",
+                outputs={
+                    "video": output_path,
+                    "audio_wav": os.path.splitext(output_path)[0] + ".wav" if audio_waveform is not None else None,
+                    "final_latents": latent_sidecar_path(output_path) if save_latents else None,
+                    "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
+                },
+            )
+            timings.mark("run log save")
         timings.print_summary()
         return
 
@@ -2425,8 +2743,24 @@ def generate_video(
     # Note: Audio generation is handled by the AUDIO-VIDEO PIPELINE section above
     print(f"\nSaving video to {output_path}...")
     save_video(frames, output_path, fps=output_fps, speed=output_speed)
+    timings.mark("output save")
 
     print(f"\nDone! Video saved to {output_path}")
+    if save_run_log and run_metadata is not None:
+        save_run_log_sidecar(
+            run_log_sidecar_path(output_path),
+            run_metadata,
+            timings,
+            status="completed",
+            outputs={
+                "video": output_path,
+                "audio_wav": None,
+                "final_latents": None,
+                "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
+            },
+        )
+        timings.mark("run log save")
+    timings.print_summary()
 
     if use_placeholder:
         print("\nNote: This is a placeholder output. Full inference requires:")
@@ -2862,6 +3196,33 @@ def main():
         help="Save final video/audio latents as an NPZ sidecar next to the requested output"
     )
     parser.add_argument(
+        "--save-text-embeddings",
+        "--save-text-conditioning",
+        dest="save_text_embeddings",
+        action="store_true",
+        help=(
+            "Save positive/negative video/audio text conditioning tensors as an "
+            "_text.npz sidecar next to the requested output"
+        ),
+    )
+    parser.add_argument(
+        "--save-run-log",
+        "--save-metadata",
+        dest="save_run_log",
+        action="store_true",
+        help="Save generation parameters, argv, output paths, and timings as an _run.json sidecar",
+    )
+    parser.add_argument(
+        "--save-all-sidecars",
+        "--save-debug-sidecars",
+        dest="save_all_sidecars",
+        action="store_true",
+        help=(
+            "Enable all reproducibility/debug sidecars: final latents, text "
+            "conditioning, and run metadata"
+        ),
+    )
+    parser.add_argument(
         "--tiled-vae",
         action="store_true",
         help="Use tiled VAE decoding for lower memory usage"
@@ -2910,6 +3271,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.save_all_sidecars:
+        args.save_latents = True
+        args.save_text_embeddings = True
+        args.save_run_log = True
 
     # Auto-select weights based on model variant
     if args.model_variant == "dev":
@@ -2990,6 +3356,8 @@ def main():
         control_strength=args.control_strength,
         save_control=args.save_control,
         save_latents=args.save_latents,
+        save_text_embeddings=args.save_text_embeddings,
+        save_run_log=args.save_run_log,
         # GE (Gradient Estimation) parameter
         ge_gamma=args.ge_gamma,
         # Output FPS and speed

@@ -177,6 +177,9 @@ python scripts/generate.py "Your prompt" \
 | `--generate-audio` | Generate synchronized audio (experimental) | False |
 | `--low-memory` | Aggressive memory optimization (~30% less) | False |
 | `--save-latents` | Save final video/audio latents as an NPZ sidecar next to the output | False |
+| `--save-text-embeddings` | Save positive/negative text conditioning as an `_text.npz` sidecar next to the output; reload it with `--embedding` | False |
+| `--save-run-log` | Save generation parameters, argv, output paths, and timings as an `_run.json` sidecar, created at run start and finalized on completion | False |
+| `--save-all-sidecars` | Enable final latents, text conditioning, and run metadata sidecars together | False |
 | `--skip-vae` | Skip VAE decoding (output latent visualization) | False |
 | `--no-gemma` | Use dummy embeddings (testing only) | False |
 | `--embedding` | Path to pre-computed text embedding (.npz) | None |

@@ -128,9 +128,11 @@ def apply_rotary_pos_emb(
     q1, q2 = mx.split(q, 2, axis=-1)
     k1, k2 = mx.split(k, 2, axis=-1)
 
-    # Reshape cos/sin for broadcasting: [1, 1, seq_len, head_dim/2]
-    cos = cos[None, None, :, :]
-    sin = sin[None, None, :, :]
+    # Keep the rotary multiply in the activation dtype. The tables are computed
+    # in FP32 for angle precision, but leaving them FP32 promotes Q/K and the
+    # whole attention path; mlx-vlm's nn.RoPE preserves BF16 activations here.
+    cos = cos.astype(q.dtype)[None, None, :, :]
+    sin = sin.astype(q.dtype)[None, None, :, :]
 
     # Apply rotation
     q_embed = mx.concatenate([q1 * cos - q2 * sin, q2 * cos + q1 * sin], axis=-1)

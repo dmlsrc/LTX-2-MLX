@@ -310,6 +310,34 @@ python scripts/probe_vae_boundary.py \
 The useful comparison is usually `orig` versus `orig_zero_convpad`: those modes
 decode the same latent while changing only the decoder's spatial padding policy.
 
+Use `--save-text-embeddings` to write the positive/negative text conditioning as
+a separate `_text.npz` sidecar. This captures the video/audio text encoder
+outputs and masks after Gemma and the AV text encoder, which is useful when
+checking whether text-conditioning precision changes alter denoising inputs.
+Pass that `_text.npz` back through `--embedding` to reuse the saved conditioning
+without loading Gemma again. Legacy embedding NPZs with `embedding` and
+`attention_mask` are still supported, but they do not carry audio conditioning.
+
+```bash
+python scripts/generate.py "Your prompt" \
+    --generate-audio \
+    --save-text-embeddings \
+    --output outputs/sample.mp4
+```
+
+Use `--save-run-log` to write a human-readable `_run.json` sidecar with the
+exact command-line arguments, prompt, generation parameters, sidecar paths, output
+paths, and timing summary for the run. The sidecar is created at run start with
+`status: "started"` and overwritten with completed timings when the output is
+saved, so interrupted long runs still leave their parameters behind.
+
+Use `--save-all-sidecars` to enable final latents, text conditioning, and the
+run log together. It is equivalent to passing:
+
+```bash
+--save-latents --save-text-embeddings --save-run-log
+```
+
 ## Troubleshooting
 
 ### Out of Memory
