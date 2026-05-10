@@ -891,6 +891,9 @@ class OneStagePipeline:
             audio_state = audio_tools.create_initial_state(dtype=config.dtype)
             audio_state = noiser(audio_state, noise_scale=1.0)
 
+        if callback:
+            callback(0, len(sigmas) - 1)
+
         # Run denoising loop
         if internal_audio_active and audio_state is not None:
             # Joint audio-video denoising with separate guidance per modality

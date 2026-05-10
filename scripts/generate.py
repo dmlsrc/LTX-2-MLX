@@ -129,6 +129,9 @@ class DenoiseProgress:
         self.label = label
         self.width = width
         self.started_at = time.perf_counter()
+        self.denoise_started_at: float | None = None
+        self._last_step_at: float | None = None
+        self._step_durations: list[float] = []
         self.step = 0
         self.total = total or 0
         self.spinner_index = 0
@@ -148,6 +151,10 @@ class DenoiseProgress:
 
     def start(self) -> None:
         self.started_at = time.perf_counter()
+        self.denoise_started_at = None
+        self._last_step_at = None
+        self._step_durations = []
+        self.step = 0
         self._render()
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
@@ -157,11 +164,25 @@ class DenoiseProgress:
             self._render()
 
     def update(self, step: int, total: int) -> None:
+        now = time.perf_counter()
         with self._lock:
             if self._finished:
                 return
             self.total = total
-            self.step = max(0, min(step, total))
+            step = max(0, min(step, total))
+            if step == 0:
+                self.denoise_started_at = now
+                self._last_step_at = now
+                self._step_durations = []
+            elif step > self.step:
+                if self.denoise_started_at is None:
+                    # Older callers may not send the step-0 "denoise started" marker.
+                    self.denoise_started_at = self.started_at
+                    self._last_step_at = self.started_at
+                previous = self._last_step_at or self.denoise_started_at
+                self._step_durations.append(max(0.0, now - previous))
+                self._last_step_at = now
+            self.step = step
         self._render()
 
     def _render(self, final: bool = False) -> None:
@@ -170,20 +191,32 @@ class DenoiseProgress:
                 return
             step = self.step
             total = self.total
+            denoise_started_at = self.denoise_started_at
+            step_durations = list(self._step_durations)
             spinner = self.spinner[self.spinner_index % len(self.spinner)]
             self.spinner_index += 1
 
-        elapsed = time.perf_counter() - self.started_at
+        now = time.perf_counter()
+        run_start = denoise_started_at or now
+        run_elapsed = max(0.0, now - run_start) if denoise_started_at is not None else 0.0
         progress = step / total if total else 1.0
         filled = min(self.width, int(round(progress * self.width)))
         bar = "#" * filled + "-" * (self.width - filled)
-        eta = elapsed * (total - step) / step if step > 0 and total else 0.0
-        rate = step / elapsed if elapsed > 0 else 0.0
-        if step == 0:
-            pace = "warming up"
+        first_step_text = (
+            format_progress_duration(step_durations[0])
+            if step_durations
+            else "--"
+        )
+        if step_durations and total:
+            seconds_per_step = sum(step_durations) / len(step_durations)
+            eta_text = format_progress_duration(seconds_per_step * max(0, total - step))
+            if seconds_per_step >= 1.0:
+                pace = f"avg {seconds_per_step:.1f}s/it"
+            else:
+                pace = f"avg {1.0 / seconds_per_step:.2f} it/s"
         else:
-            seconds_per_step = elapsed / step
-            pace = f"avg {seconds_per_step:.1f}s/it" if seconds_per_step >= 1.0 else f"avg {rate:.2f} it/s"
+            eta_text = "--"
+            pace = "warming up" if denoise_started_at is None else "measuring"
         cyan = self._color("36")
         green = self._color("32")
         yellow = self._color("33")
@@ -193,8 +226,9 @@ class DenoiseProgress:
             f"\r  {cyan}{spinner} {self.label}{reset} "
             f"{green}[{bar}]{reset} {step:>3}/{total:<3} "
             f"{progress * 100:5.1f}% "
-            f"| ELAP {format_progress_duration(elapsed)} "
-            f"| ETA {format_progress_duration(eta)} "
+            f"| STEP1 {first_step_text} "
+            f"| RUN {format_progress_duration(run_elapsed)} "
+            f"| ETA {eta_text} "
             f"| {yellow}{pace}{reset}"
         )
         if sys.stdout.isatty():
