@@ -710,7 +710,44 @@ Measured result:
   sampled block. This points away from more output-layout work and toward either
   SDPA/token-count limits or a very selective Q/K/V layout experiment.
 
-### 11. Use `vmap` for repeated helper/probe loops
+### 11. Cap the MLX allocator cache
+
+Status: implemented as an opt-in same-math memory-pressure knob.
+
+MLX keeps an allocator cache to avoid returning buffers to the system between
+operations. That can improve reuse, but on unified-memory Macs it can also keep
+process memory and swap pressure higher than the active graph requires. This is
+separate from the on-disk `--weights-cache`: it controls MLX's in-memory
+allocator cache only.
+
+Enable it with:
+
+```bash
+--mlx-cache-limit-gb 1
+```
+
+Measured result:
+
+- On the 512x288, 20s, 8-step bakery AV smoke using the current same-math
+  `project_out:pretranspose` layout, `--mlx-cache-limit-gb 1` reduced average
+  process RAM from about 44GB to about 40GB.
+- The same run did not show an added time cost at a 1GB cache limit.
+- This does not change model math, checkpoint precision, or output quality. Keep
+  it independent from `--low-memory`, quantization, and layout experiments.
+
+Recommended current same-math constrained-memory stack:
+
+```bash
+--weights-cache auto \
+--mlx-cache-limit-gb 1 \
+--video-ff-layout project_out:pretranspose \
+--video-ff-layout-layers 0-47
+```
+
+The attention layout can still be A/B tested, but it is not part of the minimal
+recommended stack because its benefit was marginal.
+
+### 12. Use `vmap` for repeated helper/probe loops
 
 Status: opportunistic cleanup candidate.
 
@@ -726,7 +763,7 @@ denoise optimization. It may still help:
 Keep this separate from the main denoise hot path unless profiling points at a
 real Python loop.
 
-### 12. Add a fused split-RoPE kernel
+### 13. Add a fused split-RoPE kernel
 
 Status: only consider after RoPE precompute/profiling.
 
@@ -800,6 +837,7 @@ Use a fixed command and change only one thing at a time.
 | `--video-ff-layout project_out:pretranspose` | yes | medium | best same-math win so far | Replacement-layout all-layer bakery AV smoke improved from roughly 77s/it BF16 baseline to about 55s/it, stable around 44GB process memory. Original duplicate-cache implementation was slower and more memory hungry. |
 | `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | neutral vs project_out only | Same-math and safe for inference, but bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone. Keep as supported, not the recommended minimal setting. |
 | `--video-attn-layout to_out:pretranspose` | yes | medium | marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. Keep available, but FF `project_out` remains the main same-math win. |
+| `--mlx-cache-limit-gb 1` | no | low | no cost observed | Same-math allocator-cache cap. On the bakery AV smoke with `project_out:pretranspose`, average process RAM dropped from about 44GB to about 40GB with no observed time penalty. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |
 | `mx.gather_mm` / `mx.gather_qmm` | no | high | unknown | Relevant to MoE/routing or selected batched matrices, not current dense LTX. |

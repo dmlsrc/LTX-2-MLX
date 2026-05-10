@@ -353,6 +353,7 @@ run log together. It is equivalent to passing:
 - Reduce steps: `--steps 5`
 - Reduce resolution and frames
 - Use `--profile-transformer-steps 1,2,8` and optionally `--profile-transformer-blocks 40,47` when you need cold/warm transformer timing breakdowns
+- Use `--mlx-cache-limit-gb 1` when system memory pressure matters. This caps MLX's in-memory allocator cache and is separate from the on-disk `--weights-cache` converted-weight cache.
 - For experimental same-settings denoise A/Bs, try `--video-ff-quantize project_out:mxfp8` to replace video FF projections with MLX weight-only quantized linears after loading stock BF16 weights. Use `project_in:mxfp8` to test the FF input projection by itself, or `project_in:mxfp8,project_out:mxfp8` to test both. Add `--video-ff-quantize-layers 40-47` to test only selected 0-based layers. This is non-canonical and needs visual/audio validation.
 - For same-math layout A/Bs, try `--video-ff-layout project_out:pretranspose` to replace video FF weights with contiguous transposed copies after loading stock BF16 weights. Add `project_in:pretranspose` to test the FF input projection as well, and add `--video-ff-layout-layers 0-47` or a narrower layer range to control memory overhead.
 - For same-math video attention layout A/Bs, try `--video-attn-layout to_out:pretranspose` to replace video-output attention projection weights with contiguous transposed copies. Add `--video-attn-layout-layers 0-47` or a narrower layer range to control memory overhead.

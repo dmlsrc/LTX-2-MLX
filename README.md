@@ -118,6 +118,7 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **Save text conditioning for denoise A/Bs** - add `--save-text-embeddings` to write the positive/negative AV text encoder outputs as an `_text.npz` sidecar that can be reused with `--embedding`
 - **Save run metadata for reproducibility** - add `--save-run-log` to write params, argv, outputs, and timings as an `_run.json` sidecar, starting before the long generation step
 - **Save all reproducibility sidecars** - add `--save-all-sidecars` to turn on final latents, text conditioning, and run metadata together
+- **Cap MLX allocator cache when memory pressure matters** - add `--mlx-cache-limit-gb 1`; unlike `--weights-cache`, this is an in-memory MLX cache limit and has tested as a RAM-pressure win without speed cost on the bakery AV smoke
 - **Use `--pipeline distilled`** - Fastest inference (8 steps)
 - **Use `--low-memory`** - For systems with <32GB RAM
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing

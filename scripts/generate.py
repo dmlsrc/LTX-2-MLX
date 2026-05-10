@@ -86,6 +86,17 @@ def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
         raise ValueError(f"Unsupported compute dtype '{dtype_name}'. Valid values: {valid}") from exc
 
 
+def parse_positive_float(value: str) -> float:
+    """Parse a strictly positive float for user-facing CLI limits."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Expected a positive number, got '{value}'") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"Expected a positive number, got {parsed}")
+    return parsed
+
+
 def parse_profile_transformer_steps(value: str | None) -> tuple[int, ...]:
     """Parse a comma-separated 1-based denoise-step list for profiling."""
     if value is None or value.strip() == "":
@@ -1855,6 +1866,7 @@ def generate_video(
     video_attn_layout_layers: tuple[int, ...] = (),
     weights_cache_mode: str = "off",
     weights_cache_dir: str | None = None,
+    mlx_cache_limit_gb: float | None = None,
     # New parameters
     image_path: str = None,
     image_strength: float = 0.95,
@@ -1922,6 +1934,10 @@ def generate_video(
     )
     if video_ff_quantize_specs and video_ff_layout_specs:
         raise ValueError("--video-ff-quantize and --video-ff-layout should be tested separately")
+    if mlx_cache_limit_gb is not None:
+        mlx_cache_limit_bytes = int(mlx_cache_limit_gb * (1000**3))
+        mx.set_cache_limit(mlx_cache_limit_bytes)
+        mx.clear_cache()
     timings = RunTimings()
     run_metadata = None
     if save_run_log:
@@ -1984,6 +2000,7 @@ def generate_video(
                 "video_attn_layout_layers": list(video_attn_layout_layers),
                 "weights_cache_mode": weights_cache_mode,
                 "weights_cache_dir": weights_cache_dir,
+                "mlx_cache_limit_gb": mlx_cache_limit_gb,
                 "save_latents": save_latents,
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
@@ -2094,6 +2111,8 @@ def generate_video(
             "Weights cache: ENABLED "
             f"(mode={weights_cache_mode}, dir={cache_dir_str})"
         )
+    if mlx_cache_limit_gb is not None:
+        print(f"MLX cache limit: {mlx_cache_limit_gb:g} GB")
     if active_profile_steps:
         steps_str = ", ".join(str(step) for step in active_profile_steps)
         print(f"Transformer profile: ENABLED (denoise steps {steps_str}, forced eval diagnostics)")
@@ -3619,6 +3638,15 @@ def main():
         ),
     )
     parser.add_argument(
+        "--mlx-cache-limit-gb",
+        type=parse_positive_float,
+        default=None,
+        help=(
+            "Limit MLX's in-memory allocator cache in decimal GB. This is separate "
+            "from --weights-cache and can reduce system memory pressure."
+        ),
+    )
+    parser.add_argument(
         "--placeholder",
         action="store_true",
         help="Use placeholder inference (skip model loading)"
@@ -4060,6 +4088,7 @@ def main():
         video_attn_layout_layers=args.video_attn_layout_layers,
         weights_cache_mode=args.weights_cache,
         weights_cache_dir=args.weights_cache_dir,
+        mlx_cache_limit_gb=args.mlx_cache_limit_gb,
         # New parameters
         image_path=args.image,
         image_strength=args.image_strength,
