@@ -1,5 +1,6 @@
 """LTX-2 Transformer Model for MLX (Unified Video/Audio)."""
 
+import gc
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -733,6 +734,60 @@ class LTXModel(nn.Module):
 
         if arrays:
             mx.eval(*arrays)
+        return count
+
+    def apply_video_ff_layout(
+        self,
+        layout_specs: Tuple[Tuple[str, str], ...],
+        layers: Tuple[int, ...] = (),
+    ) -> int:
+        """Apply selected same-math video feed-forward layout transforms."""
+        count = 0
+        selected_layers = set(layers)
+        for i, block in enumerate(self.transformer_blocks):
+            if selected_layers and i not in selected_layers:
+                continue
+            ff = getattr(block, "ff", None)
+            if ff is None:
+                continue
+            arrays = ff.apply_layouts(layout_specs)
+            if arrays:
+                mx.eval(*arrays)
+                ff.drop_layout_sources(layout_specs)
+                gc.collect()
+                mx.clear_cache()
+            count += len(layout_specs)
+
+        return count
+
+    def apply_video_attn_layout(
+        self,
+        layout_specs: Tuple[Tuple[str, str], ...],
+        layers: Tuple[int, ...] = (),
+    ) -> int:
+        """Apply selected same-math video-output attention layout transforms."""
+        count = 0
+        selected_layers = set(layers)
+        for i, block in enumerate(self.transformer_blocks):
+            if selected_layers and i not in selected_layers:
+                continue
+
+            attention_modules = [
+                getattr(block, "attn1", None),
+                getattr(block, "attn2", None),
+                getattr(block, "audio_to_video_attn", None),
+            ]
+            for attn in attention_modules:
+                if attn is None:
+                    continue
+                arrays = attn.apply_layouts(layout_specs)
+                if arrays:
+                    mx.eval(*arrays)
+                    attn.drop_layout_sources(layout_specs)
+                    gc.collect()
+                    mx.clear_cache()
+                count += len(layout_specs)
+
         return count
 
     # Audio layer debug: set to a directory path to capture per-layer audio states

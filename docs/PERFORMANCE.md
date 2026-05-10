@@ -110,11 +110,13 @@ For a deeper split inside selected blocks, add:
 ```
 
 Block numbers are 0-based to match the existing `blocks 40-47` timing labels.
-The detailed block profile splits a block into video/audio self-attention,
-text attention, audio-video cross attention, and feed-forward sections. The
-feed-forward section is split further into AdaLN, `project_in`, GELU,
-`project_out`, and residual-gate checkpoints so activation experiments can be
-separated from the two large matmuls.
+The detailed block profile splits a block into video/audio self-attention, text
+attention, audio-video cross attention, and feed-forward sections. Attention
+sections are split further into setup/AdaLN, Q/K/V projections, Q/K norm, RoPE,
+SDPA, gate, output projection, and residual checkpoints. Feed-forward sections
+are split into AdaLN, `project_in`, GELU, `project_out`, and residual-gate
+checkpoints so activation experiments can be separated from the two large
+matmuls.
 
 The profile deliberately inserts `mx.eval(...)` checkpoints so each section has
 a real wall-clock boundary. That means it perturbs the exact timing it measures.
@@ -589,19 +591,126 @@ Benchmark cautions:
 - Do not print, save, convert to NumPy, or call `.item()` inside compiled
   helpers.
 
-### 8. Compile the full transformer forward
+### 8. Historical compile experiments
 
-Status: speculative, do not start here.
+Status: tried and removed from the public CLI after no useful speedup.
 
 Some MLX projects compile larger model prediction functions, but this AV
 transformer forward crosses modality dataclasses, lists of modules, optional
-branches, conditioning objects, and per-block control flow. It may still work
-behind an opt-in flag, but it is higher risk than eval cadence or RoPE reuse.
+branches, conditioning objects, and per-block control flow. The first direct
+attempt to compile the `X0Model` wrapper was rejected by MLX because `Modality`
+dataclasses are not valid compiled function arguments. An array-only wrapper
+could run after suppressing transformer-internal `mx.eval()` checkpoints, but
+the bakery smoke tied baseline speed while carrying higher memory risk.
 
-Use this only after profiling shows Python or launch overhead remains meaningful
-after the simpler changes.
+Measured results:
 
-### 9. Use `vmap` for repeated helper/probe loops
+- Full transformer compile: 512x288, 20s, 8-step bakery AV smoke with cached
+  text conditioning completed at about 77.1s/it (`RUN 10m17s`, total 11m05s).
+  This tied the earlier uncompiled bakery run at about 77.8s/it.
+- Video FF subpath compile: the same bakery smoke was still about 77.7s/it
+  after three denoise steps, close enough to baseline to stop early.
+
+Conclusion: keep these results as negative evidence. Do not reintroduce compile
+flags unless a future MLX release changes the compilation behavior enough to
+justify a fresh A/B.
+
+### 9. Pretranspose video FF `project_out`
+
+Status: implemented as an opt-in same-math layout experiment.
+
+`nn.Linear` computes `x @ weight.T`. The video FF `project_out` is the largest
+same-math linear hotspot in the clean block profile, so this experiment caches a
+contiguous `weight.T` after loading stock BF16 weights and calls `mx.addmm`
+against that cached layout. It does not quantize weights or intentionally change
+precision.
+
+Enable it with:
+
+```bash
+--video-ff-layout project_out:pretranspose
+```
+
+Notes:
+
+- `project_in:pretranspose` is also supported for the video FF input
+  projection. Test it separately or in combination with `project_out`; unlike
+  the earlier `project_in:mxfp8` quantization run, this is same-math.
+- Use `--video-ff-layout-layers 0-47` or a narrower range to control where the
+  extra cached transposes are created.
+- The first implementation duplicated selected `project_out` weights; the
+  current path materializes each transposed weight layer by layer and drops the
+  original weight immediately afterward. Peak memory can still rise during the
+  transform, but steady-state should be much closer to memory-neutral.
+- Keep this separate from `--video-ff-quantize`; the CLI rejects combining them
+  so each run answers one benchmark question.
+
+Measured result:
+
+- 512x288, 20s, 8-step bakery AV smoke with cached text conditioning and
+  `--video-ff-layout project_out:pretranspose --video-ff-layout-layers 0-47`
+  completed at about 60.3s/it (`RUN 8m02s`, total 8m51s). That is materially
+  faster than the roughly 77s/it BF16 bakery baseline, but the original
+  duplicate-cache implementation raised process memory by about 5GB and memory
+  pressure spiked early before settling. Retest this result after the
+  replacement-layout cleanup.
+- After changing the layout transform to replace the original `project_out`
+  weight instead of keeping both layouts, the same all-layer bakery run was
+  stable around 55s/it with about 44GB process memory. This is the current best
+  same-math denoise optimization.
+- Adding `project_in:pretranspose` on top of `project_out:pretranspose` showed
+  about the same memory and about the same 55s/it bakery speed. It appears safe
+  for inference, but not an additional speed win over `project_out` alone.
+- A 24-47 layer-only bakery run was stopped after three denoise steps: first
+  step was about 67s, later steps slowed toward 74s/it, process memory was about
+  47GB, and memory pressure remained bad. This range is not a promising
+  compromise.
+
+### 10. Pretranspose video attention `to_out`
+
+Status: implemented as an opt-in same-math layout experiment.
+
+Attention output projections also compute `x @ weight.T`. This experiment
+materializes contiguous transposed `to_out` weights after loading stock BF16
+weights, then drops the original projection weights. For AV blocks it applies to
+video self-attention, video text-attention, and audio-to-video attention; it
+intentionally skips audio-only output projections.
+
+Enable it with:
+
+```bash
+--video-attn-layout to_out:pretranspose
+```
+
+Recommended A/B:
+
+- Start by combining it with the current best same-math FF layout:
+  `--video-ff-layout project_out:pretranspose --video-attn-layout to_out:pretranspose`.
+- Use `--video-attn-layout-layers 0-47` for the all-layer test, then narrow only
+  if memory pressure appears.
+- Watch both denoise `avg .../it` and steady process memory. The attention
+  `to_out` projections are smaller than FF `project_out`, so the upside is
+  modest, but the replacement layout should avoid the duplicate-cache problem.
+
+Measured result:
+
+- Combined with `--video-ff-layout project_out:pretranspose` on the same
+  512x288, 20s, 8-step bakery AV smoke, all-layer `to_out:pretranspose` ran at
+  about 54s/it with the same steady memory as FF `project_out` layout alone.
+  This is a marginal positive result: keep it available, but treat FF
+  `project_out:pretranspose` as the main same-math win.
+- A step-8 block profile after both layouts showed video self-attention as the
+  largest remaining per-block bucket at about 39-41% for normal sampled blocks,
+  followed by video text-attention and then the split FF matmuls.
+- The finer attention profile on blocks 16 and 40 showed video self-attention
+  SDPA as the largest single sub-piece: about 0.36-0.39s, or 22-25% of the
+  forced-eval block profile. Video self-attention Q/K/V were about 0.06s each,
+  `to_out` was about 0.05-0.06s, and RoPE/norm/gating were tiny. The combined
+  video FF `project_in` + `project_out` path was still about 0.47-0.48s per
+  sampled block. This points away from more output-layout work and toward either
+  SDPA/token-count limits or a very selective Q/K/V layout experiment.
+
+### 11. Use `vmap` for repeated helper/probe loops
 
 Status: opportunistic cleanup candidate.
 
@@ -617,7 +726,7 @@ denoise optimization. It may still help:
 Keep this separate from the main denoise hot path unless profiling points at a
 real Python loop.
 
-### 10. Add a fused split-RoPE kernel
+### 12. Add a fused split-RoPE kernel
 
 Status: only consider after RoPE precompute/profiling.
 
@@ -629,7 +738,7 @@ Before writing a custom kernel, test whether `mx.fast.rope` can represent the
 needed LTX-2.3 SPLIT 3D RoPE exactly. If it cannot, a custom Metal kernel should
 be built once and should avoid hidden row-contiguity copies.
 
-### 11. Distributed tensor parallelism
+### 13. Distributed tensor parallelism
 
 Status: separate project, not a local optimization.
 
@@ -677,18 +786,20 @@ Use a fixed command and change only one thing at a time.
 | Experiment | Code change? | Memory risk | Expected denoise speed impact | Notes |
 | --- | --- | --- | --- | --- |
 | `--profile-transformer-steps` | yes | low | diagnostic only | Forces eval checkpoints during selected denoise steps to locate hotspots. Do not use for final timing. |
-| `--profile-transformer-blocks` | yes | low | diagnostic only | Adds forced eval checkpoints inside selected blocks for already-profiled steps. |
-| FFN sub-profile | yes | low | diagnostic only | Selected block profiles now split FFN into AdaLN, `project_in`, GELU, `project_out`, and residual gate. |
+| `--profile-transformer-blocks` | yes | low | diagnostic only | Adds forced eval checkpoints inside selected blocks for already-profiled steps. Block profiles now split attention into setup/AdaLN, Q/K/V, Q/K norm, RoPE, SDPA, gate, output, and residual sections. |
+| FFN sub-profile | yes | low | diagnostic only | Selected block profiles also split FFN into AdaLN, `project_in`, GELU, `project_out`, and residual gate. |
 | Remove `--low-memory` | no | medium | none observed in small run | 352x192 15s AV smoke was slightly slower. Retest larger shapes if they fit. |
 | `MLX_METAL_FAST_SYNCH=1` | no | low | none observed | 352x192 15s AV smoke was slightly slower. |
 | AV `fast_mode` | yes | high | none observed in small run | 352x192 15s AV smoke tied low-memory baseline. Retest larger shapes if they fit. |
 | Per-run RoPE precompute | yes | low | none observed in small run | Temporary one-entry cache patch was removed after a slightly slower 352x192 15s AV smoke. |
 | No-op cast/allocation cleanup | yes | low | low | Good cleanup after larger wins. |
 | Fast GELU approximation | no | low | unlikely | FFN sub-profile showed GELU at about 0.7% of a clean block; skip unless future profiles differ. |
-| Narrow `mx.compile` helpers | yes | low to medium | unknown | Needs steady-state benchmark. |
-| Full transformer compile | yes | high | unknown | Opt-in research only. |
+| Historical compile experiments | yes | medium to high | none observed | Full transformer and video FF subpath compile were removed from the CLI after bakery AV smokes tied baseline speed while adding complexity and memory risk. |
 | `mx.qqmm` FF linears | no | medium to high | blocked locally | Current Metal runtime throws `[QQMatmul] NYI for the general case` on LTX FFN-shaped tests. |
 | `--video-ff-quantize` | yes | medium | useful in selected ranges | `project_out:mxfp8` layers 32-47 improved 352x192 15s AV denoise from about 24.4s/it to 22.1s/it with slight visual differences. Layers 0-23 and 24-47 were both visibly different; all-layer `mxfp8` is much faster but non-parity. All-layer `mxfp4` and `nvfp4` were slower than `mxfp8` on the bakery smoke, so keep `mxfp8` as the runtime-quant candidate for now. `project_in:mxfp8` was slower than BF16 and hurt identity stability. Official NVFP4 checkpoint support remains a separate loading/compatibility experiment. |
+| `--video-ff-layout project_out:pretranspose` | yes | medium | best same-math win so far | Replacement-layout all-layer bakery AV smoke improved from roughly 77s/it BF16 baseline to about 55s/it, stable around 44GB process memory. Original duplicate-cache implementation was slower and more memory hungry. |
+| `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | neutral vs project_out only | Same-math and safe for inference, but bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone. Keep as supported, not the recommended minimal setting. |
+| `--video-attn-layout to_out:pretranspose` | yes | medium | marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. Keep available, but FF `project_out` remains the main same-math win. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |
 | `mx.gather_mm` / `mx.gather_qmm` | no | high | unknown | Relevant to MoE/routing or selected batched matrices, not current dense LTX. |

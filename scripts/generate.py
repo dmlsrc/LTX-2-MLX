@@ -60,6 +60,13 @@ SUPPORTED_COMPUTE_DTYPES = {
 }
 FF_QUANTIZE_TARGETS = ("project_in", "project_out")
 FF_QUANTIZE_MODES = ("affine", "mxfp4", "mxfp8", "nvfp4")
+FF_LAYOUT_SPECS = {
+    "project_in": ("pretranspose",),
+    "project_out": ("pretranspose",),
+}
+ATTN_LAYOUT_SPECS = {
+    "to_out": ("pretranspose",),
+}
 
 
 def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
@@ -198,6 +205,88 @@ def parse_video_ff_quantize_specs(value: str | None) -> tuple[tuple[str, str], .
             )
         seen_targets.add(target)
         specs.append((target, mode))
+
+    return tuple(specs)
+
+
+def parse_video_ff_layout_specs(value: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse comma-separated target:layout video FF layout specs."""
+    if value is None or value.strip() == "":
+        return ()
+
+    specs = []
+    seen_targets = set()
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise argparse.ArgumentTypeError(
+                "Video FF layout specs must use target:layout, "
+                "for example project_in:pretranspose or project_out:pretranspose"
+            )
+        raw_target, raw_layout = part.split(":", 1)
+        target = raw_target.strip().lower().replace("-", "_")
+        layout = raw_layout.strip().lower().replace("-", "_")
+        if target not in FF_LAYOUT_SPECS:
+            valid = ", ".join(FF_LAYOUT_SPECS)
+            raise argparse.ArgumentTypeError(
+                f"Invalid video FF layout target '{raw_target}'. Valid values: {valid}"
+            )
+        valid_layouts = FF_LAYOUT_SPECS[target]
+        if layout not in valid_layouts:
+            valid = ", ".join(valid_layouts)
+            raise argparse.ArgumentTypeError(
+                f"Invalid layout '{layout}' for video FF target '{target}'. "
+                f"Valid values: {valid}"
+            )
+        if target in seen_targets:
+            raise argparse.ArgumentTypeError(
+                f"Duplicate video FF layout target '{target}'"
+            )
+        seen_targets.add(target)
+        specs.append((target, layout))
+
+    return tuple(specs)
+
+
+def parse_video_attn_layout_specs(value: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse comma-separated target:layout video attention layout specs."""
+    if value is None or value.strip() == "":
+        return ()
+
+    specs = []
+    seen_targets = set()
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise argparse.ArgumentTypeError(
+                "Video attention layout specs must use target:layout, "
+                "for example to_out:pretranspose"
+            )
+        raw_target, raw_layout = part.split(":", 1)
+        target = raw_target.strip().lower().replace("-", "_")
+        layout = raw_layout.strip().lower().replace("-", "_")
+        if target not in ATTN_LAYOUT_SPECS:
+            valid = ", ".join(ATTN_LAYOUT_SPECS)
+            raise argparse.ArgumentTypeError(
+                f"Invalid video attention layout target '{raw_target}'. Valid values: {valid}"
+            )
+        valid_layouts = ATTN_LAYOUT_SPECS[target]
+        if layout not in valid_layouts:
+            valid = ", ".join(valid_layouts)
+            raise argparse.ArgumentTypeError(
+                f"Invalid layout '{layout}' for video attention target '{target}'. "
+                f"Valid values: {valid}"
+            )
+        if target in seen_targets:
+            raise argparse.ArgumentTypeError(
+                f"Duplicate video attention layout target '{target}'"
+            )
+        seen_targets.add(target)
+        specs.append((target, layout))
 
     return tuple(specs)
 
@@ -1352,6 +1441,10 @@ def load_transformer(
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
     video_ff_quantize_layers: tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_layout_layers: tuple[int, ...] = (),
+    video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_attn_layout_layers: tuple[int, ...] = (),
 ) -> LTXModel:
     """Load transformer with weights.
 
@@ -1409,6 +1502,36 @@ def load_transformer(
             f"bits={video_ff_quantize_bits or 'default'}, "
             f"layers={layer_str}"
         )
+    if video_ff_layout_specs:
+        count = model.apply_video_ff_layout(
+            layout_specs=video_ff_layout_specs,
+            layers=video_ff_layout_layers,
+        )
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_layout_layers)
+            if video_ff_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
+        print(
+            "  Experimental video FF layout: "
+            f"{count} projections, specs={spec_str}, layers={layer_str}"
+        )
+    if video_attn_layout_specs:
+        count = model.apply_video_attn_layout(
+            layout_specs=video_attn_layout_specs,
+            layers=video_attn_layout_layers,
+        )
+        layer_str = (
+            ",".join(str(layer) for layer in video_attn_layout_layers)
+            if video_attn_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
+        print(
+            "  Experimental video attention layout: "
+            f"{count} projections, specs={spec_str}, layers={layer_str}"
+        )
 
     return model
 
@@ -1424,6 +1547,10 @@ def load_av_transformer(
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
     video_ff_quantize_layers: tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_layout_layers: tuple[int, ...] = (),
+    video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_attn_layout_layers: tuple[int, ...] = (),
     caption_channels: int | None = 3840,
     cross_attention_adaln: bool = False,
     apply_gated_attention: bool = False,
@@ -1487,6 +1614,36 @@ def load_av_transformer(
             f"group_size={video_ff_quantize_group_size or 'default'}, "
             f"bits={video_ff_quantize_bits or 'default'}, "
             f"layers={layer_str}"
+        )
+    if video_ff_layout_specs:
+        count = model.apply_video_ff_layout(
+            layout_specs=video_ff_layout_specs,
+            layers=video_ff_layout_layers,
+        )
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_layout_layers)
+            if video_ff_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
+        print(
+            "  Experimental video FF layout: "
+            f"{count} projections, specs={spec_str}, layers={layer_str}"
+        )
+    if video_attn_layout_specs:
+        count = model.apply_video_attn_layout(
+            layout_specs=video_attn_layout_specs,
+            layers=video_attn_layout_layers,
+        )
+        layer_str = (
+            ",".join(str(layer) for layer in video_attn_layout_layers)
+            if video_attn_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
+        print(
+            "  Experimental video attention layout: "
+            f"{count} projections, specs={spec_str}, layers={layer_str}"
         )
 
     return model
@@ -1603,6 +1760,10 @@ def generate_video(
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
     video_ff_quantize_layers: tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_layout_layers: tuple[int, ...] = (),
+    video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_attn_layout_layers: tuple[int, ...] = (),
     # New parameters
     image_path: str = None,
     image_strength: float = 0.95,
@@ -1668,6 +1829,8 @@ def generate_video(
         block for block in sorted(set(profile_transformer_blocks or ()))
         if block >= 48
     )
+    if video_ff_quantize_specs and video_ff_layout_specs:
+        raise ValueError("--video-ff-quantize and --video-ff-layout should be tested separately")
     timings = RunTimings()
     run_metadata = None
     if save_run_log:
@@ -1718,6 +1881,16 @@ def generate_video(
                 "video_ff_quantize_group_size": video_ff_quantize_group_size,
                 "video_ff_quantize_bits": video_ff_quantize_bits,
                 "video_ff_quantize_layers": list(video_ff_quantize_layers),
+                "video_ff_layout_specs": [
+                    {"target": target, "layout": layout}
+                    for target, layout in video_ff_layout_specs
+                ],
+                "video_ff_layout_layers": list(video_ff_layout_layers),
+                "video_attn_layout_specs": [
+                    {"target": target, "layout": layout}
+                    for target, layout in video_attn_layout_specs
+                ],
+                "video_attn_layout_layers": list(video_attn_layout_layers),
                 "save_latents": save_latents,
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
@@ -1799,6 +1972,28 @@ def generate_video(
             f"group_size={video_ff_quantize_group_size or 'default'}, "
             f"bits={video_ff_quantize_bits or 'default'}, "
             f"layers={layer_str})"
+        )
+    if video_ff_layout_specs:
+        layer_str = (
+            ",".join(str(layer) for layer in video_ff_layout_layers)
+            if video_ff_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
+        print(
+            "Experimental video FF layout: ENABLED "
+            f"(specs={spec_str}, layers={layer_str})"
+        )
+    if video_attn_layout_specs:
+        layer_str = (
+            ",".join(str(layer) for layer in video_attn_layout_layers)
+            if video_attn_layout_layers
+            else "all"
+        )
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
+        print(
+            "Experimental video attention layout: ENABLED "
+            f"(specs={spec_str}, layers={layer_str})"
         )
     if active_profile_steps:
         steps_str = ", ".join(str(step) for step in active_profile_steps)
@@ -1974,6 +2169,10 @@ def generate_video(
                 video_ff_quantize_group_size=video_ff_quantize_group_size,
                 video_ff_quantize_bits=video_ff_quantize_bits,
                 video_ff_quantize_layers=video_ff_quantize_layers,
+                video_ff_layout_specs=video_ff_layout_specs,
+                video_ff_layout_layers=video_ff_layout_layers,
+                video_attn_layout_specs=video_attn_layout_specs,
+                video_attn_layout_layers=video_attn_layout_layers,
                 caption_channels=None if v2 else 3840,
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
@@ -1995,6 +2194,10 @@ def generate_video(
                 video_ff_quantize_group_size=video_ff_quantize_group_size,
                 video_ff_quantize_bits=video_ff_quantize_bits,
                 video_ff_quantize_layers=video_ff_quantize_layers,
+                video_ff_layout_specs=video_ff_layout_specs,
+                video_ff_layout_layers=video_ff_layout_layers,
+                video_attn_layout_specs=video_attn_layout_specs,
+                video_attn_layout_layers=video_attn_layout_layers,
             )
 
             # Apply cross-attention scaling if specified (improves text conditioning)
@@ -3411,6 +3614,39 @@ def main():
              "Leave unset to use MLX defaults for the selected mode."
     )
     parser.add_argument(
+        "--video-ff-layout",
+        type=parse_video_ff_layout_specs,
+        default=(),
+        metavar="TARGET:LAYOUT[,TARGET:LAYOUT]",
+        help="Experimental same-math video FF layout transform, e.g. "
+             "'project_out:pretranspose' or "
+             "'project_in:pretranspose,project_out:pretranspose'."
+    )
+    parser.add_argument(
+        "--video-ff-layout-layers",
+        type=parse_transformer_layer_selection,
+        default=(),
+        metavar="LAYERS",
+        help="Optional 0-based layer list/ranges for --video-ff-layout, "
+             "for example '0-47'. Leave unset to transform all video layers."
+    )
+    parser.add_argument(
+        "--video-attn-layout",
+        type=parse_video_attn_layout_specs,
+        default=(),
+        metavar="TARGET:LAYOUT[,TARGET:LAYOUT]",
+        help="Experimental same-math video-output attention layout transform, "
+             "e.g. 'to_out:pretranspose'."
+    )
+    parser.add_argument(
+        "--video-attn-layout-layers",
+        type=parse_transformer_layer_selection,
+        default=(),
+        metavar="LAYERS",
+        help="Optional 0-based layer list/ranges for --video-attn-layout, "
+             "for example '0-47'. Leave unset to transform all video layers."
+    )
+    parser.add_argument(
         "--image",
         type=str,
         default=None,
@@ -3659,6 +3895,10 @@ def main():
         video_ff_quantize_group_size=args.video_ff_quantize_group_size,
         video_ff_quantize_bits=args.video_ff_quantize_bits,
         video_ff_quantize_layers=args.video_ff_quantize_layers,
+        video_ff_layout_specs=args.video_ff_layout,
+        video_ff_layout_layers=args.video_ff_layout_layers,
+        video_attn_layout_specs=args.video_attn_layout,
+        video_attn_layout_layers=args.video_attn_layout_layers,
         # New parameters
         image_path=args.image,
         image_strength=args.image_strength,

@@ -47,11 +47,91 @@ class FeedForward(nn.Module):
 
         self.project_in = GELUApprox(dim, inner_dim)
         self.project_out = nn.Linear(inner_dim, dim_out)
+        self._project_in_weight_t = None
+        self._project_out_weight_t = None
 
     def __call__(self, x: mx.array) -> mx.array:
-        x = self.project_in(x)
-        x = self.project_out(x)
+        x = self._project_in(x)
+        x = self._project_out(x)
         return x
+
+    def _project_in_linear(self, x: mx.array) -> mx.array:
+        """Run project_in linear, optionally using a pre-transposed contiguous weight."""
+        if self._project_in_weight_t is None:
+            return self.project_in.proj(x)
+
+        bias = self.project_in.proj.get("bias")
+        if bias is not None:
+            return mx.addmm(bias, x, self._project_in_weight_t)
+        return x @ self._project_in_weight_t
+
+    def _project_in(self, x: mx.array) -> mx.array:
+        return nn.gelu_approx(self._project_in_linear(x))
+
+    def _project_out(self, x: mx.array) -> mx.array:
+        """Run project_out, optionally using a pre-transposed contiguous weight."""
+        if self._project_out_weight_t is None:
+            return self.project_out(x)
+
+        bias = self.project_out.get("bias")
+        if bias is not None:
+            return mx.addmm(bias, x, self._project_out_weight_t)
+        return x @ self._project_out_weight_t
+
+    def pretranspose_project_in(self) -> list[mx.array]:
+        """Cache a contiguous ``weight.T`` for project_in same-math experiments."""
+        if not isinstance(self.project_in.proj, nn.Linear):
+            raise ValueError("project_in pretranspose only supports nn.Linear")
+        if self._project_in_weight_t is not None:
+            arrays = [self._project_in_weight_t]
+            bias = self.project_in.proj.get("bias")
+            if bias is not None:
+                arrays.append(bias)
+            return arrays
+        if "weight" not in self.project_in.proj:
+            raise ValueError("project_in weight is unavailable for pretranspose")
+
+        self._project_in_weight_t = mx.contiguous(self.project_in.proj.weight.T)
+        arrays = [self._project_in_weight_t]
+        bias = self.project_in.proj.get("bias")
+        if bias is not None:
+            arrays.append(bias)
+        return arrays
+
+    def pretranspose_project_out(self) -> list[mx.array]:
+        """Cache a contiguous ``weight.T`` for project_out same-math experiments."""
+        if not isinstance(self.project_out, nn.Linear):
+            raise ValueError("project_out pretranspose only supports nn.Linear")
+        if self._project_out_weight_t is not None:
+            arrays = [self._project_out_weight_t]
+            bias = self.project_out.get("bias")
+            if bias is not None:
+                arrays.append(bias)
+            return arrays
+        if "weight" not in self.project_out:
+            raise ValueError("project_out weight is unavailable for pretranspose")
+
+        self._project_out_weight_t = mx.contiguous(self.project_out.weight.T)
+        arrays = [self._project_out_weight_t]
+        bias = self.project_out.get("bias")
+        if bias is not None:
+            arrays.append(bias)
+        return arrays
+
+    def drop_layout_sources(
+        self,
+        layout_specs: tuple[tuple[str, str], ...],
+    ) -> None:
+        """Drop original arrays replaced by materialized layout transforms."""
+        for target, layout in layout_specs:
+            if target == "project_in" and layout == "pretranspose":
+                if self._project_in_weight_t is not None and "weight" in self.project_in.proj:
+                    del self.project_in.proj.weight
+            elif target == "project_out" and layout == "pretranspose":
+                if self._project_out_weight_t is not None and "weight" in self.project_out:
+                    del self.project_out.weight
+            else:
+                raise ValueError(f"Unsupported FF layout spec: {target}:{layout}")
 
     def _quantized_linear_arrays(self, linear: nn.QuantizedLinear) -> list[mx.array]:
         arrays = [linear.weight, linear.scales]
@@ -70,6 +150,7 @@ class FeedForward(nn.Module):
         bits: int | None = None,
     ) -> list[mx.array]:
         """Replace the input projection with an MLX quantized linear layer."""
+        self._project_in_weight_t = None
         self.project_in.proj = nn.QuantizedLinear.from_linear(
             self.project_in.proj,
             group_size=group_size,
@@ -86,6 +167,7 @@ class FeedForward(nn.Module):
         bits: int | None = None,
     ) -> list[mx.array]:
         """Replace the output projection with an MLX quantized linear layer."""
+        self._project_out_weight_t = None
         self.project_out = nn.QuantizedLinear.from_linear(
             self.project_out,
             group_size=group_size,
@@ -121,13 +203,28 @@ class FeedForward(nn.Module):
                 raise ValueError(f"Unsupported FF quantization target: {target}")
         return arrays
 
+    def apply_layouts(
+        self,
+        layout_specs: tuple[tuple[str, str], ...],
+    ) -> list[mx.array]:
+        """Apply selected same-math layout transforms to feed-forward projections."""
+        arrays: list[mx.array] = []
+        for target, layout in layout_specs:
+            if target == "project_in" and layout == "pretranspose":
+                arrays.extend(self.pretranspose_project_in())
+            elif target == "project_out" and layout == "pretranspose":
+                arrays.extend(self.pretranspose_project_out())
+            else:
+                raise ValueError(f"Unsupported FF layout spec: {target}:{layout}")
+        return arrays
+
     def profile(self, x: mx.array, prefix: str, mark_profile) -> mx.array:
         """Forward pass with forced-eval timing checkpoints for diagnostics."""
-        x = self.project_in.proj(x)
+        x = self._project_in_linear(x)
         mark_profile(f"{prefix} project_in", x)
         x = nn.gelu_approx(x)
         mark_profile(f"{prefix} gelu", x)
-        x = self.project_out(x)
+        x = self._project_out(x)
         mark_profile(f"{prefix} project_out", x)
         return x
 

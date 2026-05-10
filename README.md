@@ -122,6 +122,8 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **Use `--low-memory`** - For systems with <32GB RAM
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing
 - **Research denoise speed carefully** - `--video-ff-quantize project_out:mxfp8` can A/B weight-only quantized video FF projections, and `--video-ff-quantize-layers 40-47` narrows it to selected layers; this is non-canonical and needs quality checks
+- **Research same-math FF layouts** - `--video-ff-layout project_out:pretranspose` can A/B replacement contiguous pre-transposed video FF weights without quantizing weights; add `project_in:pretranspose` for the next FF layout test
+- **Research same-math attention layouts** - `--video-attn-layout to_out:pretranspose` can A/B replacement contiguous pre-transposed video-output attention projections
 - **Track denoise-speed experiments** - see [Performance Optimization Notes](docs/PERFORMANCE.md) for MLX runtime optimization ideas and benchmark rules
 
 See [Usage Guide](docs/USAGE.md) for memory requirements and benchmarks.

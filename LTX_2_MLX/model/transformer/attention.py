@@ -1,5 +1,6 @@
 """Attention mechanisms for LTX-2 Transformer."""
 
+from collections.abc import Callable
 from typing import Optional
 
 import mlx.core as mx
@@ -199,6 +200,62 @@ class Attention(nn.Module):
 
         # Output projection
         self.to_out = nn.Linear(inner_dim, query_dim, bias=True)
+        self._to_out_weight_t = None
+
+    def _to_out(self, x: mx.array) -> mx.array:
+        """Run to_out, optionally using a pre-transposed contiguous weight."""
+        if self._to_out_weight_t is None:
+            return self.to_out(x)
+
+        bias = self.to_out.get("bias")
+        if bias is not None:
+            return mx.addmm(bias, x, self._to_out_weight_t)
+        return x @ self._to_out_weight_t
+
+    def pretranspose_to_out(self) -> list[mx.array]:
+        """Cache a contiguous ``weight.T`` for to_out same-math experiments."""
+        if not isinstance(self.to_out, nn.Linear):
+            raise ValueError("to_out pretranspose only supports nn.Linear")
+        if self._to_out_weight_t is not None:
+            arrays = [self._to_out_weight_t]
+            bias = self.to_out.get("bias")
+            if bias is not None:
+                arrays.append(bias)
+            return arrays
+        if "weight" not in self.to_out:
+            raise ValueError("to_out weight is unavailable for pretranspose")
+
+        self._to_out_weight_t = mx.contiguous(self.to_out.weight.T)
+        arrays = [self._to_out_weight_t]
+        bias = self.to_out.get("bias")
+        if bias is not None:
+            arrays.append(bias)
+        return arrays
+
+    def drop_layout_sources(
+        self,
+        layout_specs: tuple[tuple[str, str], ...],
+    ) -> None:
+        """Drop original arrays replaced by materialized layout transforms."""
+        for target, layout in layout_specs:
+            if target == "to_out" and layout == "pretranspose":
+                if self._to_out_weight_t is not None and "weight" in self.to_out:
+                    del self.to_out.weight
+            else:
+                raise ValueError(f"Unsupported attention layout spec: {target}:{layout}")
+
+    def apply_layouts(
+        self,
+        layout_specs: tuple[tuple[str, str], ...],
+    ) -> list[mx.array]:
+        """Apply selected same-math layout transforms to attention projections."""
+        arrays: list[mx.array] = []
+        for target, layout in layout_specs:
+            if target == "to_out" and layout == "pretranspose":
+                arrays.extend(self.pretranspose_to_out())
+            else:
+                raise ValueError(f"Unsupported attention layout spec: {target}:{layout}")
+        return arrays
 
     def __call__(
         self,
@@ -250,7 +307,54 @@ class Attention(nn.Module):
             out = out.reshape(b, t, self.heads * self.dim_head)
 
         # Output projection
-        return self.to_out(out)
+        return self._to_out(out)
+
+    def profile(
+        self,
+        x: mx.array,
+        name: str,
+        mark_profile: Callable[..., None],
+        context: Optional[mx.array] = None,
+        mask: Optional[mx.array] = None,
+        pe: Optional[tuple] = None,
+        k_pe: Optional[tuple] = None,
+    ) -> mx.array:
+        """Forward pass with forced-eval timing checkpoints for diagnostics."""
+        q = self.to_q(x)
+        mark_profile(f"{name} q", q)
+
+        context = x if context is None else context
+        k = self.to_k(context)
+        mark_profile(f"{name} k", k)
+
+        v = self.to_v(context)
+        mark_profile(f"{name} v", v)
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        mark_profile(f"{name} qk norm", q, k)
+
+        if pe is not None:
+            q = apply_rotary_emb(q, pe, self.rope_type)
+            k = apply_rotary_emb(k, pe if k_pe is None else k_pe, self.rope_type)
+            mark_profile(f"{name} rope", q, k)
+
+        out = _attention_core(q, k, v, self.heads, self.dim_head, mask)
+        mark_profile(f"{name} sdpa", out)
+
+        if self.to_gate_logits is not None:
+            gate_logits = self.to_gate_logits(x)
+            mark_profile(f"{name} gate logits", gate_logits)
+            b, t, _ = out.shape
+            out = out.reshape(b, t, self.heads, self.dim_head)
+            gates = 2.0 * mx.sigmoid(gate_logits)
+            out = out * gates[:, :, :, None]
+            out = out.reshape(b, t, self.heads * self.dim_head)
+            mark_profile(f"{name} gate apply", out)
+
+        out = self._to_out(out)
+        mark_profile(f"{name} out", out)
+        return out
 
 
 class SelfAttention(nn.Module):

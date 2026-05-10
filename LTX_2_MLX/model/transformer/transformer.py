@@ -2,7 +2,7 @@
 
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -231,7 +231,7 @@ class BasicTransformerBlock(nn.Module):
             batch_size, args.timesteps, 3, 6
         )
 
-        # Feed-forward with AdaLN (using compiled helpers)
+        # Feed-forward with AdaLN.
         x_scaled = _compiled_adaln_forward(x, scale_mlp, shift_mlp, self.norm_eps)
         ff_out = self.ff(x_scaled)
         x = _compiled_residual_gate(x, ff_out, gate_mlp)
@@ -435,8 +435,11 @@ class BasicAVTransformerBlock(nn.Module):
         timestep: mx.array,
         prompt_timestep: Optional[mx.array],
         context_mask: Optional[mx.array],
+        profile_name: Optional[str] = None,
+        mark_profile: Optional[Callable[..., None]] = None,
     ) -> mx.array:
         """Apply text cross-attention, with optional V2 AdaLN modulation."""
+        profile_attention = profile_name is not None and mark_profile is not None
         if self.cross_attention_adaln:
             # V2: AdaLN on Q (from indices 6-8) and KV (from prompt tables)
             shift_q, scale_q, gate = self.get_ada_values(
@@ -451,9 +454,30 @@ class BasicAVTransformerBlock(nn.Module):
             scale_kv = kv_modulation[:, :, 1, :]
             attn_input = rms_norm(x, eps=self.norm_eps) * (1 + scale_q) + shift_q
             encoder_hidden_states = context * (1 + scale_kv) + shift_kv
-            return attn(attn_input, context=encoder_hidden_states, mask=context_mask) * gate
+            if profile_attention:
+                mark_profile(f"{profile_name} setup", attn_input, encoder_hidden_states, gate)
+                attn_out = attn.profile(
+                    attn_input,
+                    profile_name,
+                    mark_profile,
+                    context=encoder_hidden_states,
+                    mask=context_mask,
+                )
+            else:
+                attn_out = attn(attn_input, context=encoder_hidden_states, mask=context_mask)
+            return attn_out * gate
         # V1: simple RMSNorm on Q, no modulation
-        return attn(rms_norm(x, eps=self.norm_eps), context=context, mask=context_mask)
+        attn_input = rms_norm(x, eps=self.norm_eps)
+        if profile_attention:
+            mark_profile(f"{profile_name} setup", attn_input)
+            return attn.profile(
+                attn_input,
+                profile_name,
+                mark_profile,
+                context=context,
+                mask=context_mask,
+            )
+        return attn(attn_input, context=context, mask=context_mask)
 
     def __call__(
         self,
@@ -524,9 +548,18 @@ class BasicAVTransformerBlock(nn.Module):
             # Skip self-attention if perturbation is enabled for all samples in batch
             if not skip_video_self:
                 norm_vx = _compiled_adaln_forward(vx, scale_msa, shift_msa, self.norm_eps)
-                attn_out = self.attn1(norm_vx, pe=video.positional_embeddings)
+                if profile_events is not None:
+                    mark_profile("video self-attn adaln", norm_vx)
+                    attn_out = self.attn1.profile(
+                        norm_vx,
+                        "video self-attn",
+                        mark_profile,
+                        pe=video.positional_embeddings,
+                    )
+                else:
+                    attn_out = self.attn1(norm_vx, pe=video.positional_embeddings)
                 vx = _compiled_residual_gate(vx, attn_out, gate_msa)
-                mark_profile("video self-attn", vx)
+                mark_profile("video self-attn residual", vx)
 
             # Video cross-attention to text
             cross_out = self._apply_text_cross_attention(
@@ -535,13 +568,15 @@ class BasicAVTransformerBlock(nn.Module):
                 getattr(self, "prompt_scale_shift_table", None),
                 video.timesteps, video.prompt_timestep,
                 video.context_mask,
+                profile_name="video text-attn" if profile_events is not None else None,
+                mark_profile=mark_profile if profile_events is not None else None,
             )
             # Optional per-block cross-attention scaling (set externally)
             ca_scale = getattr(self, '_cross_attn_scale', None)
             if ca_scale is not None:
                 cross_out = cross_out * ca_scale
             vx = vx + cross_out
-            mark_profile("video text-attn", vx)
+            mark_profile("video text-attn residual", vx)
 
         # Audio self-attention + cross-attention to text
         if run_ax:
@@ -554,9 +589,18 @@ class BasicAVTransformerBlock(nn.Module):
             # Skip self-attention if perturbation is enabled for all samples in batch
             if not skip_audio_self:
                 norm_ax = _compiled_adaln_forward(ax, ascale_msa, ashift_msa, self.norm_eps)
-                attn_out = self.audio_attn1(norm_ax, pe=audio.positional_embeddings)
+                if profile_events is not None:
+                    mark_profile("audio self-attn adaln", norm_ax)
+                    attn_out = self.audio_attn1.profile(
+                        norm_ax,
+                        "audio self-attn",
+                        mark_profile,
+                        pe=audio.positional_embeddings,
+                    )
+                else:
+                    attn_out = self.audio_attn1(norm_ax, pe=audio.positional_embeddings)
                 ax = _compiled_residual_gate(ax, attn_out, agate_msa)
-                mark_profile("audio self-attn", ax)
+                mark_profile("audio self-attn residual", ax)
 
             # Audio cross-attention to text
             cross_out = self._apply_text_cross_attention(
@@ -565,9 +609,11 @@ class BasicAVTransformerBlock(nn.Module):
                 getattr(self, "audio_prompt_scale_shift_table", None),
                 audio.timesteps, audio.prompt_timestep,
                 audio.context_mask,
+                profile_name="audio text-attn" if profile_events is not None else None,
+                mark_profile=mark_profile if profile_events is not None else None,
             )
             ax = ax + cross_out
-            mark_profile("audio text-attn", ax)
+            mark_profile("audio text-attn residual", ax)
 
         # Audio-Video cross-modal attention
         if run_a2v or run_v2a:
@@ -618,32 +664,50 @@ class BasicAVTransformerBlock(nn.Module):
             if run_a2v and not skip_a2v:
                 vx_scaled = vx_norm3 * (1 + scale_ca_video_a2v) + shift_ca_video_a2v
                 ax_scaled = ax_norm3 * (1 + scale_ca_audio_a2v) + shift_ca_audio_a2v
-                vx = vx + (
-                    self.audio_to_video_attn(
+                if profile_events is not None:
+                    mark_profile("audio->video setup", vx_scaled, ax_scaled)
+                    attn_out = self.audio_to_video_attn.profile(
+                        vx_scaled,
+                        "audio->video attn",
+                        mark_profile,
+                        context=ax_scaled,
+                        pe=video.cross_positional_embeddings,
+                        k_pe=audio.cross_positional_embeddings,
+                    )
+                else:
+                    attn_out = self.audio_to_video_attn(
                         vx_scaled,
                         context=ax_scaled,
                         pe=video.cross_positional_embeddings,
                         k_pe=audio.cross_positional_embeddings,
                     )
-                    * gate_out_a2v
-                )
-                mark_profile("audio->video attn", vx)
+                vx = vx + (attn_out * gate_out_a2v)
+                mark_profile("audio->video residual", vx)
 
             # Video to Audio attention (video features inform audio)
             # Skip if perturbation is enabled for all samples in batch
             if run_v2a and not skip_v2a:
                 ax_scaled = ax_norm3 * (1 + scale_ca_audio_v2a) + shift_ca_audio_v2a
                 vx_scaled = vx_norm3 * (1 + scale_ca_video_v2a) + shift_ca_video_v2a
-                ax = ax + (
-                    self.video_to_audio_attn(
+                if profile_events is not None:
+                    mark_profile("video->audio setup", ax_scaled, vx_scaled)
+                    attn_out = self.video_to_audio_attn.profile(
+                        ax_scaled,
+                        "video->audio attn",
+                        mark_profile,
+                        context=vx_scaled,
+                        pe=audio.cross_positional_embeddings,
+                        k_pe=video.cross_positional_embeddings,
+                    )
+                else:
+                    attn_out = self.video_to_audio_attn(
                         ax_scaled,
                         context=vx_scaled,
                         pe=audio.cross_positional_embeddings,
                         k_pe=video.cross_positional_embeddings,
                     )
-                    * gate_out_v2a
-                )
-                mark_profile("video->audio attn", ax)
+                ax = ax + (attn_out * gate_out_v2a)
+                mark_profile("video->audio residual", ax)
 
         # Video feed-forward
         if run_vx:
@@ -651,14 +715,15 @@ class BasicAVTransformerBlock(nn.Module):
             shift_mlp, scale_mlp, gate_mlp = self.get_ada_values(
                 self.scale_shift_table, vx.shape[0], video.timesteps, 3, 6
             )
-            # Use compiled helpers
-            vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
             if profile_events is not None:
+                vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
                 mark_profile("video ff adaln", vx_scaled)
                 ff_out = self.ff.profile(vx_scaled, "video ff", mark_profile)
+                vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
             else:
+                vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
                 ff_out = self.ff(vx_scaled)
-            vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
+                vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
             mark_profile("video ff residual", vx)
 
         # Audio feed-forward
