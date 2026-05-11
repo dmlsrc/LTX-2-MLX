@@ -30,6 +30,104 @@ class TransformerCacheResult:
     layout_count: int
 
 
+class TransformerBlockStreamer:
+    """Bind cached transformer-block weights into a small resident block pool."""
+
+    def __init__(self, cache_file: Path) -> None:
+        self.cache_file = cache_file
+        self._weights = mx.load(str(cache_file))
+        self._block_keys: dict[int, list[tuple[str, str]]] = {}
+        self._layout_keys: dict[int, list[tuple[str, str]]] = {}
+
+        for full_key in list(self._weights):
+            is_layout = full_key.startswith(LAYOUT_KEY_PREFIX)
+            logical_key = full_key[len(LAYOUT_KEY_PREFIX) :] if is_layout else full_key
+            parts = logical_key.split(".")
+            if len(parts) < 3 or parts[0] != "transformer_blocks":
+                self._weights.pop(full_key, None)
+                continue
+
+            try:
+                block_idx = int(parts[1])
+            except ValueError:
+                self._weights.pop(full_key, None)
+                continue
+
+            block_key = ".".join(parts[2:])
+            target = self._layout_keys if is_layout else self._block_keys
+            target.setdefault(block_idx, []).append((full_key, block_key))
+
+        discovered = set(self._block_keys) | set(self._layout_keys)
+        if not discovered:
+            raise ValueError(f"No transformer block weights found in cache {cache_file}")
+        self.block_count = max(discovered) + 1
+        missing = [idx for idx in range(self.block_count) if idx not in discovered]
+        if missing:
+            raise ValueError(
+                f"Transformer cache {cache_file} is missing block weights for layers {missing}"
+            )
+        self.loaded_count = sum(len(items) for items in self._block_keys.values()) + sum(
+            len(items) for items in self._layout_keys.values()
+        )
+        self.layout_count = sum(len(items) for items in self._layout_keys.values())
+
+    def bind(
+        self,
+        block: nn.Module,
+        block_idx: int,
+        *,
+        evict_block_idx: int | None = None,
+    ) -> nn.Module:
+        """Load one block's cached weights into ``block`` and return it."""
+        if block_idx < 0 or block_idx >= self.block_count:
+            raise IndexError(f"block index {block_idx} is outside 0-{self.block_count - 1}")
+
+        if evict_block_idx is not None and evict_block_idx != block_idx:
+            for full_key, _ in self._block_keys.get(evict_block_idx, ()):
+                self._weights.pop(full_key, None)
+            for full_key, _ in self._layout_keys.get(evict_block_idx, ()):
+                self._weights.pop(full_key, None)
+
+        normal_keys = self._block_keys.get(block_idx, ())
+        layout_keys = self._layout_keys.get(block_idx, ())
+        sample_key = None
+        if normal_keys:
+            sample_key = normal_keys[0][0]
+        elif layout_keys:
+            sample_key = layout_keys[0][0]
+        if sample_key is not None and sample_key not in self._weights:
+            self._weights = mx.load(str(self.cache_file))
+            self._drop_non_block_keys()
+
+        _clear_block_layout_weights(block)
+        normal_weights = {
+            block_key: self._weights[full_key]
+            for full_key, block_key in normal_keys
+        }
+        if normal_weights:
+            block.update(_flatten_to_nested(normal_weights))
+        for full_key, layout_key in layout_keys:
+            _install_block_layout_weight(block, layout_key, self._weights[full_key])
+        if hasattr(block, "idx"):
+            block.idx = block_idx
+        return block
+
+    def close(self) -> None:
+        self._weights = {}
+        self._block_keys = {}
+        self._layout_keys = {}
+
+    def _drop_non_block_keys(self) -> None:
+        for full_key in list(self._weights):
+            logical_key = (
+                full_key[len(LAYOUT_KEY_PREFIX) :]
+                if full_key.startswith(LAYOUT_KEY_PREFIX)
+                else full_key
+            )
+            if not logical_key.startswith("transformer_blocks."):
+                self._weights.pop(full_key, None)
+
+
 @dataclass(frozen=True)
 class ComponentCacheResult:
     """Result metadata for a component cache load."""
@@ -332,29 +430,37 @@ def build_transformer_cache(
     return loaded_count, layout_count
 
 
-def _install_layout_weight(model: nn.Module, layout_key: str, value: mx.array) -> None:
-    parts = layout_key.split(".")
-    if len(parts) < 5 or parts[0] != "transformer_blocks":
-        raise ValueError(f"Invalid transformer cache layout key: {layout_key}")
+def _clear_block_layout_weights(block: nn.Module) -> None:
+    ff = getattr(block, "ff", None)
+    if ff is not None:
+        if hasattr(ff, "_project_in_weight_t"):
+            ff._project_in_weight_t = None
+        if hasattr(ff, "_project_out_weight_t"):
+            ff._project_out_weight_t = None
 
-    layer = int(parts[1])
-    block = model.transformer_blocks[layer]
-    suffix = ".".join(parts[2:])
+    for attn_name in ("attn1", "attn2", "audio_to_video_attn"):
+        attn = getattr(block, attn_name, None)
+        if attn is None:
+            continue
+        if hasattr(attn, "_to_out_weight_t"):
+            attn._to_out_weight_t = None
 
-    if suffix == "ff.project_in.proj.weight_t":
+
+def _install_block_layout_weight(block: nn.Module, layout_key: str, value: mx.array) -> None:
+    if layout_key == "ff.project_in.proj.weight_t":
         block.ff._project_in_weight_t = value
         if "weight" in block.ff.project_in.proj:
             del block.ff.project_in.proj.weight
         return
 
-    if suffix == "ff.project_out.weight_t":
+    if layout_key == "ff.project_out.weight_t":
         block.ff._project_out_weight_t = value
         if "weight" in block.ff.project_out:
             del block.ff.project_out.weight
         return
 
     for attn_name in ("attn1", "attn2", "audio_to_video_attn"):
-        if suffix == f"{attn_name}.to_out.weight_t":
+        if layout_key == f"{attn_name}.to_out.weight_t":
             attn = getattr(block, attn_name, None)
             if attn is None:
                 raise ValueError(f"Missing attention module for cache key: {layout_key}")
@@ -364,6 +470,16 @@ def _install_layout_weight(model: nn.Module, layout_key: str, value: mx.array) -
             return
 
     raise ValueError(f"Unsupported transformer cache layout key: {layout_key}")
+
+
+def _install_layout_weight(model: nn.Module, layout_key: str, value: mx.array) -> None:
+    parts = layout_key.split(".")
+    if len(parts) < 5 or parts[0] != "transformer_blocks":
+        raise ValueError(f"Invalid transformer cache layout key: {layout_key}")
+
+    layer = int(parts[1])
+    block = model.transformer_blocks[layer]
+    _install_block_layout_weight(block, ".".join(parts[2:]), value)
 
 
 def load_transformer_cache(model: nn.Module, cache_file: Path) -> tuple[int, int]:
@@ -390,8 +506,7 @@ def load_transformer_cache(model: nn.Module, cache_file: Path) -> tuple[int, int
     return loaded_count, layout_count
 
 
-def load_transformer_weights_cached(
-    model: nn.Module,
+def ensure_transformer_cache(
     weights_path: str,
     *,
     cache_mode: str,
@@ -402,7 +517,7 @@ def load_transformer_weights_cached(
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
 ) -> TransformerCacheResult:
-    """Build if needed, then load a transformer cache into ``model``."""
+    """Build matching transformer/component cache artifacts if needed."""
     if cache_mode not in {"auto", "rebuild"}:
         raise ValueError(f"Unsupported transformer cache mode: {cache_mode}")
 
@@ -455,16 +570,114 @@ def load_transformer_weights_cached(
     else:
         print(f"  Transformer cache: using {cache_file}")
 
-    loaded_count, layout_count = load_transformer_cache(model, cache_file)
-    print(
-        f"  Loaded transformer cache: {loaded_count} tensors "
-        f"({layout_count} pretransposed)"
-    )
     return TransformerCacheResult(
         cache_path=cache_file,
         rebuilt=rebuilt,
+        loaded_count=0,
+        layout_count=0,
+    )
+
+
+def load_transformer_weights_cached(
+    model: nn.Module,
+    weights_path: str,
+    *,
+    cache_mode: str,
+    cache_root: str | None,
+    include_audio: bool,
+    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
+    video_ff_layout_layers: Tuple[int, ...],
+    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
+    video_attn_layout_layers: Tuple[int, ...],
+) -> TransformerCacheResult:
+    """Build if needed, then load a transformer cache into ``model``."""
+    result = ensure_transformer_cache(
+        weights_path,
+        cache_mode=cache_mode,
+        cache_root=cache_root,
+        include_audio=include_audio,
+        video_ff_layout_specs=video_ff_layout_specs,
+        video_ff_layout_layers=video_ff_layout_layers,
+        video_attn_layout_specs=video_attn_layout_specs,
+        video_attn_layout_layers=video_attn_layout_layers,
+    )
+
+    loaded_count, layout_count = load_transformer_cache(model, result.cache_path)
+    print(
+        f"  Loaded transformer cache: {loaded_count} tensors "
+        f"({layout_count} layout tensors)"
+    )
+    return TransformerCacheResult(
+        cache_path=result.cache_path,
+        rebuilt=result.rebuilt,
         loaded_count=loaded_count,
         layout_count=layout_count,
+    )
+
+
+def load_transformer_weights_cached_streaming(
+    model: nn.Module,
+    weights_path: str,
+    *,
+    cache_mode: str,
+    cache_root: str | None,
+    include_audio: bool,
+    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
+    video_ff_layout_layers: Tuple[int, ...],
+    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
+    video_attn_layout_layers: Tuple[int, ...],
+    resident_blocks: int,
+) -> TransformerCacheResult:
+    """Load non-block weights and stream transformer blocks from the cache."""
+    if resident_blocks <= 0:
+        raise ValueError("resident_blocks must be positive for transformer block streaming")
+
+    result = ensure_transformer_cache(
+        weights_path,
+        cache_mode=cache_mode,
+        cache_root=cache_root,
+        include_audio=include_audio,
+        video_ff_layout_specs=video_ff_layout_specs,
+        video_ff_layout_layers=video_ff_layout_layers,
+        video_attn_layout_specs=video_attn_layout_specs,
+        video_attn_layout_layers=video_attn_layout_layers,
+    )
+
+    if resident_blocks > len(model.transformer_blocks):
+        raise ValueError(
+            f"resident_blocks={resident_blocks} exceeds model block count "
+            f"{len(model.transformer_blocks)}"
+        )
+    model.transformer_blocks = model.transformer_blocks[:resident_blocks]
+
+    cached_weights = mx.load(str(result.cache_path))
+    non_block_weights: Dict[str, mx.array] = {}
+    for key, value in cached_weights.items():
+        logical_key = key[len(LAYOUT_KEY_PREFIX) :] if key.startswith(LAYOUT_KEY_PREFIX) else key
+        if logical_key.startswith("transformer_blocks."):
+            continue
+        if key.startswith(LAYOUT_KEY_PREFIX):
+            raise ValueError(f"Unexpected non-block layout cache key: {key}")
+        non_block_weights[key] = value
+
+    if non_block_weights:
+        model.update(_flatten_to_nested(non_block_weights))
+
+    del cached_weights, non_block_weights
+    gc.collect()
+
+    streamer = TransformerBlockStreamer(result.cache_path)
+    model.transformer_block_streamer = streamer
+    print(
+        f"  Loaded transformer cache: {streamer.loaded_count} streamed block tensors "
+        f"({streamer.layout_count} layout tensors), "
+        f"{resident_blocks}/{streamer.block_count} blocks resident"
+    )
+    return TransformerCacheResult(
+        cache_path=result.cache_path,
+        rebuilt=result.rebuilt,
+        loaded_count=streamer.loaded_count,
+        layout_count=streamer.layout_count,
     )
 
 

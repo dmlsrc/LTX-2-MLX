@@ -19,10 +19,13 @@ from .weight_converter import (
 from .transformer_cache import (
     ComponentCacheResult,
     TransformerCacheResult,
+    TransformerBlockStreamer,
     component_cache_paths,
     default_transformer_cache_root,
+    ensure_transformer_cache,
     load_component_weights_cached,
     load_transformer_weights_cached,
+    load_transformer_weights_cached_streaming,
     transformer_cache_paths,
 )
 from .lora_loader import (
@@ -58,10 +61,13 @@ __all__ = [
     "load_mlx_weights",
     "ComponentCacheResult",
     "TransformerCacheResult",
+    "TransformerBlockStreamer",
     "component_cache_paths",
     "default_transformer_cache_root",
+    "ensure_transformer_cache",
     "load_component_weights_cached",
     "load_transformer_weights_cached",
+    "load_transformer_weights_cached_streaming",
     "transformer_cache_paths",
     # LoRA
     "LoRAConfig",

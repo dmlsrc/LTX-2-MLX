@@ -647,8 +647,7 @@ class OneStagePipeline:
             video_state = video_state.replace(latent=new_video_latent)
             audio_state = audio_state.replace(latent=new_audio_latent)
 
-            mx.eval(video_state.latent)
-            mx.eval(audio_state.latent)
+            mx.eval(video_state.latent, audio_state.latent)
             mark_profile("state eval")
             if profile_events is not None:
                 print_profile(profile_step, profile_events)
@@ -747,14 +746,12 @@ class OneStagePipeline:
             predicted_audio = audio_state.latent.astype(mx.float32) + audio_velocity.astype(mx.float32) * float(dt)
             predicted_video = predicted_video.astype(video_state.latent.dtype)
             predicted_audio = predicted_audio.astype(audio_state.latent.dtype)
-            mx.eval(predicted_video)
-            mx.eval(predicted_audio)
+            mx.eval(predicted_video, predicted_audio)
 
             if sigma_next == 0:
                 video_state = video_state.replace(latent=video_denoised)
                 audio_state = audio_state.replace(latent=audio_denoised)
-                mx.eval(video_state.latent)
-                mx.eval(audio_state.latent)
+                mx.eval(video_state.latent, audio_state.latent)
                 if callback:
                     callback(step_idx + 1, num_steps)
                 continue
@@ -811,8 +808,7 @@ class OneStagePipeline:
 
             video_state = video_state.replace(latent=new_video_latent)
             audio_state = audio_state.replace(latent=new_audio_latent)
-            mx.eval(video_state.latent)
-            mx.eval(audio_state.latent)
+            mx.eval(video_state.latent, audio_state.latent)
 
             if callback:
                 callback(step_idx + 1, num_steps)

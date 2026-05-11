@@ -15,6 +15,72 @@ from .transformer import BasicTransformerBlock, BasicAVTransformerBlock, Transfo
 from ...components.perturbations import BatchedPerturbationConfig
 
 
+def _pack_transformer_args(args: Optional[TransformerArgs]) -> Optional[tuple]:
+    """Flatten TransformerArgs for mx.compile boundaries."""
+    if args is None:
+        return None
+    return (
+        args.x,
+        args.context,
+        args.timesteps,
+        args.positional_embeddings,
+        args.context_mask,
+        args.embedded_timestep,
+        args.cross_positional_embeddings,
+        args.cross_scale_shift_timestep,
+        args.cross_gate_timestep,
+        args.prompt_timestep,
+    )
+
+
+def _unpack_transformer_args(packed: Optional[tuple]) -> Optional[TransformerArgs]:
+    """Restore TransformerArgs after an mx.compile boundary."""
+    if packed is None:
+        return None
+    (
+        x,
+        context,
+        timesteps,
+        positional_embeddings,
+        context_mask,
+        embedded_timestep,
+        cross_positional_embeddings,
+        cross_scale_shift_timestep,
+        cross_gate_timestep,
+        prompt_timestep,
+    ) = packed
+    return TransformerArgs(
+        x=x,
+        context=context,
+        timesteps=timesteps,
+        positional_embeddings=positional_embeddings,
+        context_mask=context_mask,
+        embedded_timestep=embedded_timestep,
+        cross_positional_embeddings=cross_positional_embeddings,
+        cross_scale_shift_timestep=cross_scale_shift_timestep,
+        cross_gate_timestep=cross_gate_timestep,
+        enabled=True,
+        prompt_timestep=prompt_timestep,
+    )
+
+
+def _compile_transformer_block_group(blocks: List[nn.Module]):
+    """Compile a resident block window while treating parameters as dynamic inputs."""
+    blocks = list(blocks)
+
+    def _call(video_packed: Optional[tuple], audio_packed: Optional[tuple]) -> tuple:
+        video_args = _unpack_transformer_args(video_packed)
+        audio_args = _unpack_transformer_args(audio_packed)
+        for block in blocks:
+            video_args, audio_args = block(
+                video_args,
+                audio_args,
+                perturbations=None,
+                profile_events=None,
+            )
+        return _pack_transformer_args(video_args), _pack_transformer_args(audio_args)
+
+    return mx.compile(_call, inputs=blocks)
 
 
 class LTXModelType(Enum):
@@ -501,6 +567,10 @@ class LTXModel(nn.Module):
         self.profile_transformer_once = profile_transformer_once
         self.profile_transformer_label: Optional[str] = None
         self.profile_transformer_blocks: Tuple[int, ...] = ()
+        self.transformer_block_streamer = None
+        self.transformer_block_compile = False
+        object.__setattr__(self, "_compiled_transformer_block_groups", {})
+        self._transformer_block_compile_disabled = False
         self.cross_attention_adaln = cross_attention_adaln
         
         # Eval frequency setup
@@ -765,28 +835,41 @@ class LTXModel(nn.Module):
         layout_specs: Tuple[Tuple[str, str], ...],
         layers: Tuple[int, ...] = (),
     ) -> int:
-        """Apply selected same-math video-output attention layout transforms."""
+        """Apply selected same-math video attention layout transforms."""
         count = 0
         selected_layers = set(layers)
+        output_specs = tuple(
+            spec for spec in layout_specs
+            if spec[0] == "to_out"
+        )
+        unsupported_specs = tuple(
+            spec for spec in layout_specs
+            if spec[0] != "to_out"
+        )
+        if unsupported_specs:
+            spec_str = ",".join(f"{target}:{layout}" for target, layout in unsupported_specs)
+            raise ValueError(f"Unsupported video attention layout specs: {spec_str}")
+
         for i, block in enumerate(self.transformer_blocks):
             if selected_layers and i not in selected_layers:
                 continue
 
-            attention_modules = [
-                getattr(block, "attn1", None),
-                getattr(block, "attn2", None),
-                getattr(block, "audio_to_video_attn", None),
-            ]
-            for attn in attention_modules:
-                if attn is None:
-                    continue
-                arrays = attn.apply_layouts(layout_specs)
-                if arrays:
-                    mx.eval(*arrays)
-                    attn.drop_layout_sources(layout_specs)
-                    gc.collect()
-                    mx.clear_cache()
-                count += len(layout_specs)
+            if output_specs:
+                attention_modules = [
+                    getattr(block, "attn1", None),
+                    getattr(block, "attn2", None),
+                    getattr(block, "audio_to_video_attn", None),
+                ]
+                for attn in attention_modules:
+                    if attn is None:
+                        continue
+                    arrays = attn.apply_layouts(output_specs)
+                    if arrays:
+                        mx.eval(*arrays)
+                        attn.drop_layout_sources(output_specs)
+                        gc.collect()
+                        mx.clear_cache()
+                    count += len(output_specs)
 
         return count
 
@@ -868,7 +951,107 @@ class LTXModel(nn.Module):
             else set()
         )
 
-        for i, block in enumerate(self.transformer_blocks):
+        block_streamer = self.transformer_block_streamer
+        total_blocks = (
+            block_streamer.block_count
+            if block_streamer is not None
+            else len(self.transformer_blocks)
+        )
+        resident_blocks = len(self.transformer_blocks)
+        previous_slot_layers: List[Optional[int]] = [None] * resident_blocks
+        use_compiled_groups = (
+            block_streamer is not None
+            and self.transformer_block_compile
+            and not self._transformer_block_compile_disabled
+            and perturbations is None
+            and not profile_block_ids
+            and not capture
+            and (video_args is None or video_args.enabled)
+            and (audio_args is None or audio_args.enabled)
+        )
+        if use_compiled_groups:
+            compiled_groups = object.__getattribute__(self, "_compiled_transformer_block_groups")
+            if not isinstance(compiled_groups, dict):
+                compiled_groups = {}
+                object.__setattr__(self, "_compiled_transformer_block_groups", compiled_groups)
+
+            compiled_group_enabled = True
+            for group_start in range(0, total_blocks, resident_blocks):
+                group_size = min(resident_blocks, total_blocks - group_start)
+                for offset in range(group_size):
+                    block_idx = group_start + offset
+                    block_streamer.bind(
+                        self.transformer_blocks[offset],
+                        block_idx,
+                        evict_block_idx=previous_slot_layers[offset],
+                    )
+                    previous_slot_layers[offset] = block_idx
+
+                if compiled_group_enabled:
+                    group_callable = compiled_groups.get(group_size)
+                    if group_callable is None:
+                        group_callable = _compile_transformer_block_group(
+                            self.transformer_blocks[:group_size]
+                        )
+                        compiled_groups[group_size] = group_callable
+
+                    try:
+                        video_packed, audio_packed = group_callable(
+                            _pack_transformer_args(video_args),
+                            _pack_transformer_args(audio_args),
+                        )
+                        video_args = _unpack_transformer_args(video_packed)
+                        audio_args = _unpack_transformer_args(audio_packed)
+                    except (RuntimeError, TypeError, ValueError) as exc:
+                        compiled_group_enabled = False
+                        self._transformer_block_compile_disabled = True
+                        object.__setattr__(self, "_compiled_transformer_block_groups", {})
+                        print(
+                            "  WARNING: Transformer resident group compile failed; "
+                            f"falling back to eager streaming ({exc})"
+                        )
+
+                if not compiled_group_enabled:
+                    for offset in range(group_size):
+                        block = self.transformer_blocks[offset]
+                        video_args, audio_args = block(
+                            video_args,
+                            audio_args,
+                            perturbations=perturbations,
+                            profile_events=None,
+                        )
+
+                # Streaming can only evict/rebind a resident slot after the
+                # previous window's graph is materialized.
+                arrays = []
+                if video_args is not None:
+                    arrays.append(video_args.x)
+                if audio_args is not None:
+                    arrays.append(audio_args.x)
+                if arrays:
+                    mx.eval(*arrays)
+                if profile_events is not None:
+                    now = time.perf_counter()
+                    profile_events.append((
+                        f"blocks {group_start:02d}-{group_start + group_size - 1:02d}",
+                        now - profile_group_started_at,
+                    ))
+                    profile_group_started_at = now
+
+            return video_args, audio_args
+
+        for i in range(total_blocks):
+            slot = i
+            if block_streamer is not None:
+                slot = i % resident_blocks
+                block = block_streamer.bind(
+                    self.transformer_blocks[slot],
+                    i,
+                    evict_block_idx=previous_slot_layers[slot],
+                )
+                previous_slot_layers[slot] = i
+            else:
+                block = self.transformer_blocks[i]
             block_profile_events = [] if i in profile_block_ids else None
             if block_profile_events is not None:
                 arrays = []
@@ -893,14 +1076,21 @@ class LTXModel(nn.Module):
                 profile_block_traces.append((i, block_profile_events))
 
             # Reduce eval frequency for performance
-            if self._eval_frequency > 0 and (i + 1) % self._eval_frequency == 0:
+            eval_frequency = self._eval_frequency
+            if block_streamer is not None:
+                eval_frequency = resident_blocks
+
+            if eval_frequency > 0 and (i + 1) % eval_frequency == 0:
+                arrays = []
                 if video_args is not None:
-                    mx.eval(video_args.x)
+                    arrays.append(video_args.x)
                 if audio_args is not None:
-                    mx.eval(audio_args.x)
+                    arrays.append(audio_args.x)
+                if arrays:
+                    mx.eval(*arrays)
 
             if profile_events is not None and (
-                (i + 1) % profile_group_size == 0 or i == len(self.transformer_blocks) - 1
+                (i + 1) % profile_group_size == 0 or i == total_blocks - 1
             ):
                 arrays = []
                 if video_args is not None:
@@ -925,7 +1115,7 @@ class LTXModel(nn.Module):
                 _np.save(path, _np.array(audio_args.x.astype(mx.float32)))
                 if i == 0:
                     print(f"  [debug] Capturing audio layer states...")
-                if i == len(self.transformer_blocks) - 1:
+                if i == total_blocks - 1:
                     print(f"  [debug] Saved {i+1} layer states to {self._audio_layer_debug_dir}")
                     self._audio_layer_debug_done = True
 

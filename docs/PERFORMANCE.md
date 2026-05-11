@@ -747,7 +747,89 @@ Recommended current same-math constrained-memory stack:
 The attention layout can still be A/B tested, but it is not part of the minimal
 recommended stack because its benefit was marginal.
 
-### 12. Use `vmap` for repeated helper/probe loops
+### 12. Stream transformer blocks from the weights cache
+
+Status: useful constrained-memory path, not the fast path.
+
+Cache-backed block streaming keeps only a small resident pool of transformer
+blocks and rotates cached block weights through it. This is a memory tradeoff,
+not a free speed win. It preserves model math, but it repeatedly rebinds 48
+block weight sets per denoise step, so latency is worse than keeping the full
+transformer resident.
+
+The practical advantage is SSD write avoidance under constrained memory. After
+the one-time weights-cache build, streaming reuses read-only safetensors pages
+and can lean on the macOS file cache instead of forcing the full transformer and
+MLX allocator cache to stay resident. If that prevents swap pressure, it avoids
+pummeling the internal SSD with swap writes. Cold or evicted file-cache pages can
+still cost read bandwidth and latency, so this is an SSD-friendly/constrained-RAM
+mode rather than a throughput mode.
+
+Enable it with:
+
+```bash
+--weights-cache auto \
+--transformer-block-resident-blocks 4
+```
+
+Measured bakery AV results with `project_out:pretranspose`,
+`to_out:pretranspose`, `--mlx-cache-limit-gb 1`, 512x288, 20s, 8 steps,
+seed 124:
+
+- `--transformer-block-resident-blocks 4`: process RAM was around 8GB average,
+  denoise RUN `9m24s`, average `70.5s/it`, total `10m27.9s`.
+- Adding the original per-resident-block `--transformer-block-compile`: no
+  compile fallback warning, denoise RUN `9m01s`, average `67.6s/it`, total
+  `10m10.3s`. It was faster on earlier steps, then slowed in later steps.
+- `--transformer-block-resident-blocks 8`: about the same speed class as r4;
+  without the MLX cache cap it drifted from roughly 60s early steps to roughly
+  67s later steps.
+- r8 resident-group compile without `--low-memory`: first attempt aborted
+  before denoise step 1 with Metal `Impacting Interactivity` despite no visible
+  memory pressure; immediate retry completed with STEP1 `0m58s`, denoise RUN
+  `8m10s`, average `61.2s/it`, total `9m07.7s`. This points at file-cache /
+  command-buffer state, not a deterministic allocator-capacity result.
+- `--transformer-block-resident-blocks 16`: around 16GB process RAM and about
+  the same time class in normal desktop conditions. With essentially no other
+  foreground workload, r16 reached stable `54s/it`, showing that block streaming
+  can approach the full-resident same-math speed when the transformer cache
+  stays hot and the system avoids memory/cache contention.
+- r16 resident-group compile with live Gemma, `--mlx-cache-limit-gb 1`,
+  `project_in:pretranspose,project_out:pretranspose`, and `to_out:pretranspose`
+  completed at STEP1 `0m54s`, denoise RUN `7m20s`, average `55.0s/it`,
+  `generation + decode 8m09.6s`, total `8m57.4s`. This run included a one-time
+  fresh transformer cache build (`25.61s`, 240 layout tensors); a warm cache
+  should remove most of that load cost.
+- Tried packed attention layouts on the quiet r16 path. `self_qkv:pack` plus
+  `to_out:pretranspose` reached stable `53s/it`; adding `kv:pack` also landed
+  around `53s/it`. Both packing paths were removed because the measured speedup
+  versus `to_out:pretranspose` was neutral-to-tiny while adding extra runtime
+  branches, cache variants, resident-block state, and CLI surface area.
+- Forcing a cache clear after each full block sweep made the first step worse
+  at about 71s, so do not clear MLX cache inside the denoise loop.
+
+Follow-up implementation notes:
+
+- Streaming now uses the resident window as its sync boundary instead of
+  inheriting `--low-memory`'s every-4-block eval cadence. This should avoid
+  redundant evals for r8/r16 while still materializing before resident slots are
+  reused.
+- `--transformer-block-compile` now compiles the whole resident window as one
+  group (`inputs=blocks`) instead of compiling each block separately. Initial
+  r8 testing without `--low-memory` improved the completed run to about
+  `61.2s/it`, but a preceding attempt hit the Metal interactivity watchdog
+  before step 1. Treat it as promising but cache/watchdog-sensitive.
+
+Conclusion: keep block streaming as an opt-in memory mode. r16 looks like the
+best practical compromise so far: it can avoid swap-write pressure while still
+approaching full-resident speed on a quiet system. Packed attention QKV/KV
+experiments were removed after neutral-to-tiny measured payoff. Resident-group
+compile is also neutral-to-small-positive, but none of these has removed the
+broader dependence on macOS file-cache and memory pressure. If memory
+comfortably fits, the full-resident same-math layout path remains the known fast
+path.
+
+### 13. Use `vmap` for repeated helper/probe loops
 
 Status: opportunistic cleanup candidate.
 
@@ -763,7 +845,7 @@ denoise optimization. It may still help:
 Keep this separate from the main denoise hot path unless profiling points at a
 real Python loop.
 
-### 13. Add a fused split-RoPE kernel
+### 14. Add a fused split-RoPE kernel
 
 Status: only consider after RoPE precompute/profiling.
 
@@ -775,7 +857,7 @@ Before writing a custom kernel, test whether `mx.fast.rope` can represent the
 needed LTX-2.3 SPLIT 3D RoPE exactly. If it cannot, a custom Metal kernel should
 be built once and should avoid hidden row-contiguity copies.
 
-### 13. Distributed tensor parallelism
+### 15. Distributed tensor parallelism
 
 Status: separate project, not a local optimization.
 
@@ -838,6 +920,8 @@ Use a fixed command and change only one thing at a time.
 | `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | neutral vs project_out only | Same-math and safe for inference, but bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone. Keep as supported, not the recommended minimal setting. |
 | `--video-attn-layout to_out:pretranspose` | yes | medium | marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. Keep available, but FF `project_out` remains the main same-math win. |
 | `--mlx-cache-limit-gb 1` | no | low | no cost observed | Same-math allocator-cache cap. On the bakery AV smoke with `project_out:pretranspose`, average process RAM dropped from about 44GB to about 40GB with no observed time penalty. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
+| `--transformer-block-resident-blocks` | yes | low | slower | Cache-backed block streaming cuts process RAM dramatically, e.g. r4 around 8GB average on the bakery smoke, but denoise slowed to about 70.5s/it. Use as a constrained-memory mode, not a fast path. |
+| `--transformer-block-compile` | yes | low to medium | mixed | Original per-resident-block `mx.compile(inputs=block)` improved r4 streaming denoise from `9m24s` to `9m01s`, about 67.6s/it, but later-step drift remained. Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |
 | `mx.gather_mm` / `mx.gather_qmm` | no | high | unknown | Relevant to MoE/routing or selected batched matrices, not current dense LTX. |

@@ -48,6 +48,7 @@ from LTX_2_MLX.loader import (
     load_component_weights_cached,
     load_transformer_weights,
     load_transformer_weights_cached,
+    load_transformer_weights_cached_streaming,
 )
 from LTX_2_MLX.loader.lora_loader import fuse_lora_into_weights
 from mlx.utils import tree_flatten
@@ -94,6 +95,17 @@ def parse_positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError(f"Expected a positive number, got '{value}'") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"Expected a positive number, got {parsed}")
+    return parsed
+
+
+def parse_non_negative_int(value: str) -> int:
+    """Parse a non-negative integer for count-style CLI knobs."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Expected a non-negative integer, got '{value}'") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"Expected a non-negative integer, got {parsed}")
     return parsed
 
 
@@ -1467,6 +1479,8 @@ def load_transformer(
     video_attn_layout_layers: tuple[int, ...] = (),
     weights_cache_mode: str = "off",
     weights_cache_dir: str | None = None,
+    transformer_block_resident_blocks: int = 0,
+    transformer_block_compile: bool = False,
 ) -> LTXModel:
     """Load transformer with weights.
 
@@ -1503,7 +1517,22 @@ def load_transformer(
 
     # Load weights
     if weights_path and os.path.exists(weights_path):
-        if weights_cache_mode != "off":
+        if transformer_block_resident_blocks:
+            load_transformer_weights_cached_streaming(
+                model,
+                weights_path,
+                cache_mode=weights_cache_mode,
+                cache_root=weights_cache_dir,
+                include_audio=False,
+                video_ff_layout_specs=video_ff_layout_specs,
+                video_ff_layout_layers=video_ff_layout_layers,
+                video_attn_layout_specs=video_attn_layout_specs,
+                video_attn_layout_layers=video_attn_layout_layers,
+                resident_blocks=transformer_block_resident_blocks,
+            )
+            model.transformer_block_compile = transformer_block_compile
+            layouts_loaded_from_cache = True
+        elif weights_cache_mode != "off":
             load_transformer_weights_cached(
                 model,
                 weights_path,
@@ -1616,6 +1645,8 @@ def load_av_transformer(
     apply_gated_attention: bool = False,
     weights_cache_mode: str = "off",
     weights_cache_dir: str | None = None,
+    transformer_block_resident_blocks: int = 0,
+    transformer_block_compile: bool = False,
 ) -> LTXAVModel:
     """Load AudioVideo transformer with weights.
 
@@ -1656,7 +1687,22 @@ def load_av_transformer(
 
     # Load weights (including audio components)
     if weights_path and os.path.exists(weights_path):
-        if weights_cache_mode != "off":
+        if transformer_block_resident_blocks:
+            load_transformer_weights_cached_streaming(
+                model,
+                weights_path,
+                cache_mode=weights_cache_mode,
+                cache_root=weights_cache_dir,
+                include_audio=True,
+                video_ff_layout_specs=video_ff_layout_specs,
+                video_ff_layout_layers=video_ff_layout_layers,
+                video_attn_layout_specs=video_attn_layout_specs,
+                video_attn_layout_layers=video_attn_layout_layers,
+                resident_blocks=transformer_block_resident_blocks,
+            )
+            model.transformer_block_compile = transformer_block_compile
+            layouts_loaded_from_cache = True
+        elif weights_cache_mode != "off":
             load_transformer_weights_cached(
                 model,
                 weights_path,
@@ -1867,6 +1913,8 @@ def generate_video(
     weights_cache_mode: str = "off",
     weights_cache_dir: str | None = None,
     mlx_cache_limit_gb: float | None = None,
+    transformer_block_resident_blocks: int = 0,
+    transformer_block_compile: bool = False,
     # New parameters
     image_path: str = None,
     image_strength: float = 0.95,
@@ -1934,6 +1982,12 @@ def generate_video(
     )
     if video_ff_quantize_specs and video_ff_layout_specs:
         raise ValueError("--video-ff-quantize and --video-ff-layout should be tested separately")
+    if transformer_block_resident_blocks and video_ff_quantize_specs:
+        raise ValueError("--transformer-block-resident-blocks does not support on-the-fly FF quantization yet")
+    if transformer_block_compile and not transformer_block_resident_blocks:
+        raise ValueError("--transformer-block-compile requires --transformer-block-resident-blocks")
+    if transformer_block_resident_blocks and weights_cache_mode == "off":
+        weights_cache_mode = "auto"
     if mlx_cache_limit_gb is not None:
         mlx_cache_limit_bytes = int(mlx_cache_limit_gb * (1000**3))
         mx.set_cache_limit(mlx_cache_limit_bytes)
@@ -2001,6 +2055,8 @@ def generate_video(
                 "weights_cache_mode": weights_cache_mode,
                 "weights_cache_dir": weights_cache_dir,
                 "mlx_cache_limit_gb": mlx_cache_limit_gb,
+                "transformer_block_resident_blocks": transformer_block_resident_blocks,
+                "transformer_block_compile": transformer_block_compile,
                 "save_latents": save_latents,
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
@@ -2111,6 +2167,13 @@ def generate_video(
             "Weights cache: ENABLED "
             f"(mode={weights_cache_mode}, dir={cache_dir_str})"
         )
+    if transformer_block_resident_blocks:
+        print(
+            "Transformer block streaming: ENABLED "
+            f"({transformer_block_resident_blocks} resident blocks)"
+        )
+        if transformer_block_compile:
+            print("Transformer block compile: ENABLED (experimental resident-group mx.compile)")
     if mlx_cache_limit_gb is not None:
         print(f"MLX cache limit: {mlx_cache_limit_gb:g} GB")
     if active_profile_steps:
@@ -2310,6 +2373,8 @@ def generate_video(
                 video_attn_layout_layers=video_attn_layout_layers,
                 weights_cache_mode=weights_cache_mode,
                 weights_cache_dir=weights_cache_dir,
+                transformer_block_resident_blocks=transformer_block_resident_blocks,
+                transformer_block_compile=transformer_block_compile,
                 caption_channels=None if v2 else 3840,
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
@@ -2337,6 +2402,8 @@ def generate_video(
                 video_attn_layout_layers=video_attn_layout_layers,
                 weights_cache_mode=weights_cache_mode,
                 weights_cache_dir=weights_cache_dir,
+                transformer_block_resident_blocks=transformer_block_resident_blocks,
+                transformer_block_compile=transformer_block_compile,
             )
 
             # Apply cross-attention scaling if specified (improves text conditioning)
@@ -3647,6 +3714,25 @@ def main():
         ),
     )
     parser.add_argument(
+        "--transformer-block-resident-blocks",
+        type=parse_non_negative_int,
+        default=0,
+        help=(
+            "Experimental cache-backed transformer block streaming. 0 disables it; "
+            "positive values keep that many block modules resident and rotate cached "
+            "weights through them. Implies --weights-cache auto when the cache is off."
+        ),
+    )
+    parser.add_argument(
+        "--transformer-block-compile",
+        action="store_true",
+        help=(
+            "Experimental: with --transformer-block-resident-blocks, compile each "
+            "resident block window with mx.compile(inputs=blocks). Falls back to "
+            "eager streaming if MLX rejects the compiled group."
+        ),
+    )
+    parser.add_argument(
         "--placeholder",
         action="store_true",
         help="Use placeholder inference (skip model loading)"
@@ -4089,6 +4175,8 @@ def main():
         weights_cache_mode=args.weights_cache,
         weights_cache_dir=args.weights_cache_dir,
         mlx_cache_limit_gb=args.mlx_cache_limit_gb,
+        transformer_block_resident_blocks=args.transformer_block_resident_blocks,
+        transformer_block_compile=args.transformer_block_compile,
         # New parameters
         image_path=args.image,
         image_strength=args.image_strength,
