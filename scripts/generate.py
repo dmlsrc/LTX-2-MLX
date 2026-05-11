@@ -107,6 +107,17 @@ def parse_positive_float(value: str) -> float:
     return parsed
 
 
+def parse_non_negative_float(value: str) -> float:
+    """Parse a non-negative float for user-facing CLI limits."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Expected a non-negative number, got '{value}'") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"Expected a non-negative number, got {parsed}")
+    return parsed
+
+
 def parse_non_negative_int(value: str) -> int:
     """Parse a non-negative integer for count-style CLI knobs."""
     try:
@@ -530,6 +541,12 @@ class RunTimings:
         now = time.perf_counter()
         self.sections.append((label, now - self.last_mark))
         self.last_mark = now
+
+    def extend(self, sections: list[tuple[str, float]]) -> None:
+        """Append externally measured sections and advance the timing cursor."""
+        for label, seconds in sections:
+            self.sections.append((label, float(seconds)))
+        self.last_mark = time.perf_counter()
 
     def print_summary(self) -> None:
         total = time.perf_counter() - self.started_at
@@ -3189,7 +3206,11 @@ def generate_video(
             latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
         )
         denoise_progress.finish()
-        timings.mark("generation + decode")
+        pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
+        if pipeline_timings:
+            timings.extend(pipeline_timings)
+        else:
+            timings.mark("generation + decode")
 
         # Convert to frames list for save_video
         video_np = np.array(video)
@@ -3877,11 +3898,12 @@ def main():
     )
     parser.add_argument(
         "--mlx-cache-limit-gb",
-        type=parse_positive_float,
+        type=parse_non_negative_float,
         default=None,
         help=(
-            "Limit MLX's in-memory allocator cache in decimal GB. This is separate "
-            "from --weights-cache and can reduce system memory pressure."
+            "Limit MLX's in-memory allocator cache in decimal GB. Use 0 to return "
+            "freed buffers immediately. This is separate from --weights-cache and "
+            "can reduce system memory pressure."
         ),
     )
     parser.add_argument(

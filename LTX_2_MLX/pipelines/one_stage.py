@@ -163,6 +163,7 @@ class OneStagePipeline:
         self.audio_patchifier = AudioPatchifier(patch_size=1)
         self.diffusion_step = EulerDiffusionStep()
         self.scheduler = LTX2Scheduler()
+        self.last_timing_sections: list[tuple[str, float]] = []
 
     def _velocity_transformer(self):
         """Return the wrapped velocity model when the pipeline uses X0Model."""
@@ -862,6 +863,8 @@ class OneStagePipeline:
                 - audio: Audio waveform [B, channels, samples] at output_sample_rate,
                          or None if audio_enabled is False.
         """
+        call_start = time.perf_counter()
+        self.last_timing_sections = []
         images = images or []
 
         internal_audio_active = self.is_av_model and (config.use_internal_audio_branch or config.audio_enabled)
@@ -965,6 +968,7 @@ class OneStagePipeline:
             callback(0, len(sigmas) - 1)
 
         # Run denoising loop
+        denoise_start = time.perf_counter()
         if internal_audio_active and audio_state is not None:
             # Joint audio-video denoising with separate guidance per modality
             _stg_guider = None
@@ -1072,6 +1076,8 @@ class OneStagePipeline:
                     cross_attn_scale=cross_attn_scale,
                     cross_attn_start_block=cross_attn_start_block,
             )
+        denoise_elapsed = time.perf_counter() - denoise_start
+        post_denoise_start = time.perf_counter()
 
         # Clear conditioning and unpatchify video
         video_state = video_tools.clear_conditioning(video_state)
@@ -1125,6 +1131,11 @@ class OneStagePipeline:
         if self.video_decoder is None:
             raise ValueError("Video decoder required for VAE decode.")
         effective_tiling = config._get_tiling_config()
+        post_denoise_elapsed = time.perf_counter() - post_denoise_start
+        decoder_name = self.video_decoder.__class__.__name__
+        tiling_desc = "tiled" if effective_tiling else "not tiled"
+        print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+        decode_start = time.perf_counter()
         if effective_tiling:
             print(f"  Using tiled VAE decoding (preventing GPU watchdog timeout)")
             video = None
@@ -1136,11 +1147,27 @@ class OneStagePipeline:
                 mx.clear_cache()
         else:
             video = decode_latent(final_video_latent, self.video_decoder)
+        mx.eval(video)
+        decode_elapsed = time.perf_counter() - decode_start
+        print(f"  VAE decode complete in {decode_elapsed:.1f}s")
 
         # Decode audio if enabled
         audio_waveform = None
         if final_audio_latent is not None:
+            audio_decode_start = time.perf_counter()
             audio_waveform = self._decode_audio(final_audio_latent)
+            audio_decode_elapsed = time.perf_counter() - audio_decode_start
+        else:
+            audio_decode_elapsed = 0.0
+
+        self.last_timing_sections = [
+            ("pipeline setup", denoise_start - call_start),
+            ("denoise", denoise_elapsed),
+            ("post-denoise prep", post_denoise_elapsed),
+            ("vae decode", decode_elapsed),
+        ]
+        if audio_decode_elapsed:
+            self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
 
         return video, audio_waveform
 

@@ -800,6 +800,22 @@ seed 124:
   `generation + decode 8m09.6s`, total `8m57.4s`. This run included a one-time
   fresh transformer cache build (`25.61s`, 240 layout tensors); a warm cache
   should remove most of that load cost.
+- 1024x576x481 with the same r16 resident-group compile shape completed step 1
+  at `6m23s`, then aborted with Metal `Impacting Interactivity`. The latent
+  grid was `61x18x32`, or 4x the 512x288 spatial token count, and attention work
+  scales roughly quadratically with video tokens. For this size, r16 compiled
+  groups are too large for the watchdog. Prefer smaller resident windows (`r4`
+  first, then `r1` if needed) and `--mlx-cache-limit-gb 0` for stability, or add
+  denoise/modality tiling before treating this as a viable full-size mode.
+- [MLX issue #3267](https://github.com/ml-explore/mlx/issues/3267) points at
+  active-display / WindowServer contention as a trigger for the same Metal
+  `Impacting Interactivity` failure, even when memory is not the limiting
+  factor. Local MLX source exposes two process-start env knobs,
+  `MLX_MAX_OPS_PER_BUFFER` and `MLX_MAX_MB_PER_BUFFER`, with Metal defaults
+  around `40` ops / `40 MB` on base/pro architectures. These can split command
+  buffers between ops, but cannot split a single oversized op; treat them as a
+  watchdog-pressure experiment to combine with smaller resident windows, not as
+  a replacement for denoise/modality tiling at larger token counts.
 - Tried packed attention layouts on the quiet r16 path. `self_qkv:pack` plus
   `to_out:pretranspose` reached stable `53s/it`; adding `kv:pack` also landed
   around `53s/it`. Both packing paths were removed because the measured speedup
@@ -941,6 +957,15 @@ Initial bakery latent A/B at 512x288x481:
   close enough to keep native Conv3d as an opt-in lower-memory decoder, not as
   the default.
 
+End-to-end bakery AV smoke with warm caches, a precomputed text sidecar, `r16`
+resident-group compile, FF `project_in`/`project_out` pretranspose, attention
+`to_out` pretranspose, `--vae-decoder native-conv3d`, and `--vae-tiling off`:
+denoise RUN `7m08s`, average `53.4s/it`; `generation + decode` `7m59.5s`;
+total `8m07.3s`. This validates the native Conv3d path in the real generator.
+On 64GB machines, native no-tiling is the fastest native decode mode measured so
+far; use custom temporal tiling when decode peak headroom matters more than
+decode time.
+
 Custom VAE tiling controls are available for middle-ground tests:
 
 ```bash
@@ -988,10 +1013,11 @@ Use a fixed command and change only one thing at a time.
 | `--video-ff-layout project_out:pretranspose` | yes | medium | best same-math win so far | Replacement-layout all-layer bakery AV smoke improved from roughly 77s/it BF16 baseline to about 55s/it, stable around 44GB process memory. Original duplicate-cache implementation was slower and more memory hungry. |
 | `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | neutral vs project_out only | Same-math and safe for inference, but bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone. Keep as supported, not the recommended minimal setting. |
 | `--video-attn-layout to_out:pretranspose` | yes | medium | marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. Keep available, but FF `project_out` remains the main same-math win. |
-| `--mlx-cache-limit-gb 1` | no | low | no cost observed | Same-math allocator-cache cap. On the bakery AV smoke with `project_out:pretranspose`, average process RAM dropped from about 44GB to about 40GB with no observed time penalty. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
+| `--mlx-cache-limit-gb 0` or `1` | no | low | no cost observed at 1GB | Same-math allocator-cache cap. `1` GB dropped bakery AV average process RAM from about 44GB to about 40GB with no observed time penalty. `0` returns freed buffers immediately and is worth trying for watchdog/cache pressure, but it will not make oversized compiled groups safe by itself. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
+| `MLX_MAX_OPS_PER_BUFFER=1 MLX_MAX_MB_PER_BUFFER=10` | no | low | unknown | Must be set before Python starts. Real MLX command-buffer split knobs; useful for watchdog-pressure A/B after a Metal `Impacting Interactivity` abort. They can split between ops, not inside one huge op, so pair with smaller resident windows or denoise/modality tiling for larger token grids. |
 | `--transformer-block-resident-blocks` | yes | low | slower | Cache-backed block streaming cuts process RAM dramatically, e.g. r4 around 8GB average on the bakery smoke, but denoise slowed to about 70.5s/it. Use as a constrained-memory mode, not a fast path. |
 | `--transformer-block-compile` | yes | low to medium | mixed | Original per-resident-block `mx.compile(inputs=block)` improved r4 streaming denoise from `9m24s` to `9m01s`, about 67.6s/it, but later-step drift remained. Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. |
-| `--vae-decoder native-conv3d` | yes | medium | none for denoise | Decode-only A/B path. Compare against `simple` on the same saved final latent; do not count this as a transformer speed win. Pair with `--mlx-cache-limit-gb` if allocator cache growth matters. |
+| `--vae-decoder native-conv3d` | yes | medium | none for denoise | Decode A/B path validated in full generate with `--vae-tiling off`: bakery AV smoke total `8m07.3s`, denoise avg `53.4s/it`. Compare against `simple` on the same saved final latent; do not count this as a transformer speed win. Pair with `--mlx-cache-limit-gb` if allocator cache growth matters. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |
 | `mx.gather_mm` / `mx.gather_qmm` | no | high | unknown | Relevant to MoE/routing or selected batched matrices, not current dense LTX. |
