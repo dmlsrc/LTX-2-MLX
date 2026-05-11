@@ -872,6 +872,28 @@ require a distributed launch workflow, sharded loader/weights, communication
 benchmarking, and quality/performance validation. Track it separately if the
 project ever targets multi-Mac inference.
 
+### 16. Defer AV text encoder load until after Gemma
+
+Status: implemented for prompt-encode peak memory.
+
+The AV text-conditioning path now runs Gemma for the positive and negative
+prompts first, trims/materializes only the real-token hidden states, frees Gemma,
+and only then loads the AV text encoder. This avoids overlapping Gemma 3 12B
+weights with AV connector weights during prompt encoding.
+
+Measured bakery AV run:
+
+- Previous live-Gemma path sometimes peaked above 30GB process RAM during prompt
+  encoding.
+- Deferred connector path peaked around 24GB process RAM in Activity Monitor.
+- Text sidecar parity against the previous live-Gemma run was exact: all 15
+  `.npz` keys matched, including positive/negative video encodings, audio
+  encodings, masks, dtype metadata, prompt strings, and schema version.
+
+Do not remove Gemma's per-layer `mx.eval(hidden_states)` as a first move for
+memory. It may help speed, but it may also allow a much larger lazy graph to
+accumulate across the 48-layer text model.
+
 ## Ideas To Avoid As First Moves
 
 ### KV caching text cross-attention
@@ -910,6 +932,7 @@ Use a fixed command and change only one thing at a time.
 | Remove `--low-memory` | no | medium | none observed in small run | 352x192 15s AV smoke was slightly slower. Retest larger shapes if they fit. |
 | `MLX_METAL_FAST_SYNCH=1` | no | low | none observed | 352x192 15s AV smoke was slightly slower. |
 | AV `fast_mode` | yes | high | none observed in small run | 352x192 15s AV smoke tied low-memory baseline. Retest larger shapes if they fit. |
+| Defer AV text encoder load until after Gemma | yes | low | none, prompt-encode memory only | Reduces prompt-encode peak by avoiding overlap between Gemma 3 12B weights and AV connector weights. Gemma hidden states are trimmed to real tokens, materialized, then Gemma is freed before the connector loads. |
 | Per-run RoPE precompute | yes | low | none observed in small run | Temporary one-entry cache patch was removed after a slightly slower 352x192 15s AV smoke. |
 | No-op cast/allocation cleanup | yes | low | low | Good cleanup after larger wins. |
 | Fast GELU approximation | no | low | unlikely | FFN sub-profile showed GELU at about 0.7% of a clean block; skip unless future profiles differ. |

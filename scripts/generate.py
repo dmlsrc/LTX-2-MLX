@@ -1090,9 +1090,10 @@ def encode_av_gemma_batch(
     """
     Encode multiple text prompts using one Gemma load.
 
-    Loads Gemma and the AV text encoder once, encodes all prompts sequentially,
-    then frees memory. Much more efficient than calling encode_with_av_gemma
-    multiple times (saves ~15s and ~24GB per extra prompt).
+    Loads Gemma once, materializes compact real-token hidden states for each
+    prompt, frees Gemma, then loads the AV text encoder. This avoids overlapping
+    Gemma 3 12B weights with the AV connector peak while still avoiding one
+    Gemma load per prompt.
 
     Args:
         prompts: List of text prompts to encode.
@@ -1104,6 +1105,13 @@ def encode_av_gemma_batch(
     Returns:
         List of (video_encoding, audio_encoding, attention_mask) tuples, or None on failure.
     """
+    def prompt_label(index: int, total: int) -> str:
+        if total == 1:
+            return "prompt"
+        if total == 2:
+            return "positive prompt" if index == 0 else "negative prompt"
+        return f"prompt {index + 1}/{total}"
+
     print(f"  Loading tokenizer from {gemma_path}...")
     tokenizer = load_tokenizer(gemma_path)
     if tokenizer is None:
@@ -1118,19 +1126,9 @@ def encode_av_gemma_batch(
     gemma = Gemma3Model(config)
     load_gemma3_weights(gemma, gemma_path)
 
-    print(f"  Loading AV text encoder projection...")
-    config_path = ltx_config_path or ltx_weights_path
-    if is_v2_model(config_path):
-        print(f"  Detected LTX-2.3 (V2) model — using V2 text encoder")
-        text_encoder = create_av_text_encoder_v2_from_checkpoint(config_path)
-        load_av_text_encoder_v2_weights(text_encoder, ltx_weights_path)
-    else:
-        text_encoder = create_av_text_encoder()
-        load_av_text_encoder_weights(text_encoder, ltx_weights_path)
-
-    results = []
+    gemma_outputs = []
     for i, prompt in enumerate(prompts):
-        label = f"prompt {i+1}/{len(prompts)}" if len(prompts) > 1 else "prompt"
+        label = prompt_label(i, len(prompts))
         print(f"  Tokenizing {label}...")
         encoding = tokenizer(
             prompt,
@@ -1146,20 +1144,25 @@ def encode_av_gemma_batch(
         num_tokens = int(attention_mask.sum())
         print(f"  Token count: {num_tokens}/{max_length}")
 
-        print(f"  Running Gemma 3 forward pass (48 layers)...")
+        print(f"  Running Gemma 3 forward pass for {label} (48 layers)...")
         last_hidden, all_hidden_states = gemma(
             input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        mx.eval(last_hidden)
 
         if all_hidden_states is None:
-            print("  Error: Gemma model did not return hidden states")
-            results.append((None, None, None))
+            print(f"  Error: Gemma model did not return hidden states for {label}")
+            gemma_outputs.append({
+                "label": label,
+                "hidden_states": None,
+                "attention_mask": None,
+                "real_token_count": 0,
+            })
+            del last_hidden
             continue
 
-        print(f"  Got {len(all_hidden_states)} hidden states")
+        print(f"  Got {len(all_hidden_states)} hidden states for {label}")
 
         # Strip padding to real tokens only (matching ComfyUI behavior).
         # Left-padded: real tokens are at the END. The embeddings connector
@@ -1167,11 +1170,54 @@ def encode_av_gemma_batch(
         real_token_count = int(attention_mask.sum())
         seq_len = all_hidden_states[0].shape[1]
         if real_token_count < seq_len:
-            all_hidden_states = [h[:, -real_token_count:, :] for h in all_hidden_states]
-            attention_mask = attention_mask[:, -real_token_count:]
-            print(f"  Trimmed padding: {seq_len} -> {real_token_count} (real tokens only)")
+            all_hidden_states = [
+                mx.contiguous(h[:, -real_token_count:, :])
+                for h in all_hidden_states
+            ]
+            attention_mask = mx.contiguous(attention_mask[:, -real_token_count:])
+            print(f"  Trimmed {label} padding: {seq_len} -> {real_token_count} (real tokens only)")
 
-        print(f"  Processing through AV text encoder pipeline...")
+        # Materialize compact hidden states before freeing Gemma weights. Keeping
+        # only real-token hidden states avoids overlapping the AV connector with
+        # the 12B text model during prompt encoding.
+        mx.eval(*all_hidden_states, attention_mask)
+        gemma_outputs.append({
+            "label": label,
+            "hidden_states": all_hidden_states,
+            "attention_mask": attention_mask,
+            "real_token_count": real_token_count,
+        })
+
+        del last_hidden
+
+    print(f"  Clearing Gemma from memory before AV text encoder...")
+    del gemma
+    del tokenizer
+    gc.collect()
+    mx.clear_cache()
+
+    print(f"  Loading AV text encoder projection...")
+    config_path = ltx_config_path or ltx_weights_path
+    if is_v2_model(config_path):
+        print(f"  Detected LTX-2.3 (V2) model — using V2 text encoder")
+        text_encoder = create_av_text_encoder_v2_from_checkpoint(config_path)
+        load_av_text_encoder_v2_weights(text_encoder, ltx_weights_path)
+    else:
+        text_encoder = create_av_text_encoder()
+        load_av_text_encoder_weights(text_encoder, ltx_weights_path)
+
+    results = []
+    for gemma_output in gemma_outputs:
+        label = gemma_output["label"]
+        all_hidden_states = gemma_output["hidden_states"]
+        attention_mask = gemma_output["attention_mask"]
+        real_token_count = gemma_output["real_token_count"]
+
+        if all_hidden_states is None or attention_mask is None:
+            results.append((None, None, None))
+            continue
+
+        print(f"  Processing {label} through AV text encoder pipeline...")
         av_output = text_encoder.encode_from_hidden_states(
             hidden_states=all_hidden_states,
             attention_mask=attention_mask,
@@ -1180,8 +1226,8 @@ def encode_av_gemma_batch(
         mx.eval(av_output.video_encoding)
         mx.eval(av_output.audio_encoding)
 
-        print(f"  Video encoding shape: {av_output.video_encoding.shape}")
-        print(f"  Audio encoding shape: {av_output.audio_encoding.shape}")
+        print(f"  {label.capitalize()} video encoding shape: {av_output.video_encoding.shape}")
+        print(f"  {label.capitalize()} audio encoding shape: {av_output.audio_encoding.shape}")
 
         # Diagnostic: check encoding statistics for anomalies
         import numpy as _np
@@ -1189,25 +1235,19 @@ def encode_av_gemma_batch(
             arr = _np.array(enc[0].astype(mx.float32))
             real_part = arr[:real_token_count]
             reg_part = arr[real_token_count:]
-            print(f"    {name} real[:{real_token_count}]: mean={real_part.mean():.4f} std={real_part.std():.4f} "
+            print(f"    {label} {name} real[:{real_token_count}]: mean={real_part.mean():.4f} std={real_part.std():.4f} "
                   f"min={real_part.min():.4f} max={real_part.max():.4f} nan={_np.isnan(real_part).sum()}")
             if reg_part.shape[0] > 0:
-                print(f"    {name} regs[{real_token_count}:]: mean={reg_part.mean():.4f} std={reg_part.std():.4f} "
+                print(f"    {label} {name} regs[{real_token_count}:]: mean={reg_part.mean():.4f} std={reg_part.std():.4f} "
                       f"min={reg_part.min():.4f} max={reg_part.max():.4f} nan={_np.isnan(reg_part).sum()}")
 
         results.append((av_output.video_encoding, av_output.audio_encoding, av_output.attention_mask))
 
-        # Free hidden states between prompts
-        del all_hidden_states, last_hidden
-        # Update max_length to match first prompt for subsequent encodings
-        if i == 0:
-            max_length = av_output.video_encoding.shape[1]
+        del all_hidden_states
 
-    # Free Gemma and text encoder
-    print(f"  Clearing Gemma from memory...")
-    del gemma
+    print(f"  Clearing AV text encoder from memory...")
     del text_encoder
-    del tokenizer
+    del gemma_outputs
     gc.collect()
     mx.clear_cache()
 
@@ -2280,7 +2320,8 @@ def generate_video(
             return
 
         if use_av_encoder:
-            # Encode both prompt AND negative prompt in one Gemma load (saves ~15s + 24GB)
+            # Encode both prompt AND negative prompt in one Gemma load, then
+            # free Gemma before loading the AV connector to reduce peak memory.
             neg_prompt = negative_prompt if negative_prompt else ""
             results = encode_av_gemma_batch(
                 prompts=[prompt, neg_prompt],
