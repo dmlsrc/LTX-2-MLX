@@ -75,11 +75,14 @@ class OneStageCFGConfig:
 
     # Tiling for VAE decoding (enabled by default to prevent Metal watchdog crashes on long videos)
     tiling_config: Optional[TilingConfig] = None
+    auto_tiling: bool = True
 
     def _get_tiling_config(self) -> Optional[TilingConfig]:
         """Return tiling config, auto-enabling."""
         if self.tiling_config is not None:
             return self.tiling_config
+        if not self.auto_tiling:
+            return None
         return TilingConfig.auto(self.height, self.width, self.num_frames)
 
     # Compute settings

@@ -57,6 +57,15 @@ from LTX_2_MLX.model.video_vae.simple_decoder import (
     load_vae_decoder_weights,
     decode_latent,
 )
+from LTX_2_MLX.model.video_vae.native_decoder import (
+    NativeConv3dVideoDecoder,
+    load_native_vae_decoder_weights,
+)
+from LTX_2_MLX.model.video_vae.tiling import (
+    SpatialTilingConfig,
+    TemporalTilingConfig,
+    TilingConfig,
+)
 from LTX_2_MLX.core_utils import to_velocity
 
 
@@ -157,6 +166,80 @@ def parse_profile_transformer_blocks(value: str | None) -> tuple[int, ...]:
         blocks.append(block)
 
     return tuple(sorted(set(blocks)))
+
+
+def build_vae_tiling_config(
+    mode: str,
+    *,
+    force_tiled: bool = False,
+    temporal_tile_frames: int | None = None,
+    temporal_overlap_frames: int = 24,
+    spatial_tile_pixels: int | None = None,
+    spatial_overlap_pixels: int = 64,
+) -> tuple[TilingConfig | None, bool]:
+    """Resolve CLI VAE tiling knobs for pipelines that auto-tile on None."""
+    if mode == "off":
+        return None, False
+    if mode == "auto":
+        if force_tiled:
+            return TilingConfig.default(), False
+        return None, True
+    if mode != "custom":
+        raise ValueError(f"Unsupported VAE tiling mode: {mode}")
+
+    if temporal_tile_frames is None:
+        temporal_tile_frames = 256
+
+    temporal_config = None
+    if temporal_tile_frames > 0:
+        temporal_config = TemporalTilingConfig(
+            tile_size_in_frames=temporal_tile_frames,
+            tile_overlap_in_frames=temporal_overlap_frames,
+        )
+
+    spatial_config = None
+    if spatial_tile_pixels is not None and spatial_tile_pixels > 0:
+        spatial_config = SpatialTilingConfig(
+            tile_size_in_pixels=spatial_tile_pixels,
+            tile_overlap_in_pixels=spatial_overlap_pixels,
+        )
+
+    if temporal_config is None and spatial_config is None:
+        raise ValueError("Custom VAE tiling needs at least one temporal or spatial tile size.")
+
+    return TilingConfig(
+        spatial_config=spatial_config,
+        temporal_config=temporal_config,
+    ), False
+
+
+def describe_vae_tiling_config(
+    tiling_config: TilingConfig | None,
+    auto_tiling: bool,
+) -> str:
+    if tiling_config is None:
+        return "auto" if auto_tiling else "off"
+
+    parts = []
+    temporal = tiling_config.temporal_config
+    if temporal is not None:
+        parts.append(
+            "temporal="
+            f"{temporal.tile_size_in_frames}/{temporal.tile_overlap_in_frames} frames"
+        )
+    else:
+        parts.append("temporal=off")
+
+    spatial = tiling_config.spatial_config
+    if spatial is not None:
+        parts.append(
+            "spatial="
+            f"{spatial.tile_size_in_pixels}/{spatial.tile_overlap_in_pixels} px"
+        )
+    else:
+        parts.append("spatial=off")
+
+    return "explicit (" + ", ".join(parts) + ")"
 
 
 def parse_transformer_layer_selection(value: str | None) -> tuple[int, ...]:
@@ -1930,6 +2013,7 @@ def generate_video(
     gemma_path: str = "weights/gemma-3-12b",
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
+    vae_decoder_backend: str = "simple",
     vae_spatial_padding: str = "reflect",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
@@ -1961,6 +2045,11 @@ def generate_video(
     lora_path: str = None,
     lora_strength: float = 1.0,
     tiled_vae: bool = False,
+    vae_tiling_mode: str = "auto",
+    vae_temporal_tile_frames: int | None = None,
+    vae_temporal_overlap_frames: int = 24,
+    vae_spatial_tile_pixels: int | None = None,
+    vae_spatial_overlap_pixels: int = 64,
     pipeline_type: str = "text-to-video",
     early_layers_only: bool = False,
     enhance_prompt_flag: bool = False,
@@ -2032,6 +2121,14 @@ def generate_video(
         mlx_cache_limit_bytes = int(mlx_cache_limit_gb * (1000**3))
         mx.set_cache_limit(mlx_cache_limit_bytes)
         mx.clear_cache()
+    vae_tiling_config, vae_auto_tiling = build_vae_tiling_config(
+        vae_tiling_mode,
+        force_tiled=tiled_vae,
+        temporal_tile_frames=vae_temporal_tile_frames,
+        temporal_overlap_frames=vae_temporal_overlap_frames,
+        spatial_tile_pixels=vae_spatial_tile_pixels,
+        spatial_overlap_pixels=vae_spatial_overlap_pixels,
+    )
     timings = RunTimings()
     run_metadata = None
     if save_run_log:
@@ -2064,7 +2161,15 @@ def generate_video(
                 "skip_vae": skip_vae,
                 "dtype": dtype if isinstance(dtype, str) else str(dtype),
                 "compute_dtype": compute_dtype_name(compute_dtype),
+                "vae_decoder_backend": vae_decoder_backend,
                 "vae_spatial_padding": vae_spatial_padding,
+                "vae_tiling_mode": vae_tiling_mode,
+                "tiled_vae": tiled_vae,
+                "vae_auto_tiling": vae_auto_tiling,
+                "vae_temporal_tile_frames": vae_temporal_tile_frames,
+                "vae_temporal_overlap_frames": vae_temporal_overlap_frames,
+                "vae_spatial_tile_pixels": vae_spatial_tile_pixels,
+                "vae_spatial_overlap_pixels": vae_spatial_overlap_pixels,
                 "model_variant": model_variant,
                 "pipeline_type": pipeline_type,
                 "generate_audio": generate_audio,
@@ -2131,11 +2236,17 @@ def generate_video(
     print(f"Steps: {num_steps}, CFG: {cfg_scale}, Seed: {seed}")
     print(f"Model variant: {model_variant}")
     print(f"Compute dtype: {compute_dtype_name(compute_dtype)}")
+    if not skip_vae:
+        print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
     if skip_vae:
         print(f"VAE decoding: SKIPPED")
-    elif vae_spatial_padding == "zero":
-        print("VAE spatial padding: zero (experimental boundary-flicker mitigation)")
+    elif vae_decoder_backend == "native-conv3d":
+        print("VAE decoder: native Conv3d (experimental)")
     else:
+        print("VAE decoder: simple slice-conv baseline")
+    if not skip_vae and vae_spatial_padding == "zero":
+        print("VAE spatial padding: zero (experimental boundary-flicker mitigation)")
+    elif not skip_vae:
         print("VAE spatial padding: reflect")
     if upscale_spatial:
         print(f"Spatial upscaling: 2x (output will be {width*2}x{height*2})")
@@ -2551,15 +2662,29 @@ def generate_video(
         if decoder_blocks:
             print(f"  VAE config: {len(decoder_blocks)} blocks, base_ch={base_channels}, timestep={timestep_cond}")
 
-        vae_decoder = SimpleVideoDecoder(
-            decoder_blocks=decoder_blocks,
-            base_channels=base_channels,
-            timestep_conditioning=timestep_cond,
-            compute_dtype=compute_dtype,
-            spatial_padding_mode=vae_spatial_padding,
-        )
+        if vae_decoder_backend == "native-conv3d":
+            vae_decoder = NativeConv3dVideoDecoder(
+                decoder_blocks=decoder_blocks,
+                base_channels=base_channels,
+                timestep_conditioning=timestep_cond,
+                compute_dtype=compute_dtype,
+                spatial_padding_mode=vae_spatial_padding,
+            )
+        elif vae_decoder_backend == "simple":
+            vae_decoder = SimpleVideoDecoder(
+                decoder_blocks=decoder_blocks,
+                base_channels=base_channels,
+                timestep_conditioning=timestep_cond,
+                compute_dtype=compute_dtype,
+                spatial_padding_mode=vae_spatial_padding,
+            )
+        else:
+            raise ValueError(f"Unsupported VAE decoder backend: {vae_decoder_backend}")
         if weights_path and not use_placeholder:
-            load_vae_decoder_weights(vae_decoder, component_weights_path)
+            if vae_decoder_backend == "native-conv3d":
+                load_native_vae_decoder_weights(vae_decoder, component_weights_path)
+            else:
+                load_vae_decoder_weights(vae_decoder, component_weights_path)
         elif use_placeholder:
             print("  Skipping weights load (placeholder)")
     else:
@@ -2692,6 +2817,7 @@ def generate_video(
             guidance_rescale=guidance_rescale,
             dtype=compute_dtype,
             distilled_lora_config=distilled_lora_config,
+            tiling_config=vae_tiling_config,
             audio_enabled=generate_audio,
         )
 
@@ -2805,6 +2931,7 @@ def generate_video(
             seed=seed,
             fps=output_fps,
             stage_1_steps=num_steps,
+            tiling_config=vae_tiling_config,
             dtype=compute_dtype,
         )
 
@@ -2916,6 +3043,7 @@ def generate_video(
             fps=output_fps,
             num_inference_steps=num_steps,
             cfg_scale=cfg_scale,
+            tiling_config=vae_tiling_config,
             dtype=compute_dtype,
         )
 
@@ -3030,6 +3158,8 @@ def generate_video(
             audio_cfg_scale=audio_cfg_scale if audio_cfg_scale is not None else (1.0 if model_variant == "distilled" else 7.0),
             rescale_scale=rescale_scale if rescale_scale is not None else (0.0 if model_variant == "distilled" else 0.7),
             dtype=compute_dtype,
+            tiling_config=vae_tiling_config,
+            auto_tiling=vae_auto_tiling,
             profile_transformer_steps=active_profile_steps,
             profile_transformer_blocks=active_profile_blocks,
             audio_enabled=generate_audio,
@@ -3807,6 +3937,16 @@ def main():
         help="Compute dtype for model execution (default: bfloat16)"
     )
     parser.add_argument(
+        "--vae-decoder",
+        choices=["simple", "native-conv3d"],
+        default="simple",
+        help=(
+            "Video VAE decoder backend. simple is the current PyTorch-layout "
+            "slice-conv baseline; native-conv3d is an experimental MLX Conv3d "
+            "decoder for A/B testing."
+        ),
+    )
+    parser.add_argument(
         "--vae-spatial-padding",
         choices=["reflect", "zero"],
         default="reflect",
@@ -4101,7 +4241,40 @@ def main():
     parser.add_argument(
         "--tiled-vae",
         action="store_true",
-        help="Use tiled VAE decoding for lower memory usage"
+        help="Legacy alias: force default tiled VAE decoding for lower memory usage"
+    )
+    parser.add_argument(
+        "--vae-tiling",
+        choices=["auto", "off", "custom"],
+        default="auto",
+        help=(
+            "VAE decode tiling policy. auto preserves the pipeline default, off decodes "
+            "the full latent volume, and custom uses the tile sizes below."
+        ),
+    )
+    parser.add_argument(
+        "--vae-temporal-tile-frames",
+        type=parse_non_negative_int,
+        default=None,
+        help="Custom VAE temporal tile size in decoded frames; must be divisible by 8, or 0 to disable temporal tiling",
+    )
+    parser.add_argument(
+        "--vae-temporal-overlap-frames",
+        type=parse_non_negative_int,
+        default=24,
+        help="Custom VAE temporal overlap in decoded frames; must be divisible by 8",
+    )
+    parser.add_argument(
+        "--vae-spatial-tile-pixels",
+        type=parse_non_negative_int,
+        default=None,
+        help="Custom VAE spatial tile size in decoded pixels; must be divisible by 32, or 0 to disable spatial tiling",
+    )
+    parser.add_argument(
+        "--vae-spatial-overlap-pixels",
+        type=parse_non_negative_int,
+        default=64,
+        help="Custom VAE spatial overlap in decoded pixels; must be divisible by 32",
     )
     parser.add_argument(
         "--pipeline",
@@ -4193,6 +4366,7 @@ def main():
         gemma_path=args.gemma_path,
         use_gemma=not args.no_gemma,
         dtype=args.dtype,
+        vae_decoder_backend=args.vae_decoder,
         vae_spatial_padding=args.vae_spatial_padding,
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
@@ -4224,6 +4398,11 @@ def main():
         lora_path=args.lora,
         lora_strength=args.lora_strength,
         tiled_vae=args.tiled_vae,
+        vae_tiling_mode=args.vae_tiling,
+        vae_temporal_tile_frames=args.vae_temporal_tile_frames,
+        vae_temporal_overlap_frames=args.vae_temporal_overlap_frames,
+        vae_spatial_tile_pixels=args.vae_spatial_tile_pixels,
+        vae_spatial_overlap_pixels=args.vae_spatial_overlap_pixels,
         pipeline_type=args.pipeline,
         early_layers_only=args.early_layers_only,
         enhance_prompt_flag=args.enhance_prompt,

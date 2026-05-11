@@ -31,6 +31,10 @@ from .simple_decoder import (
     load_vae_decoder_weights,
     decode_latent,
 )
+from .native_decoder import (
+    NativeConv3dVideoDecoder,
+    load_native_vae_decoder_weights,
+)
 from .simple_encoder import (
     SimpleVideoEncoder,
     load_vae_encoder_weights,
@@ -78,6 +82,8 @@ __all__ = [
     "SimpleVideoDecoder",
     "load_vae_decoder_weights",
     "decode_latent",
+    "NativeConv3dVideoDecoder",
+    "load_native_vae_decoder_weights",
     # Simple encoder (for weight loading)
     "SimpleVideoEncoder",
     "load_vae_encoder_weights",

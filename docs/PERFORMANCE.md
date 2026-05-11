@@ -920,6 +920,52 @@ Track it separately from "same checkpoint, same pipeline, faster MLX runtime."
 VAE tiled decode, VAE spatial padding, and output encoding affect decode quality,
 memory, or save time. They are useful, but they are not denoise-speed fixes.
 
+Native Conv3d VAE decode is exposed for A/B testing with
+`--vae-decoder native-conv3d`. It keeps the existing final-latent and tiling
+machinery while swapping the per-tile decoder from the PyTorch-layout
+slice-conv implementation to MLX's native channel-last `Conv3d`. Use
+`scripts/compare_vae_decoders.py` on a saved latent to compare timing, MLX
+active/cache/peak memory, sampled luma stats, a contact-sheet diff, and a
+full-motion side-by-side MP4 before making it a default. The comparison script
+auto-muxes a sibling `.wav` sidecar when present; pass `--no-audio` to keep the
+video silent or `--audio /path/to/file` to choose a specific track.
+
+Initial bakery latent A/B at 512x288x481:
+
+- Auto temporal tiling: simple decode `38.1s`, peak `5.9GB`; native Conv3d
+  `61.3s`, peak `3.0GB`.
+- No tiling: simple decode `23.5-26.2s`, peak `32.1GB`; native Conv3d
+  `29.4-36.4s`, peak `10.4GB`.
+- Full-video uint8 diff between simple and native was tiny (`p95=2`,
+  `p99=3`, max `37` in the no-tiling MP4 comparison). Subjectively this looks
+  close enough to keep native Conv3d as an opt-in lower-memory decoder, not as
+  the default.
+
+Custom VAE tiling controls are available for middle-ground tests:
+
+```bash
+--vae-decoder native-conv3d \
+--vae-tiling custom \
+--vae-temporal-tile-frames 256 \
+--vae-temporal-overlap-frames 24
+```
+
+For decode-only A/B, the same knobs exist on
+`scripts/compare_vae_decoders.py`. Pass `--decoder native-conv3d` to run only
+the native decoder when testing tile sizes where the simple decoder might exceed
+memory. `--vae-tiling off` is the fastest path when the peak memory fits; custom
+temporal tiles should be tested when native Conv3d needs more throughput than
+auto's conservative 64-frame temporal tiles but less peak memory than
+full-volume decode.
+
+A temporary native Conv3d eval-cadence switch was tested and removed. On the
+512x288x481 no-tiling native decode, evaluating only at the end measured
+`29.07s` and `10.44GB` peak versus the normal per-block materialization at
+`29.77s` and `10.44GB`. The tiny speed delta was not worth an extra CLI branch:
+even when reported peak memory is unchanged, fewer materialization boundaries can
+increase graph size, reduce watchdog safety margin, and behave worse at larger
+resolutions or under system pressure.
+
 ## Benchmark Matrix
 
 Use a fixed command and change only one thing at a time.
@@ -945,6 +991,7 @@ Use a fixed command and change only one thing at a time.
 | `--mlx-cache-limit-gb 1` | no | low | no cost observed | Same-math allocator-cache cap. On the bakery AV smoke with `project_out:pretranspose`, average process RAM dropped from about 44GB to about 40GB with no observed time penalty. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
 | `--transformer-block-resident-blocks` | yes | low | slower | Cache-backed block streaming cuts process RAM dramatically, e.g. r4 around 8GB average on the bakery smoke, but denoise slowed to about 70.5s/it. Use as a constrained-memory mode, not a fast path. |
 | `--transformer-block-compile` | yes | low to medium | mixed | Original per-resident-block `mx.compile(inputs=block)` improved r4 streaming denoise from `9m24s` to `9m01s`, about 67.6s/it, but later-step drift remained. Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. |
+| `--vae-decoder native-conv3d` | yes | medium | none for denoise | Decode-only A/B path. Compare against `simple` on the same saved final latent; do not count this as a transformer speed win. Pair with `--mlx-cache-limit-gb` if allocator cache growth matters. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |
 | `mx.gather_mm` / `mx.gather_qmm` | no | high | unknown | Relevant to MoE/routing or selected batched matrices, not current dense LTX. |
