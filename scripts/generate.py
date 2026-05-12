@@ -83,6 +83,95 @@ FF_LAYOUT_SPECS = {
 ATTN_LAYOUT_SPECS = {
     "to_out": ("pretranspose",),
 }
+DEFAULT_VIDEO_FF_LAYOUT_SPECS = (
+    ("project_in", "pretranspose"),
+    ("project_out", "pretranspose"),
+)
+DEFAULT_VIDEO_ATTN_LAYOUT_SPECS = (("to_out", "pretranspose"),)
+DEFAULT_TRANSFORMER_LAYOUT_LAYERS = tuple(range(48))
+DEFAULT_LTX_REPO_ID = "Lightricks/LTX-2.3"
+DEFAULT_LTX_WEIGHT_FILES = {
+    "distilled": "ltx-2.3-22b-distilled-1.1.safetensors",
+    "dev": "ltx-2.3-22b-dev.safetensors",
+}
+DEFAULT_GEMMA_REPO_ID = "google/gemma-3-12b-it"
+FALLBACK_GEMMA_PATH = "weights/gemma-3-12b"
+
+
+def _hf_hub_cache_candidates() -> list[Path]:
+    """Return Hugging Face hub cache dirs in the order users expect."""
+    candidates: list[Path] = []
+
+    def add(path: str | Path | None):
+        if not path:
+            return
+        expanded = Path(path).expanduser()
+        if expanded not in candidates:
+            candidates.append(expanded)
+
+    add(os.environ.get("HF_HUB_CACHE"))
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        add(Path(hf_home) / "hub")
+    add("/Users/Shared/huggingface/hub")
+    add(Path.home() / ".cache" / "huggingface" / "hub")
+    return candidates
+
+
+def _hf_repo_cache_dir(hub_cache: Path, repo_id: str) -> Path:
+    return hub_cache / f"models--{repo_id.replace('/', '--')}"
+
+
+def _cached_hf_snapshots(repo_id: str) -> list[Path]:
+    snapshots: list[Path] = []
+    for hub_cache in _hf_hub_cache_candidates():
+        snapshot_root = _hf_repo_cache_dir(hub_cache, repo_id) / "snapshots"
+        if not snapshot_root.is_dir():
+            continue
+        snapshots.extend(path for path in snapshot_root.iterdir() if path.is_dir())
+    return sorted(
+        snapshots,
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _find_cached_hf_file(repo_id: str, filename: str) -> str | None:
+    for snapshot in _cached_hf_snapshots(repo_id):
+        candidate = snapshot / filename
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _find_cached_hf_snapshot(repo_id: str, required_file: str = "config.json") -> str | None:
+    for snapshot in _cached_hf_snapshots(repo_id):
+        if (snapshot / required_file).exists():
+            return str(snapshot)
+    return None
+
+
+def resolve_default_ltx_weights(weights_path: str | None, model_variant: str) -> str:
+    """Resolve an explicit or HF-cache default LTX checkpoint path."""
+    if weights_path:
+        return str(Path(weights_path).expanduser())
+
+    filename = DEFAULT_LTX_WEIGHT_FILES.get(model_variant, DEFAULT_LTX_WEIGHT_FILES["distilled"])
+    cached = _find_cached_hf_file(DEFAULT_LTX_REPO_ID, filename)
+    if cached:
+        return cached
+    return str(Path("weights") / "ltx-2" / filename)
+
+
+def resolve_default_gemma_path(gemma_path: str | None) -> str:
+    """Resolve an explicit or HF-cache default Gemma directory."""
+    if gemma_path:
+        return str(Path(gemma_path).expanduser())
+
+    cached = _find_cached_hf_snapshot(DEFAULT_GEMMA_REPO_ID, required_file="config.json")
+    if cached:
+        return cached
+    return FALLBACK_GEMMA_PATH
 
 
 def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
@@ -307,6 +396,22 @@ def parse_transformer_layer_selection(value: str | None) -> tuple[int, ...]:
     return tuple(sorted(set(layers)))
 
 
+def normalize_layout_layers(
+    specs: tuple[tuple[str, str], ...],
+    layers: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Canonicalize implicit all-layer layouts so cache keys stay stable."""
+    if specs and not layers:
+        return DEFAULT_TRANSFORMER_LAYOUT_LAYERS
+    return tuple(layers)
+
+
+def describe_transformer_layers(layers: tuple[int, ...]) -> str:
+    if not layers or tuple(layers) == DEFAULT_TRANSFORMER_LAYOUT_LAYERS:
+        return "all"
+    return ",".join(str(layer) for layer in layers)
+
+
 def parse_video_ff_quantize_specs(value: str | None) -> tuple[tuple[str, str], ...]:
     """Parse comma-separated target:mode video FF quantization specs."""
     if value is None or value.strip() == "":
@@ -349,6 +454,8 @@ def parse_video_ff_layout_specs(value: str | None) -> tuple[tuple[str, str], ...
     """Parse comma-separated target:layout video FF layout specs."""
     if value is None or value.strip() == "":
         return ()
+    if value.strip().lower() in ("off", "none"):
+        return ()
 
     specs = []
     seen_targets = set()
@@ -389,6 +496,8 @@ def parse_video_ff_layout_specs(value: str | None) -> tuple[tuple[str, str], ...
 def parse_video_attn_layout_specs(value: str | None) -> tuple[tuple[str, str], ...]:
     """Parse comma-separated target:layout video attention layout specs."""
     if value is None or value.strip() == "":
+        return ()
+    if value.strip().lower() in ("off", "none"):
         return ()
 
     specs = []
@@ -435,6 +544,40 @@ def compute_dtype_name(dtype: mx.Dtype) -> str:
     if dtype == mx.float32:
         return "FP32"
     return str(dtype)
+
+
+def default_output_dir() -> str:
+    """Resolve the default output directory without touching the filesystem."""
+    return (
+        os.environ.get("DIFFUSERS_OUTPUT_DIR")
+        or os.environ.get("OUTPUT_DIR")
+        or "outputs"
+    )
+
+
+def sanitize_output_prefix(prefix: str | None) -> str:
+    """Keep generated filenames shell-friendly while preserving readable prefixes."""
+    prefix = (prefix or "ltx").strip()
+    if not prefix:
+        prefix = "ltx"
+    sanitized = []
+    for char in prefix:
+        if char.isalnum() or char in ("-", "_", "."):
+            sanitized.append(char)
+        else:
+            sanitized.append("_")
+    return "".join(sanitized).strip("._") or "ltx"
+
+
+def build_default_output_path(
+    output_dir: str | None = None,
+    output_prefix: str | None = None,
+) -> str:
+    """Build a timestamped MP4 path for runs where --output is omitted."""
+    directory = Path(output_dir or default_output_dir()).expanduser()
+    prefix = sanitize_output_prefix(output_prefix)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(directory / f"{prefix}_{timestamp}.mp4")
 
 
 def latent_sidecar_path(output_path: str) -> str:
@@ -1642,7 +1785,7 @@ def load_transformer(
         weights_path: Path to safetensors weights file.
         num_layers: Number of transformer layers.
         compute_dtype: Dtype for computation.
-        low_memory: If True, use aggressive memory optimization.
+        low_memory: If True, use more frequent eval checkpoints for lower peak memory.
         fast_mode: If True, skip intermediate evaluations.
         profile_transformer_once: If True, print one forced-eval transformer timing trace.
     """
@@ -1729,25 +1872,17 @@ def load_transformer(
             layout_specs=video_ff_layout_specs,
             layers=video_ff_layout_layers,
         )
-        layer_str = (
-            ",".join(str(layer) for layer in video_ff_layout_layers)
-            if video_ff_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_ff_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
         print(
-            "  Experimental video FF layout: "
+            "  Video FF layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
         )
     elif video_ff_layout_specs:
-        layer_str = (
-            ",".join(str(layer) for layer in video_ff_layout_layers)
-            if video_ff_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_ff_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
         print(
-            "  Experimental video FF layout: "
+            "  Video FF layout: "
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
     if video_attn_layout_specs and not layouts_loaded_from_cache:
@@ -1755,25 +1890,17 @@ def load_transformer(
             layout_specs=video_attn_layout_specs,
             layers=video_attn_layout_layers,
         )
-        layer_str = (
-            ",".join(str(layer) for layer in video_attn_layout_layers)
-            if video_attn_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_attn_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
         print(
-            "  Experimental video attention layout: "
+            "  Video attention layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
         )
     elif video_attn_layout_specs:
-        layer_str = (
-            ",".join(str(layer) for layer in video_attn_layout_layers)
-            if video_attn_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_attn_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
         print(
-            "  Experimental video attention layout: "
+            "  Video attention layout: "
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
     return model
@@ -1900,25 +2027,17 @@ def load_av_transformer(
             layout_specs=video_ff_layout_specs,
             layers=video_ff_layout_layers,
         )
-        layer_str = (
-            ",".join(str(layer) for layer in video_ff_layout_layers)
-            if video_ff_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_ff_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
         print(
-            "  Experimental video FF layout: "
+            "  Video FF layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
         )
     elif video_ff_layout_specs:
-        layer_str = (
-            ",".join(str(layer) for layer in video_ff_layout_layers)
-            if video_ff_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_ff_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
         print(
-            "  Experimental video FF layout: "
+            "  Video FF layout: "
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
     if video_attn_layout_specs and not layouts_loaded_from_cache:
@@ -1926,25 +2045,17 @@ def load_av_transformer(
             layout_specs=video_attn_layout_specs,
             layers=video_attn_layout_layers,
         )
-        layer_str = (
-            ",".join(str(layer) for layer in video_attn_layout_layers)
-            if video_attn_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_attn_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
         print(
-            "  Experimental video attention layout: "
+            "  Video attention layout: "
             f"{count} projections, specs={spec_str}, layers={layer_str}"
         )
     elif video_attn_layout_specs:
-        layer_str = (
-            ",".join(str(layer) for layer in video_attn_layout_layers)
-            if video_attn_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_attn_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
         print(
-            "  Experimental video attention layout: "
+            "  Video attention layout: "
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
     return model
@@ -2026,11 +2137,11 @@ def resolve_num_frames(
 
 def generate_video(
     prompt: str,
-    height: int = 480,
-    width: int = 704,
+    height: int = 288,
+    width: int = 512,
     num_frames: int = 97,  # ~32s at 24fps (97 latent frames → 769 pixel frames via 8x VAE temporal compression)
-    num_steps: int = 7,  # Distilled model uses 7 steps
-    cfg_scale: float = 5.0,  # Updated default for better semantic quality
+    num_steps: int | None = None,
+    cfg_scale: float | None = None,
     guidance_rescale: float = 0.7,  # Rescale CFG output to prevent variance explosion
     # Two-stage pipeline parameters
     steps_stage1: int = 15,
@@ -2038,11 +2149,13 @@ def generate_video(
     cfg_stage1: float | None = None,  # Defaults to cfg_scale if not specified
     seed: int = 42,
     weights_path: str | None = None,
-    output_path: str = "gens/output.mp4",
+    output_path: str | None = None,
+    output_dir: str | None = None,
+    output_prefix: str = "ltx",
     use_placeholder: bool = False,
     skip_vae: bool = False,
     embedding_path: str | None = None,
-    gemma_path: str = "weights/gemma-3-12b",
+    gemma_path: str | None = None,
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
     vae_decoder_backend: str = "native-conv3d",
@@ -2062,13 +2175,14 @@ def generate_video(
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
     video_ff_quantize_layers: tuple[int, ...] = (),
-    video_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...] = DEFAULT_VIDEO_FF_LAYOUT_SPECS,
     video_ff_layout_layers: tuple[int, ...] = (),
-    video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    video_attn_layout_specs: tuple[tuple[str, str], ...] = DEFAULT_VIDEO_ATTN_LAYOUT_SPECS,
     video_attn_layout_layers: tuple[int, ...] = (),
-    weights_cache_mode: str = "off",
+    weights_cache_mode: str = "auto",
     weights_cache_dir: str | None = None,
-    mlx_cache_limit_gb: float | None = None,
+    mlx_cache_limit_gb: float | None = 1.0,
+    stream_transformer: bool = False,
     transformer_block_resident_blocks: int = 0,
     transformer_block_compile: bool = False,
     transformer_block_compile_group_size: int = 0,
@@ -2117,10 +2231,37 @@ def generate_video(
 ):
     """Generate video from text prompt."""
 
+    if output_path is None:
+        output_path = build_default_output_path(output_dir, output_prefix)
+
     # Ensure output directory exists
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
+
+    if num_steps is None:
+        num_steps = 30 if model_variant == "dev" else 8
+    if cfg_scale is None:
+        cfg_scale = 5.0 if model_variant == "dev" else 1.0
+
+    weights_path = resolve_default_ltx_weights(weights_path, model_variant)
+    gemma_path = resolve_default_gemma_path(gemma_path)
+
+    if stream_transformer:
+        if transformer_block_resident_blocks == 0:
+            transformer_block_resident_blocks = 16
+        transformer_block_compile = True
+        if transformer_block_compile_group_size == 0:
+            transformer_block_compile_group_size = min(4, transformer_block_resident_blocks)
+
+    video_ff_layout_layers = normalize_layout_layers(
+        video_ff_layout_specs,
+        video_ff_layout_layers,
+    )
+    video_attn_layout_layers = normalize_layout_layers(
+        video_attn_layout_specs,
+        video_attn_layout_layers,
+    )
 
     compute_dtype = parse_compute_dtype(dtype)
     requested_profile_steps = set(profile_transformer_steps or ())
@@ -2199,6 +2340,8 @@ def generate_video(
                 "cfg_scale": cfg_scale,
                 "guidance_rescale": guidance_rescale,
                 "seed": seed,
+                "output_dir": os.path.dirname(output_path),
+                "output_prefix": output_prefix,
                 "weights_path": weights_path,
                 "gemma_path": gemma_path,
                 "embedding_path": embedding_path,
@@ -2246,6 +2389,7 @@ def generate_video(
                 "weights_cache_mode": weights_cache_mode,
                 "weights_cache_dir": weights_cache_dir,
                 "mlx_cache_limit_gb": mlx_cache_limit_gb,
+                "stream_transformer": stream_transformer,
                 "transformer_block_resident_blocks": transformer_block_resident_blocks,
                 "transformer_block_compile": transformer_block_compile,
                 "transformer_block_compile_group_size": transformer_block_compile_group_size,
@@ -2282,6 +2426,7 @@ def generate_video(
     print(f"Resolution: {width}x{height}, {num_frames} frames")
     print(f"Steps: {num_steps}, CFG: {cfg_scale}, Seed: {seed}")
     print(f"Model variant: {model_variant}")
+    print(f"Weights: {weights_path}")
     print(f"Compute dtype: {compute_dtype_name(compute_dtype)}")
     if not skip_vae:
         print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
@@ -2338,25 +2483,17 @@ def generate_video(
             f"layers={layer_str})"
         )
     if video_ff_layout_specs:
-        layer_str = (
-            ",".join(str(layer) for layer in video_ff_layout_layers)
-            if video_ff_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_ff_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
         print(
-            "Experimental video FF layout: ENABLED "
+            "Video FF layout: ENABLED "
             f"(specs={spec_str}, layers={layer_str})"
         )
     if video_attn_layout_specs:
-        layer_str = (
-            ",".join(str(layer) for layer in video_attn_layout_layers)
-            if video_attn_layout_layers
-            else "all"
-        )
+        layer_str = describe_transformer_layers(video_attn_layout_layers)
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
         print(
-            "Experimental video attention layout: ENABLED "
+            "Video attention layout: ENABLED "
             f"(specs={spec_str}, layers={layer_str})"
         )
     if weights_cache_mode != "off":
@@ -2364,6 +2501,12 @@ def generate_video(
         print(
             "Weights cache: ENABLED "
             f"(mode={weights_cache_mode}, dir={cache_dir_str})"
+        )
+    if stream_transformer:
+        group_desc = transformer_block_compile_group_size or transformer_block_resident_blocks
+        print(
+            "Transformer streaming preset: ENABLED "
+            f"(r{transformer_block_resident_blocks}, compile, group {group_desc})"
         )
     if transformer_block_resident_blocks:
         print(
@@ -3893,12 +4036,22 @@ def save_video_with_audio(
 def main():
     parser = argparse.ArgumentParser(description="Generate video with LTX-2 MLX")
     parser.add_argument("prompt", type=str, help="Text prompt for generation")
-    parser.add_argument("--height", type=int, default=480, help="Video height")
-    parser.add_argument("--width", type=int, default=704, help="Video width")
+    parser.add_argument("--height", type=int, default=288, help="Video height")
+    parser.add_argument("--width", type=int, default=512, help="Video width")
     parser.add_argument("--frames", type=int, default=97, help="Number of frames")
     parser.add_argument("--duration", type=float, default=None, help="Duration in seconds. Overrides --frames and rounds up to the next valid 8*k+1 frame count.")
-    parser.add_argument("--steps", type=int, default=8, help="Denoising steps (8 for distilled, 15+ for two-stage)")
-    parser.add_argument("--cfg", type=float, default=5.0, help="CFG scale (default 5.0 for better semantic quality)")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="Denoising steps. Default is 8 for distilled and 30 for dev.",
+    )
+    parser.add_argument(
+        "--cfg",
+        type=float,
+        default=None,
+        help="CFG scale. Default is 1.0 for distilled and 5.0 for dev.",
+    )
     parser.add_argument("--guidance-rescale", type=float, default=0.7, help="Guidance rescale factor (0.0=off, 0.7=default, 1.0=full)")
     parser.add_argument("--steps-stage1", type=int, default=15, help="Stage 1 steps for two-stage pipeline")
     parser.add_argument("--steps-stage2", type=int, default=3, help="Stage 2 refinement steps for two-stage pipeline")
@@ -3906,19 +4059,42 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--fps", type=float, default=NATIVE_FPS, help=f"Generation and output frame rate (default: {NATIVE_FPS}).")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier (0.5=slow-mo, 1.0=normal, 2.0=fast)")
-    parser.add_argument("--output", type=str, default="outputs/output.mp4", help="Output path")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Exact output path. When omitted, uses --output-dir/--output-prefix with a timestamp.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory for timestamped default outputs. Default resolves "
+            "DIFFUSERS_OUTPUT_DIR, then OUTPUT_DIR, then outputs/."
+        ),
+    )
+    parser.add_argument(
+        "--output-prefix",
+        type=str,
+        default="ltx",
+        help="Filename prefix for timestamped default outputs.",
+    )
     parser.add_argument(
         "--weights",
         type=str,
-        default="weights/ltx-2/ltx-2-19b-distilled.safetensors",
-        help="Path to weights"
+        default=None,
+        help=(
+            "Path to LTX weights. Default resolves the Lightricks/LTX-2.3 "
+            "distilled/dev checkpoint from HF_HOME or HF_HUB_CACHE."
+        ),
     )
     parser.add_argument(
         "--weights-cache",
         choices=["off", "auto", "rebuild"],
-        default="off",
+        default="auto",
         help=(
-            "Optional disposable converted-weight cache. 'auto' builds on first "
+            "Disposable converted-weight cache. 'auto' builds on first "
             "use and reuses matching transformer/component artifacts; 'rebuild' "
             "forces fresh cache files; 'off' loads stock weights directly."
         ),
@@ -3937,11 +4113,20 @@ def main():
     parser.add_argument(
         "--mlx-cache-limit-gb",
         type=parse_non_negative_float,
-        default=None,
+        default=1.0,
         help=(
-            "Limit MLX's in-memory allocator cache in decimal GB. Use 0 to return "
+            "Limit MLX's in-memory allocator cache in decimal GB. Default 1. "
+            "Use 0 to return "
             "freed buffers immediately. This is separate from --weights-cache and "
             "can reduce system memory pressure."
+        ),
+    )
+    parser.add_argument(
+        "--stream-transformer",
+        action="store_true",
+        help=(
+            "Enable the recommended cache-backed transformer streaming preset "
+            "(16 resident blocks, mx.compile, 4-block compile groups)."
         ),
     )
     parser.add_argument(
@@ -3993,8 +4178,11 @@ def main():
     parser.add_argument(
         "--gemma-path",
         type=str,
-        default="weights/gemma-3-12b",
-        help="Path to Gemma 3 weights directory"
+        default=None,
+        help=(
+            "Path to Gemma 3 weights directory. Default resolves "
+            "google/gemma-3-12b-it from HF_HOME or HF_HUB_CACHE."
+        ),
     )
     parser.add_argument(
         "--no-gemma",
@@ -4032,7 +4220,7 @@ def main():
         type=str,
         choices=["distilled", "dev"],
         default="distilled",
-        help="Model variant: 'distilled' (fast, 3-7 steps) or 'dev' (quality, 25-50 steps)"
+        help="Model variant: 'distilled' (fast, default 8 steps) or 'dev' (quality, default 30 steps)"
     )
     parser.add_argument(
         "--distilled-lora",
@@ -4076,7 +4264,11 @@ def main():
     parser.add_argument(
         "--low-memory",
         action="store_true",
-        help="Enable aggressive memory optimization (slower but uses ~30%% less VRAM)"
+        help=(
+            "Legacy emergency memory mode. Adds more frequent eval checkpoints "
+            "and sequential CFG materialization; usually slower and mostly "
+            "redundant with --stream-transformer for distilled runs."
+        ),
     )
     parser.add_argument(
         "--fast-mode",
@@ -4141,11 +4333,12 @@ def main():
     parser.add_argument(
         "--video-ff-layout",
         type=parse_video_ff_layout_specs,
-        default=(),
+        default=DEFAULT_VIDEO_FF_LAYOUT_SPECS,
         metavar="TARGET:LAYOUT[,TARGET:LAYOUT]",
-        help="Experimental same-math video FF layout transform, e.g. "
-             "'project_out:pretranspose' or "
-             "'project_in:pretranspose,project_out:pretranspose'."
+        help=(
+            "Same-math video FF layout transform. Default is "
+            "project_in:pretranspose,project_out:pretranspose. Use 'off' to disable."
+        ),
     )
     parser.add_argument(
         "--video-ff-layout-layers",
@@ -4158,10 +4351,12 @@ def main():
     parser.add_argument(
         "--video-attn-layout",
         type=parse_video_attn_layout_specs,
-        default=(),
+        default=DEFAULT_VIDEO_ATTN_LAYOUT_SPECS,
         metavar="TARGET:LAYOUT[,TARGET:LAYOUT]",
-        help="Experimental same-math video-output attention layout transform, "
-             "e.g. 'to_out:pretranspose'."
+        help=(
+            "Same-math video-output attention layout transform. Default is "
+            "to_out:pretranspose. Use 'off' to disable."
+        ),
     )
     parser.add_argument(
         "--video-attn-layout-layers",
@@ -4397,15 +4592,6 @@ def main():
         args.save_text_embeddings = True
         args.save_run_log = True
 
-    # Auto-select weights based on model variant
-    if args.model_variant == "dev":
-        # Switch to dev weights
-        args.weights = args.weights.replace("distilled", "dev")
-        # Adjust default steps for dev model if not specified
-        if args.steps == 7:  # default distilled value
-            args.steps = 30
-            print(f"Using dev model default: {args.steps} steps")
-
     resolved_num_frames = resolve_num_frames(
         num_frames=args.frames,
         duration_seconds=args.duration,
@@ -4431,6 +4617,8 @@ def main():
         seed=args.seed,
         weights_path=args.weights,
         output_path=args.output,
+        output_dir=args.output_dir,
+        output_prefix=args.output_prefix,
         use_placeholder=args.placeholder,
         skip_vae=args.skip_vae,
         embedding_path=args.embedding,
@@ -4461,6 +4649,7 @@ def main():
         weights_cache_mode=args.weights_cache,
         weights_cache_dir=args.weights_cache_dir,
         mlx_cache_limit_gb=args.mlx_cache_limit_gb,
+        stream_transformer=args.stream_transformer,
         transformer_block_resident_blocks=args.transformer_block_resident_blocks,
         transformer_block_compile=args.transformer_block_compile,
         transformer_block_compile_group_size=args.transformer_block_compile_group_size,

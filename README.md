@@ -52,7 +52,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Download weights
 uv run scripts/download_weights.py
 
-# 3. Generate video (auto-detects model version)
+# 3. Generate video (auto-resolves cached LTX/Gemma weights from HF_HOME)
 uv run python scripts/generate.py "A golden retriever running through a meadow"
 
 # Or specify the 2.3 checkpoint explicitly
@@ -114,17 +114,21 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **Use default BF16 compute** - override with `--dtype float16` or `--dtype float32` only for experiments
 - **Audio follows compute dtype where safe** - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island matching Lightricks' precision caution
 - **VAE decode defaults to native Conv3d + zero padding** - `--vae-tiling auto` now picks a RAM-aware native tile plan, so override `--vae-decoder`, `--vae-tiling`, or `--vae-spatial-padding` only for A/B tests
+- **Default canvas is 512x288** - pass `--height`/`--width` only when you want to leave the fast 16:9 preview size
+- **Default outputs are timestamped** - without `--output`, runs save to `DIFFUSERS_OUTPUT_DIR`, then `OUTPUT_DIR`, then `outputs/` as `ltx_YYYYmmdd_HHMMSS.mp4`; use `--output-prefix` to name a run family
+- **Converted-weight cache defaults to auto** - the first run builds reusable transformer/component cache files; pass `--weights-cache off` only when you specifically want direct stock-weight loading
+- **MLX allocator cache defaults to 1GB** - this keeps unified-memory pressure lower without needing a routine `--mlx-cache-limit-gb 1`
+- **Same-math video layouts default on** - FF `project_in`/`project_out` and attention `to_out` pretranspose are enabled by default; pass `--video-ff-layout off --video-attn-layout off` for baseline A/Bs
+- **Use `--stream-transformer` for the block-streaming preset** - it expands to 16 resident blocks, resident-group compile, and 4-block compile groups
 - **Save final latents for decode-only tests** - add `--save-latents` to write an NPZ sidecar next to the requested output
 - **Save text conditioning for denoise A/Bs** - add `--save-text-embeddings` to write the positive/negative AV text encoder outputs as an `_text.npz` sidecar that can be reused with `--embedding`
 - **Save run metadata for reproducibility** - add `--save-run-log` to write params, argv, outputs, and timings as an `_run.json` sidecar, starting before the long generation step
 - **Save all reproducibility sidecars** - add `--save-all-sidecars` to turn on final latents, text conditioning, and run metadata together
-- **Cap MLX allocator cache when memory pressure matters** - add `--mlx-cache-limit-gb 1`; unlike `--weights-cache`, this is an in-memory MLX cache limit and has tested as a RAM-pressure win without speed cost on the bakery AV smoke
 - **Use `--pipeline distilled`** - Fastest inference (8 steps)
-- **Use `--low-memory`** - For systems with <32GB RAM
+- **Use `--stream-transformer` before `--low-memory`** - the streaming preset is the cleaner constrained-memory path for modern distilled runs; `--low-memory` remains an emergency fallback
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing
 - **Research denoise speed carefully** - `--video-ff-quantize project_out:mxfp8` can A/B weight-only quantized video FF projections, and `--video-ff-quantize-layers 40-47` narrows it to selected layers; this is non-canonical and needs quality checks
-- **Research same-math FF layouts** - `--video-ff-layout project_out:pretranspose` can A/B replacement contiguous pre-transposed video FF weights without quantizing weights; add `project_in:pretranspose` for the next FF layout test
-- **Research same-math attention layouts** - `--video-attn-layout to_out:pretranspose` can A/B replacement contiguous pre-transposed video-output attention projections
+- **A/B same-math layout baselines** - use `--video-ff-layout off --video-attn-layout off` when you want to compare against untransposed stock weight layout
 - **Track denoise-speed experiments** - see [Performance Optimization Notes](docs/PERFORMANCE.md) for MLX runtime optimization ideas and benchmark rules
 
 See [Usage Guide](docs/USAGE.md) for memory requirements and benchmarks.

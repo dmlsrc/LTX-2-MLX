@@ -55,6 +55,11 @@ uv run scripts/download_weights.py --weights distilled gemma
 uv run scripts/download_weights.py --weights all
 ```
 
+At runtime, `scripts/generate.py` resolves cached LTX-2.3 and Gemma weights from
+`HF_HUB_CACHE`, `$HF_HOME/hub`, `/Users/Shared/huggingface/hub`, then the normal
+user cache. Use `--weights` or `--gemma-path` only when you want to override that
+cache lookup.
+
 Available weights from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-2):
 
 | Weight | Size | Description |
@@ -74,7 +79,8 @@ Height and width must be divisible by 32:
 | Resolution | Aspect Ratio | Use Case |
 |------------|--------------|----------|
 | 256×384 | 2:3 | Fast testing |
-| 480×704 | ~2:3 | Balanced quality/speed |
+| 288×512 | 16:9 | Default fast preview |
+| 480×704 | ~2:3 | Taller balanced quality/speed |
 | 512×768 | 2:3 | High quality |
 | 768×1024 | 3:4 | Maximum quality |
 
@@ -104,12 +110,16 @@ More steps = higher quality but slower:
 
 | Model | Recommended Steps |
 |-------|-------------------|
-| Distilled | 5-8 |
-| Dev | 25-50 |
+| Distilled | 8 by default |
+| Dev | 30 by default, 25-50 for experiments |
 
 ```bash
 python scripts/generate.py "Your prompt" --steps 8
 ```
+
+CFG is also model-aware by default: distilled runs at CFG `1.0`, while dev runs
+at CFG `5.0`. Override `--cfg` only when you are intentionally A/B testing
+guidance.
 
 ### Seed
 
@@ -144,7 +154,6 @@ Full CFG control for maximum quality:
 ```bash
 python scripts/generate.py "A majestic eagle soaring over mountains" \
     --pipeline one-stage \
-    --height 480 --width 704 \
     --frames 65 --steps 20 \
     --cfg 5.0
 ```
@@ -207,9 +216,25 @@ Saved-latent A/B tests on motion-heavy bakery and talking-subject clips showed
 `zero` substantially reduced edge ghosting, background flicker, and boundary
 smearing versus `reflect`, with no meaningful decode-time cost.
 
+### Transformer Streaming
+
+For the common low-RAM transformer path, use the preset instead of spelling out
+the resident-block knobs:
+
+```bash
+python scripts/generate.py "Your prompt" --stream-transformer
+```
+
+This enables 16 resident transformer blocks, resident-group compile, and
+4-block compile groups. It pairs with the default converted-weight cache and the
+default 1GB MLX allocator cache cap.
+
 ### Low Memory Mode
 
-Aggressive optimization for systems with <32GB RAM:
+`--low-memory` is still available as an emergency knob. It adds more frequent
+eval checkpoints and sequential CFG materialization in older guided paths, but
+it is usually slower and mostly redundant for distilled single-pass runs using
+`--stream-transformer`:
 
 ```bash
 python scripts/generate.py "Your prompt" --low-memory
@@ -262,13 +287,22 @@ python scripts/generate.py "Epic wide shot of a medieval castle at dawn"
 Videos are saved as MP4 files with H.264 encoding at 24fps:
 
 ```bash
-# Default output location
+# Default timestamped output location
 python scripts/generate.py "Your prompt"
-# → saves to outputs/output.mp4
+# → saves to outputs/ltx_YYYYmmdd_HHMMSS.mp4
 
-# Custom output path
+# Custom output directory and filename prefix
+python scripts/generate.py "Your prompt" \
+    --output-dir /Users/Shared/huggingface/output \
+    --output-prefix ltx_bakery_r16
+
+# Exact output path override
 python scripts/generate.py "Your prompt" --output my_video.mp4
 ```
+
+When `--output` is omitted, the output directory resolves in this order:
+`--output-dir`, `DIFFUSERS_OUTPUT_DIR`, `OUTPUT_DIR`, then `outputs/`.
+Sidecars use the same timestamped stem as the MP4.
 
 ### Latent Sidecars
 
@@ -345,7 +379,8 @@ run log together. It is equivalent to passing:
 - Use the default BF16 compute dtype, or try `--dtype float16` for experiments
 - Reduce resolution: `--height 256 --width 384`
 - Reduce frames: `--frames 17`
-- Use `--low-memory` flag
+- Use `--stream-transformer` for the r16/g4 compiled streaming preset
+- Try `--low-memory` only as an emergency fallback if streaming is still too high
 
 ### Slow Generation
 
@@ -353,10 +388,9 @@ run log together. It is equivalent to passing:
 - Reduce steps: `--steps 5`
 - Reduce resolution and frames
 - Use `--profile-transformer-steps 1,2,8` and optionally `--profile-transformer-blocks 40,47` when you need cold/warm transformer timing breakdowns
-- Use `--mlx-cache-limit-gb 1` when system memory pressure matters. This caps MLX's in-memory allocator cache and is separate from the on-disk `--weights-cache` converted-weight cache.
+- The default `--mlx-cache-limit-gb 1` caps MLX's in-memory allocator cache. Use `--mlx-cache-limit-gb 0` only when testing stricter cache pressure.
 - For experimental same-settings denoise A/Bs, try `--video-ff-quantize project_out:mxfp8` to replace video FF projections with MLX weight-only quantized linears after loading stock BF16 weights. Use `project_in:mxfp8` to test the FF input projection by itself, or `project_in:mxfp8,project_out:mxfp8` to test both. Add `--video-ff-quantize-layers 40-47` to test only selected 0-based layers. This is non-canonical and needs visual/audio validation.
-- For same-math layout A/Bs, try `--video-ff-layout project_out:pretranspose` to replace video FF weights with contiguous transposed copies after loading stock BF16 weights. Add `project_in:pretranspose` to test the FF input projection as well, and add `--video-ff-layout-layers 0-47` or a narrower layer range to control memory overhead.
-- For same-math video attention layout A/Bs, try `--video-attn-layout to_out:pretranspose` to replace video-output attention projection weights with contiguous transposed copies. Add `--video-attn-layout-layers 0-47` or a narrower layer range to control memory overhead.
+- Same-math FF and attention pretranspose layouts are enabled by default. Use `--video-ff-layout off --video-attn-layout off` when you need a baseline A/B against untransposed stock layout.
 - For same-settings denoise-speed research, see [Performance Optimization Notes](PERFORMANCE.md)
 
 ### Video Quality Issues
@@ -418,11 +452,12 @@ VAE decoding adds ~10-15 seconds regardless of resolution.
 
 ### Automatic (Recommended)
 
-The generation script automatically loads Gemma 3 if available:
+The generation script automatically resolves cached `google/gemma-3-12b-it`
+from `HF_HUB_CACHE`, `$HF_HOME/hub`, the shared Hugging Face cache, or the
+normal user cache:
 
 ```bash
-python scripts/generate.py "A cat walking through a garden" \
-    --gemma-path weights/gemma-3-12b
+python scripts/generate.py "A cat walking through a garden"
 ```
 
 ### Dummy Embeddings (Testing)
@@ -451,11 +486,12 @@ uv run scripts/download_weights.py --weights gemma
 
 | Configuration | RAM Required |
 |--------------|--------------|
-| Text-to-Video (480×704, 97 frames) | ~18GB at default BF16, higher with `--dtype float32` |
+| Text-to-Video (512×288, 97 frames) | Depends on transformer residency; use `--stream-transformer` for constrained-memory runs |
 | Two-Stage (960×1408, 97 frames) | ~44GB (sequential), ~59GB (parallel) |
 | With Audio Generation | Add ~6GB |
 
-**Recommendation**: Use `--low-memory` flag on systems with <32GB RAM.
+**Recommendation**: Try `--stream-transformer` first on constrained systems. Use
+`--low-memory` only when the extra eval checkpoints are worth the speed hit.
 
 ### Audio Generation
 

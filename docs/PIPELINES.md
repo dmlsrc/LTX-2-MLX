@@ -11,7 +11,7 @@ Standard text-to-video generation with simple CFG denoising.
 ```bash
 python scripts/generate.py "A cat walking" \
     --pipeline text-to-video \
-    --height 480 --width 704 --frames 25 --steps 7
+    --frames 25
 ```
 
 **Best for**: Basic video generation, quick testing
@@ -23,7 +23,7 @@ Two-stage distilled model optimized for speed (no CFG, 10 total steps).
 ```bash
 python scripts/generate.py "A cat walking" \
     --pipeline distilled \
-    --height 480 --width 704 --frames 25
+    --frames 25
 ```
 
 - **Stage 1**: 7 steps at half resolution
@@ -40,7 +40,7 @@ Single-stage CFG with full control and adaptive sigma scheduling.
 python scripts/generate.py "A cat walking" \
     --pipeline one-stage \
     --cfg 5.0 --steps 20 \
-    --height 480 --width 704 --frames 25
+    --frames 25
 ```
 
 - Uses LTX2Scheduler for token-count-dependent sigma schedule
@@ -138,7 +138,7 @@ python scripts/generate.py "Your prompt" \
 
 ```bash
 python scripts/generate.py "Your prompt" \
-    --pipeline one-stage --height 480 --width 704 --frames 65 \
+    --pipeline one-stage --frames 65 \
     --steps 15 --cfg 4.0 --dtype bfloat16
 ```
 
@@ -155,29 +155,36 @@ python scripts/generate.py "Your prompt" \
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--pipeline` | Pipeline: `text-to-video`, `distilled`, `one-stage`, `two-stage` | text-to-video |
-| `--height` | Video height (divisible by 32) | 480 |
-| `--width` | Video width (divisible by 32) | 704 |
+| `--height` | Video height (divisible by 32) | 288 |
+| `--width` | Video width (divisible by 32) | 512 |
 | `--frames` | Number of frames (N*8+1) | 97 |
 | `--duration` | Duration in seconds; overrides `--frames` and rounds up to a valid frame count | None |
 | `--fps` | Generation and output frame rate | 24 |
-| `--steps` | Denoising steps | 8 |
+| `--steps` | Denoising steps | model-aware: 8 distilled, 30 dev |
 | `--steps-stage1` | Stage 1 steps (two-stage pipeline) | 15 |
 | `--steps-stage2` | Stage 2 steps (two-stage pipeline) | 3 |
-| `--cfg` | Classifier-free guidance scale | 5.0 |
+| `--cfg` | Classifier-free guidance scale | model-aware: 1.0 distilled, 5.0 dev |
 | `--seed` | Random seed | 42 |
-| `--output` | Output video path | outputs/output.mp4 |
-| `--weights` | Path to weights file | weights/ltx-2/ltx-2-19b-distilled.safetensors |
+| `--output` | Exact output video path; overrides timestamped naming | None |
+| `--output-dir` | Directory for default timestamped outputs; falls back to `DIFFUSERS_OUTPUT_DIR`, then `OUTPUT_DIR`, then `outputs/` | env or outputs |
+| `--output-prefix` | Filename prefix for default timestamped outputs | ltx |
+| `--weights` | Path to weights file; default resolves cached `Lightricks/LTX-2.3` from `HF_HOME` / `HF_HUB_CACHE` | LTX-2.3 distilled/dev |
+| `--weights-cache` | Converted-weight cache: `auto`, `off`, or `rebuild` | auto |
+| `--mlx-cache-limit-gb` | MLX in-memory allocator cache limit in decimal GB | 1 |
+| `--stream-transformer` | Recommended block-streaming preset: r16, compile, 4-block groups | False |
 | `--dtype` | Compute dtype: `bfloat16`, `float16`, or `float32` | bfloat16 |
 | `--vae-decoder` | VAE decoder backend: `native-conv3d` or `simple` A/B baseline | native-conv3d |
 | `--vae-tiling` | VAE decode tiling policy: RAM-aware `auto`, `off`, or `custom` | auto |
 | `--vae-spatial-padding` | VAE decoder spatial padding: default `zero` boundary mitigation or `reflect` A/B baseline | zero |
+| `--video-ff-layout` | Same-math video FF pretranspose layout, or `off` for baseline A/B | project_in/project_out pretranspose |
+| `--video-attn-layout` | Same-math video attention output pretranspose layout, or `off` for baseline A/B | to_out pretranspose |
 | `--model-variant` | `distilled` (fast) or `dev` (quality) | distilled |
 | `--spatial-upscaler-weights` | Path to spatial upscaler weights (for two-stage) | None |
 | `--temporal-upscaler-weights` | Path to temporal upscaler weights | None |
 | `--upscale-spatial` | Apply 2x spatial upscaling (legacy) | False |
 | `--upscale-temporal` | Apply 2x temporal upscaling (legacy) | False |
 | `--generate-audio` | Generate synchronized audio (experimental) | False |
-| `--low-memory` | Aggressive memory optimization (~30% less) | False |
+| `--low-memory` | Legacy emergency eval-cadence knob; usually redundant with distilled streaming runs | False |
 | `--save-latents` | Save final video/audio latents as an NPZ sidecar next to the output | False |
 | `--save-text-embeddings` | Save positive/negative text conditioning as an `_text.npz` sidecar next to the output; reload it with `--embedding` | False |
 | `--save-run-log` | Save generation parameters, argv, output paths, and timings as an `_run.json` sidecar, created at run start and finalized on completion | False |
@@ -185,16 +192,18 @@ python scripts/generate.py "Your prompt" \
 | `--skip-vae` | Skip VAE decoding (output latent visualization) | False |
 | `--no-gemma` | Use dummy embeddings (testing only) | False |
 | `--embedding` | Path to pre-computed text embedding (.npz) | None |
-| `--gemma-path` | Path to Gemma 3 weights | weights/gemma-3-12b |
+| `--gemma-path` | Path to Gemma 3 weights; default resolves cached `google/gemma-3-12b-it` from `HF_HOME` / `HF_HUB_CACHE` | HF cache |
 
 ## Precision Policy
 
 - BF16 is the default compute dtype for model execution.
 - `--dtype float16` and `--dtype float32` are available for experiments.
+- Distilled defaults to CFG 1.0 and 8 steps; dev defaults to CFG 5.0 and 30 steps.
 - Scheduler/time/position math and tiled VAE blending keep FP32 where needed for stability.
 - Audio VAE decode and the plain vocoder follow the configured compute dtype.
 - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
 - The VAE decoder defaults to native Conv3d with zero spatial padding and RAM-aware auto tiling. `--vae-decoder simple` and `--vae-spatial-padding reflect` remain available for decode A/Bs against the earlier baseline.
+- Converted-weight caching, a 1GB MLX allocator cache limit, same-math video projection pretranspose layouts, and native Conv3d/zero/auto VAE decode are enabled by default. Use `--weights-cache off`, `--mlx-cache-limit-gb 0`, `--video-ff-layout off --video-attn-layout off`, or `--vae-decoder simple` for focused baselines.
 
 ## Frame Count
 

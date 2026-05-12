@@ -617,7 +617,8 @@ justify a fresh A/B.
 
 ### 9. Pretranspose video FF `project_out`
 
-Status: implemented as an opt-in same-math layout experiment.
+Status: default same-math layout optimization. Use `--video-ff-layout off` for
+baseline A/Bs.
 
 `nn.Linear` computes `x @ weight.T`. The video FF `project_out` is the largest
 same-math linear hotspot in the clean block profile, so this experiment caches a
@@ -625,17 +626,17 @@ contiguous `weight.T` after loading stock BF16 weights and calls `mx.addmm`
 against that cached layout. It does not quantize weights or intentionally change
 precision.
 
-Enable it with:
+The default generator path enables:
 
 ```bash
---video-ff-layout project_out:pretranspose
+--video-ff-layout project_in:pretranspose,project_out:pretranspose
 ```
 
 Notes:
 
-- `project_in:pretranspose` is also supported for the video FF input
-  projection. Test it separately or in combination with `project_out`; unlike
-  the earlier `project_in:mxfp8` quantization run, this is same-math.
+- `project_in:pretranspose` is also enabled by default for the video FF input
+  projection. Unlike the earlier `project_in:mxfp8` quantization run, this is
+  same-math.
 - Use `--video-ff-layout-layers 0-47` or a narrower range to control where the
   extra cached transposes are created.
 - The first implementation duplicated selected `project_out` weights; the
@@ -668,7 +669,8 @@ Measured result:
 
 ### 10. Pretranspose video attention `to_out`
 
-Status: implemented as an opt-in same-math layout experiment.
+Status: default same-math layout optimization. Use `--video-attn-layout off` for
+baseline A/Bs.
 
 Attention output projections also compute `x @ weight.T`. This experiment
 materializes contiguous transposed `to_out` weights after loading stock BF16
@@ -676,18 +678,16 @@ weights, then drops the original projection weights. For AV blocks it applies to
 video self-attention, video text-attention, and audio-to-video attention; it
 intentionally skips audio-only output projections.
 
-Enable it with:
+The default generator path enables:
 
 ```bash
 --video-attn-layout to_out:pretranspose
 ```
 
-Recommended A/B:
+Recommended baseline A/B:
 
-- Start by combining it with the current best same-math FF layout:
-  `--video-ff-layout project_out:pretranspose --video-attn-layout to_out:pretranspose`.
-- Use `--video-attn-layout-layers 0-47` for the all-layer test, then narrow only
-  if memory pressure appears.
+- Disable the default same-math layouts with
+  `--video-ff-layout off --video-attn-layout off`.
 - Watch both denoise `avg .../it` and steady process memory. The attention
   `to_out` projections are smaller than FF `project_out`, so the upside is
   modest, but the replacement layout should avoid the duplicate-cache problem.
@@ -712,7 +712,7 @@ Measured result:
 
 ### 11. Cap the MLX allocator cache
 
-Status: implemented as an opt-in same-math memory-pressure knob.
+Status: enabled by default as a same-math memory-pressure knob.
 
 MLX keeps an allocator cache to avoid returning buffers to the system between
 operations. That can improve reuse, but on unified-memory Macs it can also keep
@@ -720,7 +720,7 @@ process memory and swap pressure higher than the active graph requires. This is
 separate from the on-disk `--weights-cache`: it controls MLX's in-memory
 allocator cache only.
 
-Enable it with:
+This is enabled by default:
 
 ```bash
 --mlx-cache-limit-gb 1
@@ -735,17 +735,18 @@ Measured result:
 - This does not change model math, checkpoint precision, or output quality. Keep
   it independent from `--low-memory`, quantization, and layout experiments.
 
-Recommended current same-math constrained-memory stack:
+The current default same-math constrained-memory stack is equivalent to:
 
 ```bash
 --weights-cache auto \
 --mlx-cache-limit-gb 1 \
---video-ff-layout project_out:pretranspose \
---video-ff-layout-layers 0-47
+--video-ff-layout project_in:pretranspose,project_out:pretranspose \
+--video-attn-layout to_out:pretranspose
 ```
 
-The attention layout can still be A/B tested, but it is not part of the minimal
-recommended stack because its benefit was marginal.
+The attention layout can still be A/B tested with `--video-attn-layout off`;
+it remains enabled by default because it is same-math and measured
+neutral-to-small-positive with the FF layout stack.
 
 ### 12. Stream transformer blocks from the weights cache
 
@@ -765,11 +766,19 @@ pummeling the internal SSD with swap writes. Cold or evicted file-cache pages ca
 still cost read bandwidth and latency, so this is an SSD-friendly/constrained-RAM
 mode rather than a throughput mode.
 
-Enable it with:
+Enable the recommended preset with:
+
+```bash
+--stream-transformer
+```
+
+That expands to the current known-good default shape:
 
 ```bash
 --weights-cache auto \
---transformer-block-resident-blocks 4
+--transformer-block-resident-blocks 16 \
+--transformer-block-compile \
+--transformer-block-compile-group-size 4
 ```
 
 Measured bakery AV results with `project_out:pretranspose`,
@@ -837,6 +846,9 @@ seed 124:
   (`35136` tokens). Local SDPA-query and FF-token chunking experiments matched
   baseline math on tiny tests, but did not show a useful runtime win and added
   more hot-path branches than they earned, so they were removed.
+- Added `--stream-transformer` as the user-facing preset for r16 resident blocks,
+  resident-group compile, and 4-block compile groups. Keep the lower-level flags
+  for A/B tests and watchdog tuning.
 - Added `--transformer-block-compile-group-size` as the cleaner watchdog lever
   for cache-backed block streaming. It keeps the resident block window unchanged
   for weight locality, but splits compiled/eval command-buffer groups into
@@ -1086,11 +1098,12 @@ Use a fixed command and change only one thing at a time.
 | Historical compile experiments | yes | medium to high | none observed | Full transformer and video FF subpath compile were removed from the CLI after bakery AV smokes tied baseline speed while adding complexity and memory risk. |
 | `mx.qqmm` FF linears | no | medium to high | blocked locally | Current Metal runtime throws `[QQMatmul] NYI for the general case` on LTX FFN-shaped tests. |
 | `--video-ff-quantize` | yes | medium | useful in selected ranges | `project_out:mxfp8` layers 32-47 improved 352x192 15s AV denoise from about 24.4s/it to 22.1s/it with slight visual differences. Layers 0-23 and 24-47 were both visibly different; all-layer `mxfp8` is much faster but non-parity. All-layer `mxfp4` and `nvfp4` were slower than `mxfp8` on the bakery smoke, so keep `mxfp8` as the runtime-quant candidate for now. `project_in:mxfp8` was slower than BF16 and hurt identity stability. Official NVFP4 checkpoint support remains a separate loading/compatibility experiment. |
-| `--video-ff-layout project_out:pretranspose` | yes | medium | best same-math win so far | Replacement-layout all-layer bakery AV smoke improved from roughly 77s/it BF16 baseline to about 55s/it, stable around 44GB process memory. Original duplicate-cache implementation was slower and more memory hungry. |
-| `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | neutral vs project_out only | Same-math and safe for inference, but bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone. Keep as supported, not the recommended minimal setting. |
-| `--video-attn-layout to_out:pretranspose` | yes | medium | marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. Keep available, but FF `project_out` remains the main same-math win. |
-| `--mlx-cache-limit-gb 0` or `1` | no | low | no cost observed at 1GB | Same-math allocator-cache cap. `1` GB dropped bakery AV average process RAM from about 44GB to about 40GB with no observed time penalty. `0` returns freed buffers immediately and is worth trying for watchdog/cache pressure, but it will not make oversized compiled groups safe by itself. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
+| `--video-ff-layout project_out:pretranspose` | yes | medium | default same-math win | Replacement-layout all-layer bakery AV smoke improved from roughly 77s/it BF16 baseline to about 55s/it, stable around 44GB process memory. Original duplicate-cache implementation was slower and more memory hungry. |
+| `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | default | Same-math and safe for inference. Bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone, so it is included in the default layout stack for simplicity. |
+| `--video-attn-layout to_out:pretranspose` | yes | medium | default marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. |
+| `--mlx-cache-limit-gb 0` or `1` | no | low | default 1GB | Same-math allocator-cache cap. `1` GB dropped bakery AV average process RAM from about 44GB to about 40GB with no observed time penalty. `0` returns freed buffers immediately and is worth trying for watchdog/cache pressure, but it will not make oversized compiled groups safe by itself. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
 | `MLX_MAX_OPS_PER_BUFFER=1 MLX_MAX_MB_PER_BUFFER=10` | no | low | unknown | Must be set before Python starts. Real MLX command-buffer split knobs; useful for watchdog-pressure A/B after a Metal `Impacting Interactivity` abort. They can split between ops, not inside one huge op, so pair with smaller compile groups, smaller resident windows, or denoise/modality tiling for larger token grids. |
+| `--stream-transformer` | yes | low to medium | constrained-memory preset | Expands to r16 resident blocks, resident-group compile, and 4-block compile groups. This is the preferred user-facing switch before reaching for the lower-level block streaming flags. |
 | `--transformer-block-resident-blocks` | yes | low | slower | Cache-backed block streaming cuts process RAM dramatically, e.g. r4 around 8GB average on the bakery smoke, but denoise slowed to about 70.5s/it. Use as a constrained-memory mode, not a fast path. |
 | `--transformer-block-compile` | yes | low to medium | mixed | Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. Pair with compile group sizing for larger token grids. |
 | `--transformer-block-compile-group-size` | yes | low to medium | stabilizes larger shapes, adds overhead | Splits compiled/eval command-buffer groups while keeping the resident block window unchanged. At 1024x576x481, resident 16 with group 4 completed without watchdog abort but still had usable desktop lag and took about 424.8s/it. |
