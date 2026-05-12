@@ -1,4 +1,4 @@
-"""Disposable cache for converted transformer and component weights."""
+"""Disposable cache for converted transformer and auxiliary weight families."""
 
 from __future__ import annotations
 
@@ -18,6 +18,19 @@ from .weight_converter import _flatten_to_nested, convert_pytorch_key_to_mlx
 
 CACHE_SCHEMA_VERSION = 1
 LAYOUT_KEY_PREFIX = "__layout__."
+WEIGHT_FAMILIES = ("connector", "video_vae", "audio_vae", "vocoder")
+WEIGHT_FAMILY_FILENAMES = {
+    "connector": "connector.safetensors",
+    "video_vae": "video_vae.safetensors",
+    "audio_vae": "audio_vae.safetensors",
+    "vocoder": "vocoder.safetensors",
+}
+WEIGHT_FAMILY_LABELS = {
+    "connector": "Connector",
+    "video_vae": "Video VAE",
+    "audio_vae": "Audio VAE",
+    "vocoder": "Vocoder",
+}
 
 
 @dataclass(frozen=True)
@@ -129,10 +142,10 @@ class TransformerBlockStreamer:
 
 
 @dataclass(frozen=True)
-class ComponentCacheResult:
-    """Result metadata for a component cache load."""
+class WeightFamilyCacheResult:
+    """Result metadata for auxiliary weight family cache loads."""
 
-    cache_path: Path
+    cache_paths: dict[str, Path]
     rebuilt: bool
     loaded_count: int
 
@@ -186,11 +199,18 @@ def _cache_payload(
     }
 
 
-def _source_payload(weights_path: str) -> dict[str, Any]:
+def _source_payload(weights_path: str, *, kind: str) -> dict[str, Any]:
     return {
         "schema_version": CACHE_SCHEMA_VERSION,
         "source": _file_signature(weights_path),
-        "kind": "components",
+        "kind": kind,
+    }
+
+
+def _source_dir_payload(weights_path: str) -> dict[str, Any]:
+    return {
+        "schema_version": CACHE_SCHEMA_VERSION,
+        "source": _file_signature(weights_path),
     }
 
 
@@ -229,15 +249,22 @@ def transformer_cache_paths(
     return cache_dir / "transformer.safetensors", cache_dir / "metadata.json", payload
 
 
-def component_cache_paths(
+def weight_family_cache_paths(
     weights_path: str,
     cache_root: str | None,
+    family: str,
 ) -> tuple[Path, Path, dict[str, Any]]:
-    """Resolve source-level component cache paths and expected metadata."""
-    payload = _source_payload(weights_path)
+    """Resolve source-level cache paths and metadata for one weight family."""
+    if family not in WEIGHT_FAMILIES:
+        raise ValueError(f"Unsupported weight family: {family}")
+
+    payload = _source_payload(weights_path, kind=family)
+    dir_payload = _source_dir_payload(weights_path)
     root = Path(cache_root).expanduser() if cache_root else default_transformer_cache_root()
-    cache_dir = root / f"{_safe_stem(weights_path)}-{_payload_digest(payload)}"
-    return cache_dir / "components.safetensors", cache_dir / "components.metadata.json", payload
+    cache_dir = root / f"{_safe_stem(weights_path)}-{_payload_digest(dir_payload)}"
+    cache_file = cache_dir / WEIGHT_FAMILY_FILENAMES[family]
+    metadata_file = cache_dir / f"{Path(cache_file).stem}.metadata.json"
+    return cache_file, metadata_file, payload
 
 
 def _selected_layers(layers: Tuple[int, ...], num_layers: int = 48) -> set[int]:
@@ -295,17 +322,25 @@ def _metadata_matches(metadata_path: Path, expected_payload: dict[str, Any]) -> 
     return actual == expected_payload
 
 
-def _is_component_cache_key(key: str) -> bool:
-    """Return True for non-transformer component weights worth caching separately."""
-    if key.startswith(("vae.", "audio_vae.", "vocoder.", "text_embedding_projection.")):
-        return True
-    return key.startswith(
+def _weight_family_for_key(key: str) -> str | None:
+    """Return the auxiliary weight family for a stock checkpoint key."""
+    if key.startswith("vae."):
+        return "video_vae"
+    if key.startswith("audio_vae."):
+        return "audio_vae"
+    if key.startswith("vocoder."):
+        return "vocoder"
+    if key.startswith("text_embedding_projection."):
+        return "connector"
+    if key.startswith(
         (
             "model.diffusion_model.video_embeddings_connector.",
             "model.diffusion_model.audio_embeddings_connector.",
             "model.diffusion_model.embeddings_connector.",
         )
-    )
+    ):
+        return "connector"
+    return None
 
 
 def _write_metadata(metadata_file: Path, payload: dict[str, Any]) -> None:
@@ -316,36 +351,58 @@ def _write_metadata(metadata_file: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp_metadata, metadata_file)
 
 
-def _save_component_cache(
+def _save_weight_family_cache(
+    family: str,
     cache_file: Path,
     metadata_file: Path,
     payload: dict[str, Any],
-    component_weights: Dict[str, mx.array],
+    weights: Dict[str, mx.array],
 ) -> int:
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     tmp_cache = cache_file.parent / f".{cache_file.stem}.tmp.safetensors"
-    mx.save_safetensors(str(tmp_cache), component_weights)
+    mx.save_safetensors(str(tmp_cache), weights)
     os.replace(tmp_cache, cache_file)
     _write_metadata(metadata_file, payload)
-    loaded_count = len(component_weights)
-    print(f"  Built component cache: {loaded_count} tensors")
+    loaded_count = len(weights)
+    print(f"  Built {WEIGHT_FAMILY_LABELS[family]} cache: {loaded_count} tensors")
     return loaded_count
 
 
-def build_component_cache(
+def build_weight_family_caches(
     weights_path: str,
-    cache_file: Path,
-    metadata_file: Path,
-    payload: dict[str, Any],
+    cache_root: str | None,
+    families: tuple[str, ...],
 ) -> int:
-    """Build a source-level cache for VAE/audio/text connector components."""
+    """Build one or more source-level auxiliary weight caches in a single pass."""
+    families = tuple(dict.fromkeys(families))
+    for family in families:
+        if family not in WEIGHT_FAMILIES:
+            raise ValueError(f"Unsupported weight family: {family}")
+
     raw_weights = mx.load(weights_path)
-    component_weights = {
-        key: value for key, value in raw_weights.items() if _is_component_cache_key(key)
-    }
+    buckets: dict[str, Dict[str, mx.array]] = {family: {} for family in families}
+    for key, value in raw_weights.items():
+        family = _weight_family_for_key(key)
+        if family in buckets:
+            buckets[family][key] = value
     del raw_weights
     gc.collect()
-    return _save_component_cache(cache_file, metadata_file, payload, component_weights)
+
+    loaded_count = 0
+    for family, family_weights in buckets.items():
+        cache_file, metadata_file, payload = weight_family_cache_paths(
+            weights_path,
+            cache_root,
+            family,
+        )
+        loaded_count += _save_weight_family_cache(
+            family,
+            cache_file,
+            metadata_file,
+            payload,
+            family_weights,
+        )
+    return loaded_count
 
 
 def build_transformer_cache(
@@ -359,25 +416,17 @@ def build_transformer_cache(
     video_ff_layout_layers: Tuple[int, ...],
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
-    component_cache_file: Path | None = None,
-    component_metadata_file: Path | None = None,
-    component_payload: dict[str, Any] | None = None,
-    build_component_file: bool = False,
 ) -> tuple[int, int]:
     """Build a converted transformer-only cache from a stock checkpoint."""
     cache_file.parent.mkdir(parents=True, exist_ok=True)
 
     raw_weights = mx.load(weights_path)
     cache_weights: Dict[str, mx.array] = {}
-    component_weights: Dict[str, mx.array] = {}
     loaded_count = 0
     layout_count = 0
     skipped_count = 0
 
     for pytorch_key, value in raw_weights.items():
-        if build_component_file and _is_component_cache_key(pytorch_key):
-            component_weights[pytorch_key] = value
-
         if not pytorch_key.startswith("model.diffusion_model."):
             continue
 
@@ -409,19 +458,6 @@ def build_transformer_cache(
     os.replace(tmp_cache, cache_file)
 
     _write_metadata(metadata_file, payload)
-
-    if (
-        build_component_file
-        and component_cache_file is not None
-        and component_metadata_file is not None
-        and component_payload is not None
-    ):
-        _save_component_cache(
-            component_cache_file,
-            component_metadata_file,
-            component_payload,
-            component_weights,
-        )
 
     print(
         f"  Built transformer cache: {loaded_count} tensors "
@@ -517,7 +553,7 @@ def ensure_transformer_cache(
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
 ) -> TransformerCacheResult:
-    """Build matching transformer/component cache artifacts if needed."""
+    """Build a matching transformer cache artifact if needed."""
     if cache_mode not in {"auto", "rebuild"}:
         raise ValueError(f"Unsupported transformer cache mode: {cache_mode}")
 
@@ -530,17 +566,8 @@ def ensure_transformer_cache(
         video_attn_layout_specs=video_attn_layout_specs,
         video_attn_layout_layers=video_attn_layout_layers,
     )
-    component_cache_file, component_metadata_file, component_payload = component_cache_paths(
-        weights_path,
-        cache_root,
-    )
-
     rebuilt = False
     cache_valid = cache_file.exists() and _metadata_matches(metadata_file, payload)
-    component_cache_valid = component_cache_file.exists() and _metadata_matches(
-        component_metadata_file,
-        component_payload,
-    )
     if cache_mode == "rebuild" or not cache_valid:
         print(f"  Transformer cache: building {cache_file}")
         build_transformer_cache(
@@ -553,20 +580,8 @@ def ensure_transformer_cache(
             video_ff_layout_layers=video_ff_layout_layers,
             video_attn_layout_specs=video_attn_layout_specs,
             video_attn_layout_layers=video_attn_layout_layers,
-            component_cache_file=component_cache_file,
-            component_metadata_file=component_metadata_file,
-            component_payload=component_payload,
-            build_component_file=cache_mode == "rebuild" or not component_cache_valid,
         )
         rebuilt = True
-    elif not component_cache_valid:
-        print(f"  Component cache: building {component_cache_file}")
-        build_component_cache(
-            weights_path,
-            component_cache_file,
-            component_metadata_file,
-            component_payload,
-        )
     else:
         print(f"  Transformer cache: using {cache_file}")
 
@@ -681,29 +696,58 @@ def load_transformer_weights_cached_streaming(
     )
 
 
-def load_component_weights_cached(
+def ensure_weight_family_caches(
     weights_path: str,
     *,
+    families: tuple[str, ...],
     cache_mode: str,
     cache_root: str | None,
-) -> ComponentCacheResult:
-    """Ensure component cache exists and return the smaller cache file path."""
+) -> WeightFamilyCacheResult:
+    """Ensure named auxiliary weight family caches exist and return their paths."""
     if cache_mode not in {"auto", "rebuild"}:
-        raise ValueError(f"Unsupported component cache mode: {cache_mode}")
+        raise ValueError(f"Unsupported weight family cache mode: {cache_mode}")
 
-    cache_file, metadata_file, payload = component_cache_paths(weights_path, cache_root)
+    families = tuple(dict.fromkeys(families))
+    for family in families:
+        if family not in WEIGHT_FAMILIES:
+            raise ValueError(f"Unsupported weight family: {family}")
+
+    cache_paths: dict[str, Path] = {}
+    missing_families: list[str] = []
+    for family in families:
+        cache_file, metadata_file, payload = weight_family_cache_paths(
+            weights_path,
+            cache_root,
+            family,
+        )
+        cache_paths[family] = cache_file
+        cache_valid = cache_file.exists() and _metadata_matches(metadata_file, payload)
+        if cache_mode == "rebuild" or not cache_valid:
+            missing_families.append(family)
+
     rebuilt = False
-    cache_valid = cache_file.exists() and _metadata_matches(metadata_file, payload)
-    if cache_mode == "rebuild" or not cache_valid:
-        print(f"  Component cache: building {cache_file}")
-        loaded_count = build_component_cache(weights_path, cache_file, metadata_file, payload)
+    if missing_families:
+        for family in missing_families:
+            print(
+                f"  {WEIGHT_FAMILY_LABELS[family]} cache: building "
+                f"{cache_paths[family]}"
+            )
+        loaded_count = build_weight_family_caches(
+            weights_path,
+            cache_root,
+            tuple(missing_families),
+        )
         rebuilt = True
     else:
         loaded_count = 0
-        print(f"  Component cache: using {cache_file}")
+        for family in families:
+            print(
+                f"  {WEIGHT_FAMILY_LABELS[family]} cache: using "
+                f"{cache_paths[family]}"
+            )
 
-    return ComponentCacheResult(
-        cache_path=cache_file,
+    return WeightFamilyCacheResult(
+        cache_paths=cache_paths,
         rebuilt=rebuilt,
         loaded_count=loaded_count,
     )

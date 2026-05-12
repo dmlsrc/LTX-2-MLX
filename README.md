@@ -116,7 +116,8 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **VAE decode defaults to native Conv3d + zero padding** - `--vae-tiling auto` now picks a RAM-aware native tile plan, so override `--vae-decoder`, `--vae-tiling`, or `--vae-spatial-padding` only for A/B tests
 - **Default canvas is 512x288** - pass `--height`/`--width` only when you want to leave the fast 16:9 preview size
 - **Default outputs are timestamped** - without `--output`, runs save to `DIFFUSERS_OUTPUT_DIR`, then `OUTPUT_DIR`, then `outputs/` as `ltx_YYYYmmdd_HHMMSS.mp4`; use `--output-prefix` to name a run family
-- **Converted-weight cache defaults to auto** - the first run builds reusable transformer/component cache files; pass `--weights-cache off` only when you specifically want direct stock-weight loading
+- **Converted-weight cache defaults to auto** - the first run builds reusable transformer, connector, video VAE, audio VAE, and vocoder cache files; pass `--weights-cache off` only when you specifically want direct stock-weight loading
+- **Keep `--weights` as the bundle path** - advanced runs can override individual subsystems with `--transformer-weights`, `--connector-weights`, `--vae-weights`, `--audio-vae-weights`, `--vocoder-weights`, and `--config-weights`
 - **MLX allocator cache defaults to 1GB** - this keeps unified-memory pressure lower without needing a routine `--mlx-cache-limit-gb 1`
 - **Same-math video layouts default on** - FF `project_in`/`project_out` and attention `to_out` pretranspose are enabled by default; pass `--video-ff-layout off --video-attn-layout off` for baseline A/Bs
 - **Use `--stream-transformer` for the block-streaming preset** - it expands to 16 resident blocks, resident-group compile, and 4-block compile groups

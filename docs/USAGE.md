@@ -60,6 +60,21 @@ At runtime, `scripts/generate.py` resolves cached LTX-2.3 and Gemma weights from
 user cache. Use `--weights` or `--gemma-path` only when you want to override that
 cache lookup.
 
+`--weights` is treated as a full bundle for the normal path. Advanced runs can
+override individual subsystems without changing the rest of the bundle:
+
+```bash
+python scripts/generate.py "Your prompt" \
+    --weights /path/to/full-ltx-bundle.safetensors \
+    --transformer-weights /path/to/transformer-only.safetensors
+```
+
+The available split overrides are `--transformer-weights`,
+`--connector-weights`, `--vae-weights`, `--audio-vae-weights`,
+`--vocoder-weights`, and `--config-weights`. Keep `--weights` pointed at a full
+bundle unless you also provide `--config-weights`, since model version, VAE
+shape, and vocoder type are read from the config source.
+
 Available weights from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-2):
 
 | Weight | Size | Description |
@@ -228,6 +243,12 @@ python scripts/generate.py "Your prompt" --stream-transformer
 This enables 16 resident transformer blocks, resident-group compile, and
 4-block compile groups. It pairs with the default converted-weight cache and the
 default 1GB MLX allocator cache cap.
+
+The converted-weight cache is split by semantic weight family. Transformer
+caches are keyed by transformer source and layout options; connector, video VAE,
+audio VAE, and vocoder caches are keyed by their own source files. That makes it
+reasonable to test a transformer-only checkpoint against stock VAE/audio/vocoder
+weights without duplicating unrelated cache blobs.
 
 ### Low Memory Mode
 

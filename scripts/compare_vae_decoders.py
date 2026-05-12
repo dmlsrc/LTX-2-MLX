@@ -35,6 +35,7 @@ from scripts.generate import (
     parse_compute_dtype,
     parse_non_negative_int,
 )
+from LTX_2_MLX.loader import ensure_weight_family_caches
 
 
 DEFAULT_WEIGHTS = (
@@ -42,12 +43,6 @@ DEFAULT_WEIGHTS = (
     "snapshots/76730e634e70a28f4e8d51f5e29c08e40e2d8e74/"
     "ltx-2.3-22b-distilled-1.1.safetensors"
 )
-DEFAULT_COMPONENT_WEIGHTS = (
-    "/Users/Shared/huggingface/mlx/LTX-2-MLX-cache/"
-    "ltx-2.3-22b-distilled-1.1-4bb8653ceda51a0de034/components.safetensors"
-)
-
-
 def _clear() -> None:
     gc.collect()
     mx.clear_cache()
@@ -375,7 +370,7 @@ def _write_single_contact_sheet(path: Path, frames: list[int], samples: list[np.
     sheet.save(path)
 
 
-def _build_simple_decoder(config: dict, dtype: mx.Dtype, padding: str, component_weights: Path) -> SimpleVideoDecoder:
+def _build_simple_decoder(config: dict, dtype: mx.Dtype, padding: str, vae_weights: Path) -> SimpleVideoDecoder:
     decoder = SimpleVideoDecoder(
         decoder_blocks=config.get("decoder_blocks"),
         base_channels=config.get("decoder_base_channels", 128),
@@ -383,7 +378,7 @@ def _build_simple_decoder(config: dict, dtype: mx.Dtype, padding: str, component
         compute_dtype=dtype,
         spatial_padding_mode=padding,
     )
-    load_vae_decoder_weights(decoder, str(component_weights))
+    load_vae_decoder_weights(decoder, str(vae_weights))
     return decoder
 
 
@@ -391,7 +386,7 @@ def _build_native_decoder(
     config: dict,
     dtype: mx.Dtype,
     padding: str,
-    component_weights: Path,
+    vae_weights: Path,
     force_causal: bool,
 ) -> NativeConv3dVideoDecoder:
     decoder = NativeConv3dVideoDecoder(
@@ -402,7 +397,7 @@ def _build_native_decoder(
         spatial_padding_mode=padding,
         causal=force_causal,
     )
-    load_native_vae_decoder_weights(decoder, str(component_weights))
+    load_native_vae_decoder_weights(decoder, str(vae_weights))
     return decoder
 
 
@@ -412,11 +407,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-key", default="final_video_latent")
     parser.add_argument("--weights", default=DEFAULT_WEIGHTS, type=Path, help="Stock checkpoint for VAE config metadata")
     parser.add_argument(
+        "--vae-weights",
         "--component-weights",
-        default=DEFAULT_COMPONENT_WEIGHTS,
+        dest="vae_weights",
+        default=None,
         type=Path,
-        help="Safetensors containing VAE component weights; use the component cache to avoid loading the full checkpoint.",
+        help=(
+            "Safetensors containing video VAE weights. Defaults to a split "
+            "video VAE cache derived from --weights."
+        ),
     )
+    parser.add_argument("--weights-cache", choices=["off", "auto", "rebuild"], default="auto")
+    parser.add_argument("--weights-cache-dir", default=None)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--vae-spatial-padding", default="zero", choices=["reflect", "zero"])
     parser.add_argument("--height", type=int, default=None, help="Decoded height; inferred from latent if omitted")
@@ -504,6 +506,18 @@ def main() -> None:
     if args.mlx_cache_limit_gb is not None:
         mx.set_cache_limit(int(args.mlx_cache_limit_gb * (1000**3)))
         mx.clear_cache()
+    vae_weights = args.vae_weights
+    if vae_weights is None:
+        if args.weights_cache == "off":
+            vae_weights = args.weights
+        else:
+            cache_result = ensure_weight_family_caches(
+                str(args.weights),
+                families=("video_vae",),
+                cache_mode=args.weights_cache,
+                cache_root=args.weights_cache_dir,
+            )
+            vae_weights = cache_result.cache_paths["video_vae"]
     audio_path = args.audio
     if audio_path is None and not args.no_audio:
         sibling_wav = args.latent.with_suffix(".wav")
@@ -545,7 +559,7 @@ def main() -> None:
 
     print("VAE decoder comparison")
     print(f"  latent: {args.latent}")
-    print(f"  component weights: {args.component_weights}")
+    print(f"  VAE weights: {vae_weights}")
     print(f"  shape: {width}x{height}, {frame_count} frames")
     print(f"  decoder: {args.decoder}")
     print(f"  tiling: {describe_vae_tiling_config(tiling, auto_tiling)}")
@@ -557,7 +571,7 @@ def main() -> None:
     results: dict = {
         "latent": str(args.latent),
         "weights": str(args.weights),
-        "component_weights": str(args.component_weights),
+        "vae_weights": str(vae_weights),
         "height": height,
         "width": width,
         "frames": frame_count,
@@ -582,7 +596,7 @@ def main() -> None:
     if args.decoder in ("both", "simple"):
         print("\n[simple] loading...")
         t0 = time.perf_counter()
-        simple_decoder = _build_simple_decoder(config, dtype, args.vae_spatial_padding, args.component_weights)
+        simple_decoder = _build_simple_decoder(config, dtype, args.vae_spatial_padding, vae_weights)
         results["simple_load_s"] = time.perf_counter() - t0
         simple_video, simple_decode = _decode_with_timing("simple", simple_decoder, latent, tiling)
         simple_stats, simple_samples = _sample_stats(simple_video, sample_frames)
@@ -603,7 +617,7 @@ def main() -> None:
             config,
             dtype,
             args.vae_spatial_padding,
-            args.component_weights,
+            vae_weights,
             args.native_causal,
         )
         results["native_load_s"] = time.perf_counter() - t0

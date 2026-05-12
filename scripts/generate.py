@@ -44,8 +44,8 @@ from LTX_2_MLX.components.perturbations import create_batched_stg_config
 from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
 from LTX_2_MLX.loader import (
     LoRAConfig,
+    ensure_weight_family_caches,
     load_av_transformer_weights,
-    load_component_weights_cached,
     load_transformer_weights,
     load_transformer_weights_cached,
     load_transformer_weights_cached_streaming,
@@ -172,6 +172,71 @@ def resolve_default_gemma_path(gemma_path: str | None) -> str:
     if cached:
         return cached
     return FALLBACK_GEMMA_PATH
+
+
+def resolve_optional_weight_path(path: str | None) -> str | None:
+    """Expand an optional user-provided weight path."""
+    return str(Path(path).expanduser()) if path else None
+
+
+def resolve_weight_source(override_path: str | None, default_path: str) -> str:
+    """Resolve an advanced per-subsystem override against the bundle default."""
+    return resolve_optional_weight_path(override_path) or default_path
+
+
+def maybe_cache_weight_families(
+    family_sources: dict[str, str],
+    *,
+    cache_mode: str,
+    cache_root: str | None,
+) -> dict[str, str]:
+    """Return load paths for named weight families, using split caches when enabled."""
+    if cache_mode == "off":
+        return dict(family_sources)
+
+    by_source: dict[str, list[str]] = {}
+    for family, source in family_sources.items():
+        if source:
+            by_source.setdefault(source, []).append(family)
+
+    load_paths: dict[str, str] = {}
+    for source, families in by_source.items():
+        result = ensure_weight_family_caches(
+            source,
+            families=tuple(families),
+            cache_mode=cache_mode,
+            cache_root=cache_root,
+        )
+        for family in families:
+            load_paths[family] = str(result.cache_paths[family])
+    return load_paths
+
+
+def describe_weight_sources(
+    *,
+    bundle: str,
+    config: str,
+    transformer: str,
+    connector: str,
+    video_vae: str,
+    audio_vae: str,
+    vocoder: str,
+) -> list[str]:
+    """Create concise user-facing weight source lines."""
+    sources = {
+        "Config": config,
+        "Transformer": transformer,
+        "Connector": connector,
+        "Video VAE": video_vae,
+        "Audio VAE": audio_vae,
+        "Vocoder": vocoder,
+    }
+    if all(source == bundle for source in sources.values()):
+        return [f"Weights: {bundle}"]
+
+    lines = [f"Weights bundle: {bundle}", "Weight sources:"]
+    lines.extend(f"  {label}: {source}" for label, source in sources.items())
+    return lines
 
 
 def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
@@ -1967,7 +2032,7 @@ def load_av_transformer(
 
     layouts_loaded_from_cache = False
 
-    # Load weights (including audio components)
+    # Load transformer weights, including the audio-token transformer path.
     if weights_path and os.path.exists(weights_path):
         if transformer_block_resident_blocks:
             load_transformer_weights_cached_streaming(
@@ -2149,6 +2214,12 @@ def generate_video(
     cfg_stage1: float | None = None,  # Defaults to cfg_scale if not specified
     seed: int = 42,
     weights_path: str | None = None,
+    transformer_weights_path: str | None = None,
+    connector_weights_path: str | None = None,
+    video_vae_weights_path: str | None = None,
+    audio_vae_weights_path: str | None = None,
+    vocoder_weights_path: str | None = None,
+    config_weights_path: str | None = None,
     output_path: str | None = None,
     output_dir: str | None = None,
     output_prefix: str = "ltx",
@@ -2245,6 +2316,12 @@ def generate_video(
         cfg_scale = 5.0 if model_variant == "dev" else 1.0
 
     weights_path = resolve_default_ltx_weights(weights_path, model_variant)
+    transformer_weights_path = resolve_weight_source(transformer_weights_path, weights_path)
+    connector_weights_path = resolve_weight_source(connector_weights_path, weights_path)
+    video_vae_weights_path = resolve_weight_source(video_vae_weights_path, weights_path)
+    audio_vae_weights_path = resolve_weight_source(audio_vae_weights_path, weights_path)
+    vocoder_weights_path = resolve_weight_source(vocoder_weights_path, weights_path)
+    config_weights_path = resolve_weight_source(config_weights_path, weights_path)
     gemma_path = resolve_default_gemma_path(gemma_path)
 
     if stream_transformer:
@@ -2343,6 +2420,12 @@ def generate_video(
                 "output_dir": os.path.dirname(output_path),
                 "output_prefix": output_prefix,
                 "weights_path": weights_path,
+                "transformer_weights_path": transformer_weights_path,
+                "connector_weights_path": connector_weights_path,
+                "video_vae_weights_path": video_vae_weights_path,
+                "audio_vae_weights_path": audio_vae_weights_path,
+                "vocoder_weights_path": vocoder_weights_path,
+                "config_weights_path": config_weights_path,
                 "gemma_path": gemma_path,
                 "embedding_path": embedding_path,
                 "use_gemma": use_gemma,
@@ -2426,7 +2509,16 @@ def generate_video(
     print(f"Resolution: {width}x{height}, {num_frames} frames")
     print(f"Steps: {num_steps}, CFG: {cfg_scale}, Seed: {seed}")
     print(f"Model variant: {model_variant}")
-    print(f"Weights: {weights_path}")
+    for source_line in describe_weight_sources(
+        bundle=weights_path,
+        config=config_weights_path,
+        transformer=transformer_weights_path,
+        connector=connector_weights_path,
+        video_vae=video_vae_weights_path,
+        audio_vae=audio_vae_weights_path,
+        vocoder=vocoder_weights_path,
+    ):
+        print(source_line)
     print(f"Compute dtype: {compute_dtype_name(compute_dtype)}")
     if not skip_vae:
         print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
@@ -2577,25 +2669,36 @@ def generate_video(
     text_audio_encoding = None
     null_audio_encoding = None
 
-    # V2.3 always uses the AV text encoder (dual video/audio embeddings)
-    v2 = weights_path and is_v2_model(weights_path)
+    # V2.3 always uses the AV text encoder (dual video/audio embeddings).
+    # Use the explicit config source for architecture/vocoder decisions so
+    # transformer-only overrides can still pair with stock auxiliary weights.
+    v2 = config_weights_path and is_v2_model(config_weights_path)
     use_av_encoder = generate_audio or v2
-    component_weights_path = weights_path
-    text_weights_path = weights_path
+    requested_weight_families: dict[str, str] = {}
+    if use_gemma and not embedding_path:
+        requested_weight_families["connector"] = connector_weights_path
     if (
-        weights_path
-        and weights_cache_mode == "auto"
-        and not use_placeholder
-        and not embedding_path
-        and use_gemma
+        not skip_vae
+        or image_path
+        or pipeline_type in {"two-stage", "ic-lora", "keyframe-interpolation"}
     ):
-        component_cache = load_component_weights_cached(
-            weights_path,
-            cache_mode="auto" if weights_cache_mode == "rebuild" else weights_cache_mode,
+        requested_weight_families["video_vae"] = video_vae_weights_path
+    if generate_audio:
+        requested_weight_families["audio_vae"] = audio_vae_weights_path
+        requested_weight_families["vocoder"] = vocoder_weights_path
+
+    weight_family_load_paths = dict(requested_weight_families)
+    if requested_weight_families and weights_cache_mode != "off" and not use_placeholder:
+        weight_family_load_paths = maybe_cache_weight_families(
+            requested_weight_families,
+            cache_mode=weights_cache_mode,
             cache_root=weights_cache_dir,
         )
-        component_weights_path = str(component_cache.cache_path)
-        text_weights_path = component_weights_path
+
+    connector_load_path = weight_family_load_paths.get("connector", connector_weights_path)
+    video_vae_load_path = weight_family_load_paths.get("video_vae", video_vae_weights_path)
+    audio_vae_load_path = weight_family_load_paths.get("audio_vae", audio_vae_weights_path)
+    vocoder_load_path = weight_family_load_paths.get("vocoder", vocoder_weights_path)
 
     print("\n[1/5] Encoding prompt...")
     if embedding_path:
@@ -2633,8 +2736,8 @@ def generate_video(
             results = encode_av_gemma_batch(
                 prompts=[prompt, neg_prompt],
                 gemma_path=gemma_path,
-                ltx_weights_path=text_weights_path,
-                ltx_config_path=weights_path,
+                ltx_weights_path=connector_load_path,
+                ltx_config_path=config_weights_path,
             )
             if results is None or results[0][0] is None:
                 print("  ERROR: Failed to encode prompt with AV encoder")
@@ -2653,7 +2756,7 @@ def generate_video(
             text_encoding, text_mask = encode_with_gemma(
                 prompt=prompt,
                 gemma_path=gemma_path,
-                ltx_weights_path=text_weights_path,
+                ltx_weights_path=connector_load_path,
                 use_early_layers_only=early_layers_only,
             )
             if text_encoding is None:
@@ -2665,7 +2768,7 @@ def generate_video(
             null_encoding, null_mask = encode_with_gemma(
                 prompt=neg_prompt,
                 gemma_path=gemma_path,
-                ltx_weights_path=text_weights_path,
+                ltx_weights_path=connector_load_path,
                 max_length=text_encoding.shape[1],
                 use_early_layers_only=early_layers_only,
             )
@@ -2706,9 +2809,9 @@ def generate_video(
     # V2.3 always uses the AV transformer (dual video/audio cross-attention)
     if use_av_encoder:
         print("\n[2/5] Loading AudioVideo transformer...")
-        if not use_placeholder and weights_path:
+        if not use_placeholder and transformer_weights_path:
             model = load_av_transformer(
-                weights_path, num_layers=48, compute_dtype=compute_dtype,
+                transformer_weights_path, num_layers=48, compute_dtype=compute_dtype,
                 low_memory=low_memory,
                 fast_mode=fast_mode,
                 video_ff_quantize_specs=video_ff_quantize_specs,
@@ -2733,9 +2836,9 @@ def generate_video(
             print("  Skipping model load (placeholder mode)")
     else:
         print("\n[2/5] Loading transformer...")
-        if not use_placeholder and weights_path:
+        if not use_placeholder and transformer_weights_path:
             velocity_model = load_transformer(
-                weights_path,
+                transformer_weights_path,
                 num_layers=48,
                 compute_dtype=compute_dtype,
                 low_memory=low_memory,
@@ -2769,19 +2872,6 @@ def generate_video(
             model = None
             print("  Skipping model load (placeholder mode)")
     timings.mark("transformer load")
-
-    if (
-        component_weights_path == weights_path
-        and weights_path
-        and weights_cache_mode != "off"
-        and not use_placeholder
-    ):
-        component_cache = load_component_weights_cached(
-            weights_path,
-            cache_mode="auto" if weights_cache_mode == "rebuild" else weights_cache_mode,
-            cache_root=weights_cache_dir,
-        )
-        component_weights_path = str(component_cache.cache_path)
 
     # Apply LoRA if provided
     if lora_path and model is not None:
@@ -2853,7 +2943,7 @@ def generate_video(
     if not skip_vae:
         print(f"\n[3/5] Loading VAE decoder...")
         # Read VAE config from checkpoint to build correct architecture
-        vae_config = get_vae_config(weights_path) if weights_path else {}
+        vae_config = get_vae_config(config_weights_path) if config_weights_path else {}
         decoder_blocks = vae_config.get("decoder_blocks", None)
         base_channels = vae_config.get("decoder_base_channels", 128)
         timestep_cond = vae_config.get("timestep_conditioning", True)
@@ -2878,11 +2968,11 @@ def generate_video(
             )
         else:
             raise ValueError(f"Unsupported VAE decoder backend: {vae_decoder_backend}")
-        if weights_path and not use_placeholder:
+        if video_vae_load_path and not use_placeholder:
             if vae_decoder_backend == "native-conv3d":
-                load_native_vae_decoder_weights(vae_decoder, component_weights_path)
+                load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
             else:
-                load_vae_decoder_weights(vae_decoder, component_weights_path)
+                load_vae_decoder_weights(vae_decoder, video_vae_load_path)
         elif use_placeholder:
             print("  Skipping weights load (placeholder)")
     else:
@@ -2912,7 +3002,7 @@ def generate_video(
         if vae_decoder is None and not use_placeholder:
             raise ValueError("Two-stage pipeline requires VAE decoder")
         
-        if (not spatial_upscaler_weights or not weights_path) and not use_placeholder:
+        if not spatial_upscaler_weights and not use_placeholder:
             raise ValueError("Two-stage pipeline requires --spatial-upscaler-weights")
 
         # Two-stage pipeline requires resolution divisible by 64 (for stage 1 half-res to be divisible by 32)
@@ -2956,29 +3046,29 @@ def generate_video(
         print("[3.5/5] Loading VAE encoder...")
         video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
         if not use_placeholder:
-            load_vae_encoder_weights(video_encoder, component_weights_path)
+            load_vae_encoder_weights(video_encoder, video_vae_load_path)
         else:
             print("  Skipping weights load (placeholder)")
 
-        # Load audio components if audio generation is enabled
+        # Load audio VAE and vocoder if audio generation is enabled.
         audio_decoder = None
         vocoder = None
         audio_sample_rate = 24000
         if generate_audio:
             print("  Loading Audio VAE decoder...")
             audio_decoder = AudioDecoder(compute_dtype=compute_dtype)
-            if weights_path:
-                load_audio_decoder_weights(audio_decoder, component_weights_path)
+            if audio_vae_load_path:
+                load_audio_decoder_weights(audio_decoder, audio_vae_load_path)
 
             print("  Loading Vocoder...")
             is_bwe = False
-            if weights_path:
-                vocoder, is_bwe = create_vocoder_for_checkpoint(weights_path, compute_dtype)
+            if vocoder_load_path:
+                vocoder, is_bwe = create_vocoder_for_checkpoint(config_weights_path, compute_dtype)
                 if is_bwe:
                     print("  Detected BWE vocoder (LTX-2.3)")
-                    load_vocoder_with_bwe_weights(vocoder, component_weights_path)
+                    load_vocoder_with_bwe_weights(vocoder, vocoder_load_path)
                 else:
-                    load_vocoder_weights(vocoder, component_weights_path)
+                    load_vocoder_weights(vocoder, vocoder_load_path)
             else:
                 vocoder = Vocoder(compute_dtype=compute_dtype)
             print_audio_dtype_summary(compute_dtype, is_bwe)
@@ -3084,8 +3174,8 @@ def generate_video(
         # Load VAE encoder
         print("[3.5/5] Loading VAE encoder...")
         video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
-        if weights_path and not use_placeholder:
-            load_vae_encoder_weights(video_encoder, component_weights_path)
+        if video_vae_load_path and not use_placeholder:
+            load_vae_encoder_weights(video_encoder, video_vae_load_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -3209,8 +3299,8 @@ def generate_video(
         # Load VAE encoder
         print("[3.5/5] Loading VAE encoder...")
         video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
-        if weights_path and not use_placeholder:
-            load_vae_encoder_weights(video_encoder, component_weights_path)
+        if video_vae_load_path and not use_placeholder:
+            load_vae_encoder_weights(video_encoder, video_vae_load_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -3299,8 +3389,8 @@ def generate_video(
         if images:
             print("[3.5/5] Loading VAE encoder...")
             video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
-            if weights_path and not use_placeholder:
-                load_vae_encoder_weights(video_encoder, component_weights_path)
+            if video_vae_load_path and not use_placeholder:
+                load_vae_encoder_weights(video_encoder, video_vae_load_path)
             else:
                 print("  Skipping weights load (placeholder)")
         else:
@@ -3312,18 +3402,18 @@ def generate_video(
         if generate_audio:
             print("  Loading Audio VAE decoder...")
             audio_decoder = AudioDecoder(compute_dtype=compute_dtype)
-            if weights_path:
-                load_audio_decoder_weights(audio_decoder, component_weights_path)
+            if audio_vae_load_path:
+                load_audio_decoder_weights(audio_decoder, audio_vae_load_path)
 
             print("  Loading Vocoder...")
             is_bwe = False
-            if weights_path:
-                vocoder, is_bwe = create_vocoder_for_checkpoint(weights_path, compute_dtype)
+            if vocoder_load_path:
+                vocoder, is_bwe = create_vocoder_for_checkpoint(config_weights_path, compute_dtype)
                 if is_bwe:
                     print("  Detected BWE vocoder (LTX-2.3)")
-                    load_vocoder_with_bwe_weights(vocoder, component_weights_path)
+                    load_vocoder_with_bwe_weights(vocoder, vocoder_load_path)
                 else:
-                    load_vocoder_weights(vocoder, component_weights_path)
+                    load_vocoder_weights(vocoder, vocoder_load_path)
             else:
                 vocoder = Vocoder(compute_dtype=compute_dtype)
             print_audio_dtype_summary(compute_dtype, is_bwe)
@@ -4085,8 +4175,51 @@ def main():
         type=str,
         default=None,
         help=(
-            "Path to LTX weights. Default resolves the Lightricks/LTX-2.3 "
-            "distilled/dev checkpoint from HF_HOME or HF_HUB_CACHE."
+            "Path to a full LTX weight bundle. Default resolves the "
+            "Lightricks/LTX-2.3 distilled/dev checkpoint from HF_HOME or "
+            "HF_HUB_CACHE. Advanced per-subsystem flags override this bundle "
+            "for only that subsystem."
+        ),
+    )
+    parser.add_argument(
+        "--transformer-weights",
+        type=str,
+        default=None,
+        help="Optional transformer-only weight override. Defaults to --weights.",
+    )
+    parser.add_argument(
+        "--connector-weights",
+        type=str,
+        default=None,
+        help="Optional text connector / AV projection weight override. Defaults to --weights.",
+    )
+    parser.add_argument(
+        "--vae-weights",
+        "--video-vae-weights",
+        dest="video_vae_weights",
+        type=str,
+        default=None,
+        help="Optional video VAE weight override. Defaults to --weights.",
+    )
+    parser.add_argument(
+        "--audio-vae-weights",
+        type=str,
+        default=None,
+        help="Optional audio VAE weight override. Defaults to --weights.",
+    )
+    parser.add_argument(
+        "--vocoder-weights",
+        type=str,
+        default=None,
+        help="Optional vocoder weight override. Defaults to --weights.",
+    )
+    parser.add_argument(
+        "--config-weights",
+        type=str,
+        default=None,
+        help=(
+            "Optional config/metadata source for model version, VAE shape, and "
+            "vocoder type. Defaults to --weights."
         ),
     )
     parser.add_argument(
@@ -4095,7 +4228,7 @@ def main():
         default="auto",
         help=(
             "Disposable converted-weight cache. 'auto' builds on first "
-            "use and reuses matching transformer/component artifacts; 'rebuild' "
+            "use and reuses matching transformer and per-family artifacts; 'rebuild' "
             "forces fresh cache files; 'off' loads stock weights directly."
         ),
     )
@@ -4616,6 +4749,12 @@ def main():
         guidance_rescale=getattr(args, 'guidance_rescale', 0.7),
         seed=args.seed,
         weights_path=args.weights,
+        transformer_weights_path=args.transformer_weights,
+        connector_weights_path=args.connector_weights,
+        video_vae_weights_path=args.video_vae_weights,
+        audio_vae_weights_path=args.audio_vae_weights,
+        vocoder_weights_path=args.vocoder_weights,
+        config_weights_path=args.config_weights,
         output_path=args.output,
         output_dir=args.output_dir,
         output_prefix=args.output_prefix,

@@ -24,6 +24,7 @@ from LTX_2_MLX.model.video_vae.native_decoder import (
     _unpatchify_spatial_bfhwc,
     load_native_vae_decoder_weights,
 )
+from LTX_2_MLX.loader import ensure_weight_family_caches
 from scripts.generate import get_vae_config, parse_compute_dtype
 
 
@@ -32,12 +33,6 @@ DEFAULT_WEIGHTS = (
     "snapshots/76730e634e70a28f4e8d51f5e29c08e40e2d8e74/"
     "ltx-2.3-22b-distilled-1.1.safetensors"
 )
-DEFAULT_COMPONENT_WEIGHTS = (
-    "/Users/Shared/huggingface/mlx/LTX-2-MLX-cache/"
-    "ltx-2.3-22b-distilled-1.1-4bb8653ceda51a0de034/components.safetensors"
-)
-
-
 def _memory_snapshot() -> dict[str, float]:
     return {
         "active_gb": mx.get_active_memory() / (1024**3),
@@ -301,7 +296,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent", required=True, type=Path)
     parser.add_argument("--latent-key", default="final_video_latent")
     parser.add_argument("--weights", default=DEFAULT_WEIGHTS, type=Path)
-    parser.add_argument("--component-weights", default=DEFAULT_COMPONENT_WEIGHTS, type=Path)
+    parser.add_argument(
+        "--vae-weights",
+        "--component-weights",
+        dest="vae_weights",
+        default=None,
+        type=Path,
+        help="Video VAE weights. Defaults to a split video VAE cache derived from --weights.",
+    )
+    parser.add_argument("--weights-cache", choices=["off", "auto", "rebuild"], default="auto")
+    parser.add_argument("--weights-cache-dir", default=None)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--vae-spatial-padding", default="zero", choices=["reflect", "zero"])
     parser.add_argument("--native-causal", action="store_true")
@@ -337,6 +341,18 @@ def main() -> None:
     dtype = parse_compute_dtype(args.dtype)
     latent = _load_latent(args.latent, args.latent_key, dtype)
     config = get_vae_config(str(args.weights))
+    vae_weights = args.vae_weights
+    if vae_weights is None:
+        if args.weights_cache == "off":
+            vae_weights = args.weights
+        else:
+            cache_result = ensure_weight_family_caches(
+                str(args.weights),
+                families=("video_vae",),
+                cache_mode=args.weights_cache,
+                cache_root=args.weights_cache_dir,
+            )
+            vae_weights = cache_result.cache_paths["video_vae"]
 
     decoder = NativeConv3dVideoDecoder(
         decoder_blocks=config.get("decoder_blocks"),
@@ -346,7 +362,7 @@ def main() -> None:
         spatial_padding_mode=args.vae_spatial_padding,
         causal=args.native_causal,
     )
-    load_native_vae_decoder_weights(decoder, str(args.component_weights))
+    load_native_vae_decoder_weights(decoder, str(vae_weights))
 
     mx.reset_peak_memory()
     t0 = time.perf_counter()
@@ -355,6 +371,7 @@ def main() -> None:
 
     print("Native Conv3d VAE tail probe")
     print(f"  latent: {args.latent}")
+    print(f"  VAE weights: {vae_weights}")
     print(f"  shape: {tuple(int(v) for v in latent.shape)}")
     print(f"  causal: {args.native_causal}")
     print(f"  upsample internals: {probe_upsample_internals}")
@@ -415,7 +432,7 @@ def main() -> None:
     result = {
         "latent": str(args.latent),
         "weights": str(args.weights),
-        "component_weights": str(args.component_weights),
+        "vae_weights": str(vae_weights),
         "dtype": args.dtype,
         "vae_spatial_padding": args.vae_spatial_padding,
         "native_causal": args.native_causal,

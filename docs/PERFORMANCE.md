@@ -744,6 +744,13 @@ The current default same-math constrained-memory stack is equivalent to:
 --video-attn-layout to_out:pretranspose
 ```
 
+`--weights-cache auto` now caches non-transformer weights as named families:
+connector, video VAE, audio VAE, and vocoder. `--weights` remains the normal
+full-bundle source, while `--transformer-weights`, `--connector-weights`,
+`--vae-weights`, `--audio-vae-weights`, `--vocoder-weights`, and
+`--config-weights` allow mixed-source A/B runs without pretending all
+non-transformer weights are one opaque component blob.
+
 The attention layout can still be A/B tested with `--video-attn-layout off`;
 it remains enabled by default because it is same-math and measured
 neutral-to-small-positive with the FF layout stack.

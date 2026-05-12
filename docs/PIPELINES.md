@@ -168,8 +168,14 @@ python scripts/generate.py "Your prompt" \
 | `--output` | Exact output video path; overrides timestamped naming | None |
 | `--output-dir` | Directory for default timestamped outputs; falls back to `DIFFUSERS_OUTPUT_DIR`, then `OUTPUT_DIR`, then `outputs/` | env or outputs |
 | `--output-prefix` | Filename prefix for default timestamped outputs | ltx |
-| `--weights` | Path to weights file; default resolves cached `Lightricks/LTX-2.3` from `HF_HOME` / `HF_HUB_CACHE` | LTX-2.3 distilled/dev |
-| `--weights-cache` | Converted-weight cache: `auto`, `off`, or `rebuild` | auto |
+| `--weights` | Path to a full weight bundle; default resolves cached `Lightricks/LTX-2.3` from `HF_HOME` / `HF_HUB_CACHE` | LTX-2.3 distilled/dev |
+| `--transformer-weights` | Optional transformer-only override; defaults to `--weights` | None |
+| `--connector-weights` | Optional text connector / AV projection override; defaults to `--weights` | None |
+| `--vae-weights` | Optional video VAE override; defaults to `--weights` | None |
+| `--audio-vae-weights` | Optional audio VAE override; defaults to `--weights` | None |
+| `--vocoder-weights` | Optional vocoder override; defaults to `--weights` | None |
+| `--config-weights` | Optional metadata/config source for model version, VAE shape, and vocoder type; defaults to `--weights` | None |
+| `--weights-cache` | Converted-weight cache: `auto`, `off`, or `rebuild`; stores transformer plus named connector/video-VAE/audio-VAE/vocoder families | auto |
 | `--mlx-cache-limit-gb` | MLX in-memory allocator cache limit in decimal GB | 1 |
 | `--stream-transformer` | Recommended block-streaming preset: r16, compile, 4-block groups | False |
 | `--dtype` | Compute dtype: `bfloat16`, `float16`, or `float32` | bfloat16 |
