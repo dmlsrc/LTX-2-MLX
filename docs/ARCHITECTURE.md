@@ -89,8 +89,8 @@ LTX_2_MLX/
 │
 ├── pipelines/
 │   ├── text_to_video.py      # Basic text-to-video
-│   ├── distilled.py          # Fast 8-step generation
-│   ├── one_stage.py          # Single-stage CFG
+│   ├── distilled.py          # Legacy distilled pipeline API
+│   ├── one_stage.py          # AV one-stage and distilled two-stage
 │   ├── two_stage.py          # Two-stage with upscaling
 │   ├── ic_lora.py            # Image conditioning LoRA
 │   └── keyframe_interpolation.py

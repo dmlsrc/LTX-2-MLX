@@ -81,7 +81,7 @@ Available weights from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-
 |--------|------|-------------|
 | `ltx-2-19b-distilled.safetensors` | 43GB | Fast generation (8 steps) |
 | `ltx-2-19b-dev.safetensors` | 43GB | Higher quality (25-50 steps) |
-| `ltx-2-spatial-upscaler-x2-1.0.safetensors` | 995MB | 2x resolution |
+| `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | 950MB | 2x resolution |
 | `ltx-2-temporal-upscaler-x2-1.0.safetensors` | 262MB | 2x framerate |
 | `ltx-2-19b-distilled-lora-384.safetensors` | 1.5GB | LoRA for two-stage |
 
@@ -146,19 +146,20 @@ python scripts/generate.py "Your prompt" --seed 42
 
 ## Pipelines
 
-### Distilled Pipeline (Default)
+### Distilled Pipeline
 
-Optimized for speed with 8-step generation:
+Optimized for speed with no-CFG two-stage generation:
 
 ```bash
 python scripts/generate.py "A cat walking through a garden" \
     --pipeline distilled \
     --height 512 --width 768 \
-    --frames 65 --steps 8
+    --frames 65
 ```
 
 **Characteristics:**
 - No CFG (classifier-free guidance)
+- 8 distilled steps at half resolution, then 3 refinement steps after spatial upscaling
 - Fast generation (~2 minutes for 65 frames at 512×768)
 - Good quality for most use cases
 
@@ -175,8 +176,9 @@ python scripts/generate.py "A majestic eagle soaring over mountains" \
 
 **Characteristics:**
 - CFG scale controls prompt adherence (3.0-7.0 typical)
-- Higher steps = better quality
+- Higher steps = better quality for dev checkpoints
 - Slower than distilled
+- With `--model-variant distilled`, this is the existing single-pass distilled path with the fixed 8-step distilled sigma schedule
 
 ### Two-Stage Pipeline
 
@@ -386,8 +388,10 @@ paths, and timing summary for the run. The sidecar is created at run start with
 `status: "started"` and overwritten with completed timings when the output is
 saved, so interrupted long runs still leave their parameters behind.
 
-Use `--save-all-sidecars` to enable final latents, text conditioning, and the
-run log together. It is equivalent to passing:
+Use `--save-all-sidecars` to enable latent sidecars, text conditioning, and the
+run log together. Distilled two-stage runs save both stage-1 and stage-2 latents
+while keeping the final-latent keys for existing decode-only tooling. It is
+equivalent to passing:
 
 ```bash
 --save-latents --save-text-embeddings --save-run-log
@@ -405,8 +409,9 @@ run log together. It is equivalent to passing:
 
 ### Slow Generation
 
-- Use `--pipeline distilled` (fastest)
-- Reduce steps: `--steps 5`
+- Use `--pipeline distilled` for no-CFG two-stage distilled generation
+- Use `--pipeline one-stage --model-variant distilled` for single-pass distilled generation
+- Reduce steps on one-stage runs: `--steps 5`
 - Reduce resolution and frames
 - Use `--profile-transformer-steps 1,2,8` and optionally `--profile-transformer-blocks 40,47` when you need cold/warm transformer timing breakdowns
 - The default `--mlx-cache-limit-gb 1` caps MLX's in-memory allocator cache. Use `--mlx-cache-limit-gb 0` only when testing stricter cache pressure.
@@ -516,9 +521,9 @@ uv run scripts/download_weights.py --weights gemma
 
 ### Audio Generation
 
-- `--generate-audio` uses the AudioVideo one-stage path from the default CLI flow.
-- `--model-variant distilled` is supported; `--pipeline distilled` is a separate video-only pipeline.
-- Two-stage pipeline modes do not support audio generation.
+- `--generate-audio` is supported on the AudioVideo one-stage path and the distilled two-stage path.
+- `--model-variant distilled` is supported; use `--pipeline one-stage` for single-pass distilled generation.
+- The CFG `--pipeline two-stage` path still has its own older audio behavior.
 - LTX-2.3 audio quality is usable in current smoke tests, but still benefits from decode-only checks with `--save-latents` when changing precision or tiling code.
 
 ## Current Status

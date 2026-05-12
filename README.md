@@ -76,7 +76,7 @@ Download from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-2) on Hug
 |-------|------|-------------|
 | [`ltx-2-19b-distilled.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled.safetensors) | 43GB | Fast generation (8 steps) |
 | [`ltx-2-19b-dev.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-dev.safetensors) | 43GB | Higher quality (25-50 steps) |
-| [`ltx-2-spatial-upscaler-x2-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-spatial-upscaler-x2-1.0.safetensors) | 995MB | 2x resolution upscaling |
+| [`ltx-2.3-spatial-upscaler-x2-1.1.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors) | 950MB | 2x resolution upscaling |
 | [`ltx-2-temporal-upscaler-x2-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-temporal-upscaler-x2-1.0.safetensors) | 262MB | 2x framerate upscaling |
 | [`ltx-2-19b-distilled-lora-384.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled-lora-384.safetensors) | 1.5GB | LoRA for two-stage refinement |
 
@@ -92,15 +92,18 @@ uv run scripts/download_weights.py --weights all
 | Pipeline | Speed | Quality | Best For |
 |----------|-------|---------|----------|
 | `text-to-video` | Medium | Good | Basic generation |
-| `distilled` | **Fast** | Good | Quick iteration |
-| `one-stage` | Slow | **High** | Quality priority |
+| `distilled` | **Fast** | Good | No-CFG two-stage quick iteration |
+| `one-stage` | Slow | **High** | Quality priority or single-pass distilled |
 | `two-stage` | Medium | **High** | High resolution (512p+) |
 
 ```bash
-# Fast preview
+# Fast two-stage distilled preview
 python scripts/generate.py "Your prompt" --pipeline distilled
 
-# High quality
+# Existing single-pass distilled path
+python scripts/generate.py "Your prompt" --pipeline one-stage --model-variant distilled
+
+# High quality dev-style sampling
 python scripts/generate.py "Your prompt" --pipeline one-stage --steps 20 --cfg 5.0
 
 # High resolution
@@ -121,11 +124,11 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **MLX allocator cache defaults to 1GB** - this keeps unified-memory pressure lower without needing a routine `--mlx-cache-limit-gb 1`
 - **Same-math video layouts default on** - FF `project_in`/`project_out` and attention `to_out` pretranspose are enabled by default; pass `--video-ff-layout off --video-attn-layout off` for baseline A/Bs
 - **Use `--stream-transformer` for the block-streaming preset** - it expands to 16 resident blocks, resident-group compile, and 4-block compile groups
-- **Save final latents for decode-only tests** - add `--save-latents` to write an NPZ sidecar next to the requested output
+- **Save latents for decode-only tests** - add `--save-latents` to write an NPZ sidecar next to the requested output; distilled two-stage runs include both stage-1 and stage-2 latents plus the existing final-latent keys
 - **Save text conditioning for denoise A/Bs** - add `--save-text-embeddings` to write the positive/negative AV text encoder outputs as an `_text.npz` sidecar that can be reused with `--embedding`
 - **Save run metadata for reproducibility** - add `--save-run-log` to write params, argv, outputs, and timings as an `_run.json` sidecar, starting before the long generation step
-- **Save all reproducibility sidecars** - add `--save-all-sidecars` to turn on final latents, text conditioning, and run metadata together
-- **Use `--pipeline distilled`** - Fastest inference (8 steps)
+- **Save all reproducibility sidecars** - add `--save-all-sidecars` to turn on latents, text conditioning, and run metadata together
+- **Use `--pipeline distilled`** - Fast no-CFG two-stage inference (8+3 steps)
 - **Use `--stream-transformer` before `--low-memory`** - the streaming preset is the cleaner constrained-memory path for modern distilled runs; `--low-memory` remains an emergency fallback
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing
 - **Research denoise speed carefully** - `--video-ff-quantize project_out:mxfp8` can A/B weight-only quantized video FF projections, and `--video-ff-quantize-layers 40-47` narrows it to selected layers; this is non-canonical and needs quality checks

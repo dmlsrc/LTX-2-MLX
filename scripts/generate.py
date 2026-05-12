@@ -38,7 +38,12 @@ from LTX_2_MLX.model.audio_vae import (
 )
 from LTX_2_MLX.model.audio_vae.vocoder import MelSTFT
 from LTX_2_MLX.model.video_vae import VideoDecoder, NormLayerType
-from LTX_2_MLX.components import DISTILLED_SIGMA_VALUES, VideoLatentPatchifier, get_sigma_schedule
+from LTX_2_MLX.components import (
+    DISTILLED_SIGMA_VALUES,
+    STAGE_2_DISTILLED_SIGMA_VALUES,
+    VideoLatentPatchifier,
+    get_sigma_schedule,
+)
 from LTX_2_MLX.components.guiders import LtxAPGGuider, LegacyStatefulAPGGuider, STGGuider
 from LTX_2_MLX.components.perturbations import create_batched_stg_config
 from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
@@ -90,10 +95,16 @@ DEFAULT_VIDEO_FF_LAYOUT_SPECS = (
 DEFAULT_VIDEO_ATTN_LAYOUT_SPECS = (("to_out", "pretranspose"),)
 DEFAULT_TRANSFORMER_LAYOUT_LAYERS = tuple(range(48))
 DEFAULT_LTX_REPO_ID = "Lightricks/LTX-2.3"
+LEGACY_LTX_REPO_ID = "Lightricks/LTX-2"
 DEFAULT_LTX_WEIGHT_FILES = {
     "distilled": "ltx-2.3-22b-distilled-1.1.safetensors",
     "dev": "ltx-2.3-22b-dev.safetensors",
 }
+DEFAULT_SPATIAL_UPSCALER_FILES = (
+    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+    "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+    "ltx-2-spatial-upscaler-x2-1.0.safetensors",
+)
 DEFAULT_GEMMA_REPO_ID = "google/gemma-3-12b-it"
 FALLBACK_GEMMA_PATH = "weights/gemma-3-12b"
 
@@ -161,6 +172,36 @@ def resolve_default_ltx_weights(weights_path: str | None, model_variant: str) ->
     if cached:
         return cached
     return str(Path("weights") / "ltx-2" / filename)
+
+
+def resolve_default_spatial_upscaler_weights(
+    weights_path: str | None,
+    ltx_weights_path: str | None,
+) -> str | None:
+    """Resolve an explicit or HF-cache default spatial upscaler path."""
+    if weights_path:
+        return str(Path(weights_path).expanduser())
+
+    if ltx_weights_path:
+        checkpoint_dir = Path(ltx_weights_path).expanduser().parent
+        for filename in DEFAULT_SPATIAL_UPSCALER_FILES:
+            candidate = checkpoint_dir / filename
+            if candidate.exists():
+                return str(candidate)
+
+    for filename in DEFAULT_SPATIAL_UPSCALER_FILES:
+        cached = _find_cached_hf_file(DEFAULT_LTX_REPO_ID, filename)
+        if cached:
+            return cached
+
+    legacy_cached = _find_cached_hf_file(
+        LEGACY_LTX_REPO_ID,
+        "ltx-2-spatial-upscaler-x2-1.0.safetensors",
+    )
+    if legacy_cached:
+        return legacy_cached
+
+    return None
 
 
 def resolve_default_gemma_path(gemma_path: str | None) -> str:
@@ -806,6 +847,7 @@ class DenoiseProgress:
         self.spinner = "◐◓◑◒" if "utf" in encoding else "|/-\\"
         self.use_color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
         self._lock = threading.Lock()
+        self._output_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._rendered = False
@@ -898,13 +940,28 @@ class DenoiseProgress:
             f"| ETA {eta_text} "
             f"| {yellow}{pace}{reset}"
         )
-        if sys.stdout.isatty():
-            print("\r\033[2K" + line[1:], end="", flush=True)
-        else:
-            padding = " " * max(0, self._last_line_len - len(line))
-            print(line + padding, end="", flush=True)
-        self._last_line_len = len(line)
-        self._rendered = True
+        with self._output_lock:
+            if sys.stdout.isatty():
+                print("\r\033[2K" + line[1:], end="", flush=True)
+            else:
+                padding = " " * max(0, self._last_line_len - len(line))
+                print(line + padding, end="", flush=True)
+            self._last_line_len = len(line)
+            self._rendered = True
+
+    def log(self, message: str) -> None:
+        """Print a status message without merging it into the progress row."""
+        with self._output_lock:
+            if self._finished or not self._rendered or self._newline_printed:
+                print(message, flush=True)
+                return
+            if sys.stdout.isatty():
+                print("\r\033[2K" + message, flush=True)
+            else:
+                padding = " " * max(0, self._last_line_len - len(message))
+                print("\r" + message + padding, flush=True)
+            self._last_line_len = 0
+            self._rendered = False
 
     def finish(self) -> None:
         self._stop.set()
@@ -924,7 +981,8 @@ class DenoiseProgress:
             self._render(final=True)
 
         if needs_newline:
-            print(flush=True)
+            with self._output_lock:
+                print(flush=True)
             with self._lock:
                 self._newline_printed = True
 
@@ -2302,6 +2360,8 @@ def generate_video(
 ):
     """Generate video from text prompt."""
 
+    requested_num_steps = num_steps
+
     if output_path is None:
         output_path = build_default_output_path(output_dir, output_prefix)
 
@@ -2322,7 +2382,43 @@ def generate_video(
     audio_vae_weights_path = resolve_weight_source(audio_vae_weights_path, weights_path)
     vocoder_weights_path = resolve_weight_source(vocoder_weights_path, weights_path)
     config_weights_path = resolve_weight_source(config_weights_path, weights_path)
+    spatial_upscaler_weights = resolve_default_spatial_upscaler_weights(
+        spatial_upscaler_weights,
+        config_weights_path,
+    )
     gemma_path = resolve_default_gemma_path(gemma_path)
+
+    v2 = config_weights_path and is_v2_model(config_weights_path)
+    distilled_two_stage_requested = pipeline_type == "distilled" and v2
+    distilled_one_stage_requested = (
+        model_variant == "distilled" and pipeline_type in {"text-to-video", "one-stage"} and v2
+    )
+    if (
+        distilled_two_stage_requested
+        and requested_num_steps is not None
+        and requested_num_steps != len(DISTILLED_SIGMA_VALUES) - 1
+    ):
+        print(
+            "  WARNING: --pipeline distilled uses the official fixed 8+3 "
+            "two-stage sigma schedule; ignoring --steps."
+        )
+    if (
+        distilled_one_stage_requested
+        and requested_num_steps is not None
+        and requested_num_steps != len(DISTILLED_SIGMA_VALUES) - 1
+    ):
+        print(
+            "  WARNING: distilled one-stage uses the official fixed 8-step "
+            "sigma schedule; ignoring --steps."
+        )
+        num_steps = len(DISTILLED_SIGMA_VALUES) - 1
+    if distilled_two_stage_requested and (height % 64 != 0 or width % 64 != 0):
+        new_height = ((height + 63) // 64) * 64
+        new_width = ((width + 63) // 64) * 64
+        print("  WARNING: Distilled two-stage requires resolution divisible by 64.")
+        print(f"  Adjusting resolution from {height}x{width} to {new_height}x{new_width}")
+        height = new_height
+        width = new_width
 
     if stream_transformer:
         if transformer_block_resident_blocks == 0:
@@ -2406,7 +2502,7 @@ def generate_video(
             "output_path": output_path,
             "sidecars": {
                 "run_log": run_log_sidecar_path(output_path),
-                "final_latents": latent_sidecar_path(output_path) if save_latents else None,
+                "latents": latent_sidecar_path(output_path) if save_latents else None,
                 "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
             },
             "parameters": {
@@ -2507,7 +2603,12 @@ def generate_video(
     print(f"{'='*50}")
     print(f"Prompt: {prompt}")
     print(f"Resolution: {width}x{height}, {num_frames} frames")
-    print(f"Steps: {num_steps}, CFG: {cfg_scale}, Seed: {seed}")
+    steps_display = (
+        f"{len(DISTILLED_SIGMA_VALUES) - 1}+{len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1}"
+        if distilled_two_stage_requested
+        else str(num_steps)
+    )
+    print(f"Steps: {steps_display}, CFG: {cfg_scale}, Seed: {seed}")
     print(f"Model variant: {model_variant}")
     for source_line in describe_weight_sources(
         bundle=weights_path,
@@ -2539,7 +2640,7 @@ def generate_video(
     if generate_audio:
         print(f"Audio generation: ENABLED (stereo 24kHz)")
     if save_latents:
-        print(f"Final latents: ENABLED")
+        print(f"Latent sidecar: ENABLED")
     if save_text_embeddings:
         print(f"Text conditioning sidecar: ENABLED")
     if save_run_log:
@@ -2552,7 +2653,7 @@ def generate_video(
             outputs={
                 "video": output_path,
                 "audio_wav": os.path.splitext(output_path)[0] + ".wav" if generate_audio else None,
-                "final_latents": latent_sidecar_path(output_path) if save_latents else None,
+                "latents": latent_sidecar_path(output_path) if save_latents else None,
                 "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
             },
         )
@@ -2672,7 +2773,6 @@ def generate_video(
     # V2.3 always uses the AV text encoder (dual video/audio embeddings).
     # Use the explicit config source for architecture/vocoder decisions so
     # transformer-only overrides can still pair with stock auxiliary weights.
-    v2 = config_weights_path and is_v2_model(config_weights_path)
     use_av_encoder = generate_audio or v2
     requested_weight_families: dict[str, str] = {}
     if use_gemma and not embedding_path:
@@ -2680,7 +2780,7 @@ def generate_video(
     if (
         not skip_vae
         or image_path
-        or pipeline_type in {"two-stage", "ic-lora", "keyframe-interpolation"}
+        or pipeline_type in {"distilled", "two-stage", "ic-lora", "keyframe-interpolation"}
     ):
         requested_weight_families["video_vae"] = video_vae_weights_path
     if generate_audio:
@@ -2910,6 +3010,8 @@ def generate_video(
         print(f"  CFG enabled with scale {cfg_scale}")
         if guidance_rescale > 0:
             print(f"  Guidance rescale: {guidance_rescale}")
+    elif distilled_two_stage_requested:
+        print(f"  CFG disabled (scale {cfg_scale}) - Running optimized no-CFG inference")
     else:
         print(f"  CFG disabled (scale {cfg_scale}) - Running optimized single-pass inference")
 
@@ -3361,7 +3463,10 @@ def generate_video(
     # Use OneStagePipeline for joint audio-video generation
     # V2.3 always uses this path (AV transformer) even without audio generation
     if use_av_encoder:
+        distilled_two_stage = distilled_two_stage_requested
         print("\n=== Using Audio-Video Pipeline ===")
+        if distilled_two_stage:
+            print("  Mode: distilled two-stage")
         if save_latents:
             print(f"  Latent sidecar: {latent_sidecar_path(output_path)}")
 
@@ -3386,7 +3491,7 @@ def generate_video(
             )]
 
         video_encoder = None
-        if images:
+        if images or distilled_two_stage:
             print("[3.5/5] Loading VAE encoder...")
             video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
             if video_vae_load_path and not use_placeholder:
@@ -3395,6 +3500,19 @@ def generate_video(
                 print("  Skipping weights load (placeholder)")
         else:
             print("[3.5/5] VAE encoder skipped (no image conditioning)")
+
+        spatial_upscaler = None
+        if distilled_two_stage:
+            if model_variant != "distilled":
+                raise ValueError("Distilled two-stage requires --model-variant distilled")
+            if not spatial_upscaler_weights:
+                raise ValueError("Distilled two-stage requires --spatial-upscaler-weights")
+            print("[3.6/5] Loading spatial upscaler...")
+            spatial_upscaler = SpatialUpscaler()
+            if not use_placeholder:
+                load_spatial_upscaler_weights(spatial_upscaler, spatial_upscaler_weights)
+            else:
+                print("  Skipping weights load (placeholder)")
 
         audio_decoder = None
         vocoder = None
@@ -3442,6 +3560,7 @@ def generate_video(
             seed=seed,
             fps=output_fps,
             num_inference_steps=num_steps,
+            use_distilled_sigmas=model_variant == "distilled",
             cfg_scale=cfg_scale,
             audio_cfg_scale=audio_cfg_scale if audio_cfg_scale is not None else (1.0 if model_variant == "distilled" else 7.0),
             rescale_scale=rescale_scale if rescale_scale is not None else (0.0 if model_variant == "distilled" else 0.7),
@@ -3456,27 +3575,74 @@ def generate_video(
         timings.mark("av pipeline prep")
 
         # Run pipeline with audio
-        print(f"\n[5/5] Running audio-video generation ({num_steps} steps)...")
+        if distilled_two_stage:
+            print(
+                f"\n[5/5] Running distilled two-stage generation "
+                f"({len(DISTILLED_SIGMA_VALUES) - 1}+"
+                f"{len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1} steps)..."
+            )
 
-        denoise_progress = DenoiseProgress(total=num_steps)
-        denoise_progress.start()
+            stage_progress = None
+            active_stage = None
+            stage_labels = {
+                "stage_1": "Stage 1 denoising",
+                "stage_2": "Stage 2 denoising",
+            }
 
-        def progress_callback(step: int, total: int):
-            denoise_progress.update(step, total)
-            if step >= total:
-                denoise_progress.finish()
+            def stage_progress_callback(stage_name: str, step: int, total: int):
+                nonlocal stage_progress, active_stage
+                if active_stage != stage_name:
+                    if stage_progress is not None:
+                        stage_progress.finish()
+                    active_stage = stage_name
+                    stage_progress = DenoiseProgress(
+                        label=stage_labels.get(stage_name, stage_name),
+                        total=total,
+                    )
+                    stage_progress.start()
+                stage_progress.update(step, total)
+                if step >= total:
+                    stage_progress.finish()
 
-        video, audio_waveform = av_pipeline(
-            positive_encoding=text_encoding,
-            negative_encoding=null_encoding,
-            config=av_config,
-            images=images,
-            callback=progress_callback,
-            positive_audio_encoding=text_audio_encoding,
-            negative_audio_encoding=null_audio_encoding,
-            latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
-        )
-        denoise_progress.finish()
+            def distilled_progress_message(message: str):
+                if stage_progress is not None:
+                    stage_progress.log(message)
+                else:
+                    print(message, flush=True)
+
+            video, audio_waveform = av_pipeline.generate_distilled_two_stage(
+                positive_encoding=text_encoding,
+                config=av_config,
+                spatial_upscaler=spatial_upscaler,
+                images=images,
+                stage_callback=stage_progress_callback,
+                progress_message=distilled_progress_message,
+                positive_audio_encoding=text_audio_encoding,
+                latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
+            )
+            if stage_progress is not None:
+                stage_progress.finish()
+        else:
+            print(f"\n[5/5] Running audio-video generation ({num_steps} steps)...")
+            denoise_progress = DenoiseProgress(total=num_steps)
+            denoise_progress.start()
+
+            def progress_callback(step: int, total: int):
+                denoise_progress.update(step, total)
+                if step >= total:
+                    denoise_progress.finish()
+
+            video, audio_waveform = av_pipeline(
+                positive_encoding=text_encoding,
+                negative_encoding=null_encoding,
+                config=av_config,
+                images=images,
+                callback=progress_callback,
+                positive_audio_encoding=text_audio_encoding,
+                negative_audio_encoding=null_audio_encoding,
+                latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
+            )
+            denoise_progress.finish()
         pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
         if pipeline_timings:
             timings.extend(pipeline_timings)
@@ -3518,7 +3684,7 @@ def generate_video(
                 outputs={
                     "video": output_path,
                     "audio_wav": os.path.splitext(output_path)[0] + ".wav" if audio_waveform is not None else None,
-                    "final_latents": latent_sidecar_path(output_path) if save_latents else None,
+                    "latents": latent_sidecar_path(output_path) if save_latents else None,
                     "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
                 },
             )
@@ -3526,8 +3692,8 @@ def generate_video(
         timings.print_summary()
         return
 
-    # === STANDARD PIPELINE (one-stage, distilled, video-only) ===
-    # Note: Audio generation is handled by the AUDIO-VIDEO PIPELINE above
+    # === STANDARD PIPELINE (non-AV fallback, video-only) ===
+    # Note: LTX-2.3 distilled one-stage and two-stage modes use the AV path above.
     if save_latents:
         print("  WARNING: --save-latents is currently supported only on the Audio-Video pipeline path")
 
@@ -3918,7 +4084,7 @@ def generate_video(
             outputs={
                 "video": output_path,
                 "audio_wav": None,
-                "final_latents": None,
+                "latents": None,
                 "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
             },
         )
@@ -4375,8 +4541,11 @@ def main():
     parser.add_argument(
         "--spatial-upscaler-weights",
         type=str,
-        default="weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors",
-        help="Path to spatial upscaler weights"
+        default=None,
+        help=(
+            "Path to spatial upscaler weights. Default resolves the cached "
+            "LTX-2.3 x2 upscaler beside --weights or from HF_HOME/HF_HUB_CACHE."
+        ),
     )
     parser.add_argument(
         "--upscale-temporal",
@@ -4608,7 +4777,10 @@ def main():
     parser.add_argument(
         "--save-latents",
         action="store_true",
-        help="Save final video/audio latents as an NPZ sidecar next to the requested output"
+        help=(
+            "Save video/audio latents as an NPZ sidecar; distilled two-stage "
+            "runs include stage-1, stage-2, and final aliases"
+        ),
     )
     parser.add_argument(
         "--save-text-embeddings",
@@ -4633,7 +4805,7 @@ def main():
         dest="save_all_sidecars",
         action="store_true",
         help=(
-            "Enable all reproducibility/debug sidecars: final latents, text "
+            "Enable all reproducibility/debug sidecars: latents, text "
             "conditioning, and run metadata"
         ),
     )

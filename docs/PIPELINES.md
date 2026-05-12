@@ -18,7 +18,7 @@ python scripts/generate.py "A cat walking" \
 
 ### 2. `distilled` - Fast
 
-Two-stage distilled model optimized for speed (no CFG, 10 total steps).
+Two-stage distilled model optimized for speed (no CFG, 11 total denoise steps).
 
 ```bash
 python scripts/generate.py "A cat walking" \
@@ -26,7 +26,7 @@ python scripts/generate.py "A cat walking" \
     --frames 25
 ```
 
-- **Stage 1**: 7 steps at half resolution
+- **Stage 1**: 8 steps at half resolution
 - **Stage 2**: 3 steps refinement
 - **Speed**: ~2x faster than standard
 - **Quality**: Good for most use cases
@@ -57,7 +57,7 @@ python scripts/generate.py "A cat walking" \
     --pipeline two-stage \
     --height 512 --width 704 \
     --cfg 5.0 --steps-stage1 15 \
-    --spatial-upscaler-weights weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors \
+    --spatial-upscaler-weights /path/to/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
     --distilled-lora weights/ltx-2/ltx-2-19b-distilled-lora-384.safetensors \
     --dtype bfloat16
 ```
@@ -116,14 +116,15 @@ video = pipeline(keyframes=keyframes, ...)
 | Pipeline | Speed | Quality | Resolution | CFG | Best Use Case |
 |----------|-------|---------|------------|-----|---------------|
 | `text-to-video` | Medium | Good | Any | Yes | Basic generation |
-| `distilled` | **Fast** (10 steps) | Good | Up to 480p | No | Quick iteration |
+| `distilled` | **Fast** (8+3 steps) | Good | 512p+ | No | Quick iteration |
 | `one-stage` | Slow (20+ steps) | **High** | Any | Yes | Quality priority |
 | `two-stage` | Medium (18 steps) | **High** | **512p+** | Yes | High-resolution |
 | `ic_lora` | Medium | High | 512p+ | Yes | Controlled gen |
 | `keyframe_interpolation` | Medium | High | 512p+ | Yes | Image animation |
 
-`--generate-audio` uses the AudioVideo one-stage path in the default CLI flow.
-That is separate from `--pipeline distilled`, which remains video-only.
+`--pipeline distilled` now uses the AudioVideo two-stage distilled path for
+LTX-2.3 checkpoints. Use `--pipeline one-stage --model-variant distilled` for
+the existing single-pass distilled path.
 
 ## Recommended Settings by Use Case
 
@@ -155,12 +156,12 @@ python scripts/generate.py "Your prompt" \
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--pipeline` | Pipeline: `text-to-video`, `distilled`, `one-stage`, `two-stage` | text-to-video |
-| `--height` | Video height (divisible by 32) | 288 |
-| `--width` | Video width (divisible by 32) | 512 |
+| `--height` | Video height (divisible by 32; distilled/two-stage modes round to 64) | 288 |
+| `--width` | Video width (divisible by 32; distilled/two-stage modes round to 64) | 512 |
 | `--frames` | Number of frames (N*8+1) | 97 |
 | `--duration` | Duration in seconds; overrides `--frames` and rounds up to a valid frame count | None |
 | `--fps` | Generation and output frame rate | 24 |
-| `--steps` | Denoising steps | model-aware: 8 distilled, 30 dev |
+| `--steps` | Single-pass denoising steps for dev; distilled one-stage uses fixed 8 sigmas and distilled two-stage uses fixed 8+3 sigmas | model-aware: 8 distilled, 30 dev |
 | `--steps-stage1` | Stage 1 steps (two-stage pipeline) | 15 |
 | `--steps-stage2` | Stage 2 steps (two-stage pipeline) | 3 |
 | `--cfg` | Classifier-free guidance scale | model-aware: 1.0 distilled, 5.0 dev |
@@ -185,16 +186,16 @@ python scripts/generate.py "Your prompt" \
 | `--video-ff-layout` | Same-math video FF pretranspose layout, or `off` for baseline A/B | project_in/project_out pretranspose |
 | `--video-attn-layout` | Same-math video attention output pretranspose layout, or `off` for baseline A/B | to_out pretranspose |
 | `--model-variant` | `distilled` (fast) or `dev` (quality) | distilled |
-| `--spatial-upscaler-weights` | Path to spatial upscaler weights (for two-stage) | None |
+| `--spatial-upscaler-weights` | Path to spatial upscaler weights (for distilled/two-stage) | cached LTX-2.3 x2 upscaler |
 | `--temporal-upscaler-weights` | Path to temporal upscaler weights | None |
 | `--upscale-spatial` | Apply 2x spatial upscaling (legacy) | False |
 | `--upscale-temporal` | Apply 2x temporal upscaling (legacy) | False |
 | `--generate-audio` | Generate synchronized audio (experimental) | False |
 | `--low-memory` | Legacy emergency eval-cadence knob; usually redundant with distilled streaming runs | False |
-| `--save-latents` | Save final video/audio latents as an NPZ sidecar next to the output | False |
+| `--save-latents` | Save video/audio latents as an NPZ sidecar next to the output; distilled two-stage runs include stage-1 and stage-2 latents plus final aliases | False |
 | `--save-text-embeddings` | Save positive/negative text conditioning as an `_text.npz` sidecar next to the output; reload it with `--embedding` | False |
 | `--save-run-log` | Save generation parameters, argv, output paths, and timings as an `_run.json` sidecar, created at run start and finalized on completion | False |
-| `--save-all-sidecars` | Enable final latents, text conditioning, and run metadata sidecars together | False |
+| `--save-all-sidecars` | Enable latent, text conditioning, and run metadata sidecars together | False |
 | `--skip-vae` | Skip VAE decoding (output latent visualization) | False |
 | `--no-gemma` | Use dummy embeddings (testing only) | False |
 | `--embedding` | Path to pre-computed text embedding (.npz) | None |

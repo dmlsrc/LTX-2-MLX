@@ -75,8 +75,9 @@ Already implemented baseline optimizations:
 - Attention uses MLX fast scaled dot product attention.
 - RMSNorm and several transformer helper paths use MLX fast or compiled helper
   functions.
-- Final reproducibility sidecars can save latents, text conditioning, and run
-  metadata with `--save-all-sidecars`.
+- Reproducibility sidecars can save latents, text conditioning, and run metadata
+  with `--save-all-sidecars`; distilled two-stage runs include both stage
+  latents.
 
 The main remaining hot path is therefore the repeated 48-layer AV transformer
 forward inside the denoise loop.
