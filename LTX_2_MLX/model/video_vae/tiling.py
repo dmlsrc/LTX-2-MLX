@@ -11,6 +11,7 @@ paths.
 from __future__ import annotations
 
 import gc
+import os
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
@@ -19,6 +20,50 @@ import mlx.core as mx
 
 DEFAULT_TEMPORAL_SCALE = 8
 DEFAULT_SPATIAL_SCALE = 32
+_INT32_MAX_ELEMENTS = 2**31 - 1
+_NATIVE_CONV3D_FINAL_CHANNELS = 512
+
+
+def detect_system_memory_gb() -> float | None:
+    """Best-effort physical RAM detection without adding a runtime dependency."""
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if pages <= 0 or page_size <= 0:
+        return None
+    return (pages * page_size) / (1000**3)
+
+
+def default_vae_decode_budget_gb(total_memory_gb: float | None = None) -> float:
+    """Choose a moderate VAE decode budget from physical RAM.
+
+    The cap intentionally favors the measured 1024x576 `128/8` native Conv3d
+    point over `256/8`: `256/8` was only about a second faster while using much
+    more memory.
+    """
+    if total_memory_gb is None:
+        total_memory_gb = detect_system_memory_gb()
+    if total_memory_gb is None:
+        return 12.0
+    return max(6.0, min(16.0, total_memory_gb * 0.5))
+
+
+def _native_conv3d_safe_frames(height: int, width: int) -> int:
+    frame_elements = (
+        max(1, (height + 7) // 8)
+        * max(1, (width + 7) // 8)
+        * _NATIVE_CONV3D_FINAL_CHANNELS
+    )
+    return max(1, _INT32_MAX_ELEMENTS // frame_elements)
+
+
+def _estimate_native_conv3d_peak_gb(height: int, width: int, tile_frames: int) -> float:
+    """Estimate native Conv3d VAE decode peak from the 1024x576 tile sweep."""
+    area_scale = (height * width) / (1024 * 576)
+    effective_frames = max(1, tile_frames) * area_scale
+    return 4.3 + 0.084 * effective_frames
 
 
 def compute_trapezoidal_mask_1d(
@@ -141,8 +186,21 @@ class TilingConfig:
         num_frames: int,
         spatial_threshold: int = 512,
         temporal_threshold: int = 65,
+        decoder_backend: str = "simple",
+        total_memory_gb: float | None = None,
+        memory_budget_gb: float | None = None,
     ) -> Optional["TilingConfig"]:
-        """Match mlx-video's auto tiling policy for LTX VAE decode."""
+        """Auto-select VAE tiling for the requested decode shape."""
+        if decoder_backend == "native-conv3d":
+            return cls.auto_native_conv3d(
+                height,
+                width,
+                num_frames,
+                total_memory_gb=total_memory_gb,
+                memory_budget_gb=memory_budget_gb,
+            )
+
+        # Match mlx-video's legacy auto tiling policy for the simple decoder.
         needs_spatial = height > spatial_threshold or width > spatial_threshold
         needs_temporal = num_frames > temporal_threshold
 
@@ -159,6 +217,81 @@ class TilingConfig:
                 TemporalTilingConfig(tile_size_in_frames=64, tile_overlap_in_frames=24)
                 if needs_temporal
                 else None
+            ),
+        )
+
+    @classmethod
+    def auto_native_conv3d(
+        cls,
+        height: int,
+        width: int,
+        num_frames: int,
+        *,
+        total_memory_gb: float | None = None,
+        memory_budget_gb: float | None = None,
+    ) -> Optional["TilingConfig"]:
+        """Pick a native Conv3d tile plan from RAM and int32-addressing limits."""
+        budget_gb = (
+            memory_budget_gb
+            if memory_budget_gb is not None
+            else default_vae_decode_budget_gb(total_memory_gb)
+        )
+        safe_frames = _native_conv3d_safe_frames(height, width)
+
+        # Fastest path first. It is allowed only when it fits the int32 Conv3d
+        # output-addressing boundary and the estimated memory budget.
+        full_peak_gb = _estimate_native_conv3d_peak_gb(height, width, num_frames)
+        if num_frames <= safe_frames and full_peak_gb <= budget_gb:
+            return None
+
+        temporal_candidates = (256, 128, 64, 40, 32)
+        for tile_frames in temporal_candidates:
+            if tile_frames >= num_frames:
+                continue
+            if tile_frames > safe_frames:
+                continue
+            peak_gb = _estimate_native_conv3d_peak_gb(height, width, tile_frames)
+            if peak_gb <= budget_gb:
+                return cls.temporal_only(tile_size=tile_frames, overlap=8)
+
+        # If the frame is too large for temporal-only tiling under the budget,
+        # add spatial tiling and try again. Keep this as a fallback because it
+        # multiplies decode jobs and was much slower in the 1024x576 probes.
+        spatial_tile = 512
+        spatial_overlap = 64
+        effective_h = min(height, spatial_tile)
+        effective_w = min(width, spatial_tile)
+        safe_spatial_frames = _native_conv3d_safe_frames(effective_h, effective_w)
+        for tile_frames in temporal_candidates:
+            if tile_frames >= num_frames:
+                continue
+            if tile_frames > safe_spatial_frames:
+                continue
+            peak_gb = _estimate_native_conv3d_peak_gb(
+                effective_h,
+                effective_w,
+                tile_frames,
+            )
+            if peak_gb <= budget_gb:
+                return cls(
+                    spatial_config=SpatialTilingConfig(
+                        tile_size_in_pixels=spatial_tile,
+                        tile_overlap_in_pixels=spatial_overlap,
+                    ),
+                    temporal_config=TemporalTilingConfig(
+                        tile_size_in_frames=tile_frames,
+                        tile_overlap_in_frames=8,
+                    ),
+                )
+
+        return cls(
+            spatial_config=SpatialTilingConfig(
+                tile_size_in_pixels=spatial_tile,
+                tile_overlap_in_pixels=spatial_overlap,
+            ),
+            temporal_config=TemporalTilingConfig(
+                tile_size_in_frames=32,
+                tile_overlap_in_frames=8,
             ),
         )
 

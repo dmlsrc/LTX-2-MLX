@@ -963,15 +963,15 @@ Track it separately from "same checkpoint, same pipeline, faster MLX runtime."
 VAE tiled decode, VAE spatial padding, and output encoding affect decode quality,
 memory, or save time. They are useful, but they are not denoise-speed fixes.
 
-Native Conv3d VAE decode is exposed for A/B testing with
-`--vae-decoder native-conv3d`. It keeps the existing final-latent and tiling
-machinery while swapping the per-tile decoder from the PyTorch-layout
-slice-conv implementation to MLX's native channel-last `Conv3d`. Use
-`scripts/compare_vae_decoders.py` on a saved latent to compare timing, MLX
+Native Conv3d VAE decode is the default generator decode path. It keeps the
+existing final-latent and tiling machinery while swapping the per-tile decoder
+from the PyTorch-layout slice-conv implementation to MLX's native channel-last
+`Conv3d`. Use `--vae-decoder simple` only when you want the older baseline for
+A/B testing. `scripts/compare_vae_decoders.py` can compare timing, MLX
 active/cache/peak memory, sampled luma stats, a contact-sheet diff, and a
-full-motion side-by-side MP4 before making it a default. The comparison script
-auto-muxes a sibling `.wav` sidecar when present; pass `--no-audio` to keep the
-video silent or `--audio /path/to/file` to choose a specific track.
+full-motion side-by-side MP4 on a saved latent. The comparison script auto-muxes
+a sibling `.wav` sidecar when present; pass `--no-audio` to keep the video silent
+or `--audio /path/to/file` to choose a specific track.
 
 Initial bakery latent A/B at 512x288x481:
 
@@ -981,34 +981,83 @@ Initial bakery latent A/B at 512x288x481:
   `29.4-36.4s`, peak `10.4GB`.
 - Full-video uint8 diff between simple and native was tiny (`p95=2`,
   `p99=3`, max `37` in the no-tiling MP4 comparison). Subjectively this looks
-  close enough to keep native Conv3d as an opt-in lower-memory decoder, not as
-  the default.
+  close enough to make native Conv3d the default lower-memory decoder while
+  keeping `simple` available as the baseline.
 
 End-to-end bakery AV smoke with warm caches, a precomputed text sidecar, `r16`
 resident-group compile, FF `project_in`/`project_out` pretranspose, attention
 `to_out` pretranspose, `--vae-decoder native-conv3d`, and `--vae-tiling off`:
 denoise RUN `7m08s`, average `53.4s/it`; `generation + decode` `7m59.5s`;
-total `8m07.3s`. This validates the native Conv3d path in the real generator.
-On 64GB machines, native no-tiling is the fastest native decode mode measured so
-far; use custom temporal tiling when decode peak headroom matters more than
-decode time.
+total `8m07.3s`. This validates the native Conv3d path in the real generator at
+512x288. At this size, native no-tiling is the fastest native decode mode
+measured so far; use custom temporal tiling when decode peak headroom matters
+more than decode time.
+
+Isolated 1024x576x481 decode-only tests on the saved direct-1024 latent found a
+native Conv3d full-volume tail failure, so do not use `--vae-tiling off` for
+direct 1024 renders yet. The no-tiling run completed in `119.4s` with
+`39.2GB` MLX-reported peak, but the final tail clipped white starting around
+frame `455-456` and the luma mean jumped to `0.3306`. A one-tile custom run
+(`--vae-temporal-tile-frames 512 --vae-temporal-overlap-frames 8`) reproduced
+the same white tail (`118.8s`, `43.4GB`, luma `0.3306`).
+
+Temporal-only multi-tile native Conv3d decode avoids that tail failure at
+1024x576:
+
+- `32/8`: `175.1s`, `7.1GB`, clean tail.
+- `40/8`: `159.1s`, `7.5GB`, clean tail.
+- `64/8`: `149.9s`, `9.7GB`, clean tail.
+- `128/8`: `126.5s`, `14.9GB`, clean tail.
+- `256/8`: `125.1s`, `25.8GB`, clean tail.
+
+For now, `128/8` is the best 1024 native Conv3d safety/speed tradeoff on the
+64GB test machine. `256/8` is only about a second faster in the decode-only
+probe while using much more memory. The default native Conv3d `--vae-tiling
+auto` uses a small RAM-derived planner: it keeps the simple decoder's legacy
+conservative policy when `--vae-decoder simple` is requested, but the default
+native path prefers the fastest temporal-only tile that stays under both the MLX
+`0.31.2` `2^31` Conv3d output boundary and an estimated VAE decode budget. On
+the 64GB machine, direct 1024x576x481 auto-selects `128/8` with no spatial
+tiling. A live native-only auto run on the saved 1024 bakery latent selected
+`128/8`, decoded in `126.54s`, peaked at `14.93GB`, and had a clean tail
+(`first_bright_frame=null`).
+
+The tail probe currently points at the final spatial upsample's native
+Conv3d (`07_upsample_conv`): input after `06_res` is still healthy, depth-to-
+space is not the cause, and both cache-clearing and causal temporal padding
+diagnostics failed to fix the full-volume white tail.
+
+A full-vs-window probe on `07_upsample_conv` made the failure deterministic:
+running the same conv on frames `417:481` stayed healthy, while running it on
+the full `481` frames collapsed after frame `455`. That lines up with a signed
+32-bit element-index boundary. The `07_upsample_conv` output is
+`481x72x128x512`; one frame is `4,718,592` elements, and
+`2^31 / 4,718,592 = 455.11`. The last fully good frame was `454`, frame `455`
+was a transition, and frame `456+` collapsed. Treat native Conv3d output tensors
+above `2^31` elements as unsafe on MLX `0.31.2`. MLX PR
+`ml-explore/mlx#3524` appears to fix this implicit Conv3d pointer-offset
+overflow; once a local MLX release includes that PR, first rerun the standalone
+Conv3d reproducer and then retest 1024x576 native Conv3d with
+`--vae-tiling off`.
 
 Custom VAE tiling controls are available for middle-ground tests:
 
 ```bash
 --vae-decoder native-conv3d \
 --vae-tiling custom \
---vae-temporal-tile-frames 256 \
---vae-temporal-overlap-frames 24
+--vae-temporal-tile-frames 128 \
+--vae-temporal-overlap-frames 8
 ```
 
 For decode-only A/B, the same knobs exist on
 `scripts/compare_vae_decoders.py`. Pass `--decoder native-conv3d` to run only
 the native decoder when testing tile sizes where the simple decoder might exceed
-memory. `--vae-tiling off` is the fastest path when the peak memory fits; custom
-temporal tiles should be tested when native Conv3d needs more throughput than
-auto's conservative 64-frame temporal tiles but less peak memory than
-full-volume decode.
+memory. `--vae-tiling off` is the fastest path when the peak memory fits and
+the native Conv3d output stays under the MLX `0.31.2` int32 boundary. Use
+`custom` only when you want to override the RAM-derived auto choice or sweep new
+tile sizes. Avoid direct full-volume `--vae-tiling off` at 1024x576 until a
+local MLX build includes the `ml-explore/mlx#3524` fix and the standalone Conv3d
+reproducer passes.
 
 A temporary native Conv3d eval-cadence switch was tested and removed. On the
 512x288x481 no-tiling native decode, evaluating only at the end measured
@@ -1045,7 +1094,7 @@ Use a fixed command and change only one thing at a time.
 | `--transformer-block-resident-blocks` | yes | low | slower | Cache-backed block streaming cuts process RAM dramatically, e.g. r4 around 8GB average on the bakery smoke, but denoise slowed to about 70.5s/it. Use as a constrained-memory mode, not a fast path. |
 | `--transformer-block-compile` | yes | low to medium | mixed | Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. Pair with compile group sizing for larger token grids. |
 | `--transformer-block-compile-group-size` | yes | low to medium | stabilizes larger shapes, adds overhead | Splits compiled/eval command-buffer groups while keeping the resident block window unchanged. At 1024x576x481, resident 16 with group 4 completed without watchdog abort but still had usable desktop lag and took about 424.8s/it. |
-| `--vae-decoder native-conv3d` | yes | medium | none for denoise | Decode A/B path validated in full generate with `--vae-tiling off`: bakery AV smoke total `8m07.3s`, denoise avg `53.4s/it`. Compare against `simple` on the same saved final latent; do not count this as a transformer speed win. Pair with `--mlx-cache-limit-gb` if allocator cache growth matters. |
+| `--vae-decoder native-conv3d` | yes | medium | none for denoise | Default decode path. Validated in full generate with `--vae-tiling off`: bakery AV smoke total `8m07.3s`, denoise avg `53.4s/it`. Compare against `--vae-decoder simple` on the same saved final latent; do not count this as a transformer speed win. Pair with `--mlx-cache-limit-gb` if allocator cache growth matters. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |
 | `mx.gather_mm` / `mx.gather_qmm` | no | high | unknown | Relevant to MoE/routing or selected batched matrices, not current dense LTX. |

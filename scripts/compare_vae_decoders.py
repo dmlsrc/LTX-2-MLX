@@ -183,6 +183,25 @@ def _uint8_absdiff_stats(a: np.ndarray, b: np.ndarray) -> dict:
     }
 
 
+def _tail_brightness_stats(frames: np.ndarray, fps: float, seconds: float = 2.0) -> dict:
+    tail_count = max(1, min(frames.shape[0], int(round(float(fps) * seconds))))
+    tail = frames[-tail_count:]
+    flat = tail.reshape(tail.shape[0], -1)
+    means = flat.mean(axis=1)
+    bright_frac = (tail > 245).mean(axis=(1, 2, 3))
+    first_bright = np.where((means > 240.0) | (bright_frac > 0.95))[0]
+    first_frame = None
+    if first_bright.size:
+        first_frame = int(frames.shape[0] - tail_count + first_bright[0])
+    return {
+        "frames_checked": int(tail_count),
+        "mean": float(means.mean()),
+        "max_frame_mean": float(means.max()),
+        "max_bright_frac": float(bright_frac.max()),
+        "first_bright_frame": first_frame,
+    }
+
+
 def _label_row(width: int, labels: tuple[str, ...], height: int = 24) -> np.ndarray:
     from PIL import Image, ImageDraw
 
@@ -373,6 +392,7 @@ def _build_native_decoder(
     dtype: mx.Dtype,
     padding: str,
     component_weights: Path,
+    force_causal: bool,
 ) -> NativeConv3dVideoDecoder:
     decoder = NativeConv3dVideoDecoder(
         decoder_blocks=config.get("decoder_blocks"),
@@ -380,6 +400,7 @@ def _build_native_decoder(
         timestep_conditioning=config.get("timestep_conditioning", False),
         compute_dtype=dtype,
         spatial_padding_mode=padding,
+        causal=force_causal,
     )
     load_native_vae_decoder_weights(decoder, str(component_weights))
     return decoder
@@ -439,6 +460,11 @@ def parse_args() -> argparse.Namespace:
         help="Custom spatial overlap in decoded pixels; must be divisible by 32",
     )
     parser.add_argument("--sample-frames", default=None, help="Comma-separated decoded frame indices to sample")
+    parser.add_argument(
+        "--native-causal",
+        action="store_true",
+        help="Diagnostic: run the native Conv3d decoder with causal temporal padding.",
+    )
     parser.add_argument("--mlx-cache-limit-gb", type=float, default=None)
     parser.add_argument("--fps", type=float, default=24.0, help="FPS for generated comparison videos")
     parser.add_argument(
@@ -493,15 +519,22 @@ def main() -> None:
     frame_count = args.frames or inferred_frames
     sample_frames = _sample_frames(frame_count, args.sample_frames)
     vae_tiling_mode = "off" if args.no_tiling else args.vae_tiling
+    # Native-only runs can use the RAM-aware native planner. A/B runs should
+    # stay conservative because the simple decoder has a larger decode peak.
+    auto_decoder_backend = (
+        "native-conv3d" if args.decoder == "native-conv3d" else "simple"
+    )
     tiling, auto_tiling = build_vae_tiling_config(
         vae_tiling_mode,
+        height=height,
+        width=width,
+        num_frames=frame_count,
+        decoder_backend=auto_decoder_backend,
         temporal_tile_frames=args.vae_temporal_tile_frames,
         temporal_overlap_frames=args.vae_temporal_overlap_frames,
         spatial_tile_pixels=args.vae_spatial_tile_pixels,
         spatial_overlap_pixels=args.vae_spatial_overlap_pixels,
     )
-    if auto_tiling:
-        tiling = TilingConfig.auto(height, width, frame_count)
     config = get_vae_config(str(args.weights))
 
     prefix = args.output_prefix
@@ -510,12 +543,14 @@ def main() -> None:
     json_path = prefix.with_suffix(".json")
     sheet_path = prefix.with_suffix(".png")
 
-    print("VAE decoder A/B")
+    print("VAE decoder comparison")
     print(f"  latent: {args.latent}")
     print(f"  component weights: {args.component_weights}")
     print(f"  shape: {width}x{height}, {frame_count} frames")
     print(f"  decoder: {args.decoder}")
-    print(f"  tiling: {describe_vae_tiling_config(tiling, False)}")
+    print(f"  tiling: {describe_vae_tiling_config(tiling, auto_tiling)}")
+    if args.native_causal:
+        print("  native temporal padding: causal")
     print(f"  sample frames: {sample_frames}")
     print(f"  audio: {audio_path if audio_path is not None else 'none'}")
 
@@ -529,13 +564,14 @@ def main() -> None:
         "decoder": args.decoder,
         "sample_frames": sample_frames,
         "vae_tiling_mode": vae_tiling_mode,
-        "tiling": describe_vae_tiling_config(tiling, False),
+        "tiling": describe_vae_tiling_config(tiling, auto_tiling),
         "vae_temporal_tile_frames": args.vae_temporal_tile_frames,
         "vae_temporal_overlap_frames": args.vae_temporal_overlap_frames,
         "vae_spatial_tile_pixels": args.vae_spatial_tile_pixels,
         "vae_spatial_overlap_pixels": args.vae_spatial_overlap_pixels,
         "dtype": args.dtype,
         "vae_spatial_padding": args.vae_spatial_padding,
+        "native_causal": args.native_causal,
         "fps": args.fps,
         "audio": None if audio_path is None else str(audio_path),
     }
@@ -552,7 +588,11 @@ def main() -> None:
         simple_stats, simple_samples = _sample_stats(simple_video, sample_frames)
         frames_by_decoder["simple"] = _video_to_uint8_frames("simple", simple_video)
         samples_by_decoder["simple"] = simple_samples
-        results["simple"] = {**simple_decode, "samples": simple_stats}
+        results["simple"] = {
+            **simple_decode,
+            "samples": simple_stats,
+            "tail_uint8": _tail_brightness_stats(frames_by_decoder["simple"], args.fps),
+        }
         del simple_video, simple_decoder
         _clear()
 
@@ -564,13 +604,18 @@ def main() -> None:
             dtype,
             args.vae_spatial_padding,
             args.component_weights,
+            args.native_causal,
         )
         results["native_load_s"] = time.perf_counter() - t0
         native_video, native_decode = _decode_with_timing("native-conv3d", native_decoder, latent, tiling)
         native_stats, native_samples = _sample_stats(native_video, sample_frames)
         frames_by_decoder["native_conv3d"] = _video_to_uint8_frames("native Conv3d", native_video)
         samples_by_decoder["native_conv3d"] = native_samples
-        results["native_conv3d"] = {**native_decode, "samples": native_stats}
+        results["native_conv3d"] = {
+            **native_decode,
+            "samples": native_stats,
+            "tail_uint8": _tail_brightness_stats(frames_by_decoder["native_conv3d"], args.fps),
+        }
         del native_video, native_decoder
         _clear()
 
@@ -649,6 +694,7 @@ def main() -> None:
                 "simple_decode_s": results["simple"]["decode_s"],
                 "simple_peak_gb": results["simple"]["memory"]["peak_gb"],
                 "simple_luma_mean": results["simple"]["samples"]["luma_mean"],
+                "simple_tail_uint8": results["simple"]["tail_uint8"],
             }
         )
     if "native_conv3d" in results:
@@ -657,6 +703,7 @@ def main() -> None:
                 "native_conv3d_decode_s": results["native_conv3d"]["decode_s"],
                 "native_conv3d_peak_gb": results["native_conv3d"]["memory"]["peak_gb"],
                 "native_conv3d_luma_mean": results["native_conv3d"]["samples"]["luma_mean"],
+                "native_conv3d_tail_uint8": results["native_conv3d"]["tail_uint8"],
             }
         )
     if "sample_uint8_absdiff" in results:

@@ -182,19 +182,31 @@ def parse_profile_transformer_blocks(value: str | None) -> tuple[int, ...]:
 def build_vae_tiling_config(
     mode: str,
     *,
+    height: int,
+    width: int,
+    num_frames: int,
+    decoder_backend: str = "simple",
     force_tiled: bool = False,
     temporal_tile_frames: int | None = None,
     temporal_overlap_frames: int = 24,
     spatial_tile_pixels: int | None = None,
     spatial_overlap_pixels: int = 64,
 ) -> tuple[TilingConfig | None, bool]:
-    """Resolve CLI VAE tiling knobs for pipelines that auto-tile on None."""
+    """Resolve CLI VAE tiling knobs before handing off to a pipeline."""
     if mode == "off":
         return None, False
     if mode == "auto":
         if force_tiled:
-            return TilingConfig.default(), False
-        return None, True
+            return TilingConfig.default(), True
+        return (
+            TilingConfig.auto(
+                height,
+                width,
+                num_frames,
+                decoder_backend=decoder_backend,
+            ),
+            True,
+        )
     if mode != "custom":
         raise ValueError(f"Unsupported VAE tiling mode: {mode}")
 
@@ -229,7 +241,7 @@ def describe_vae_tiling_config(
     auto_tiling: bool,
 ) -> str:
     if tiling_config is None:
-        return "auto" if auto_tiling else "off"
+        return "auto (off)" if auto_tiling else "off"
 
     parts = []
     temporal = tiling_config.temporal_config
@@ -250,7 +262,8 @@ def describe_vae_tiling_config(
     else:
         parts.append("spatial=off")
 
-    return "explicit (" + ", ".join(parts) + ")"
+    prefix = "auto-selected" if auto_tiling else "explicit"
+    return prefix + " (" + ", ".join(parts) + ")"
 
 
 def parse_transformer_layer_selection(value: str | None) -> tuple[int, ...]:
@@ -2032,8 +2045,8 @@ def generate_video(
     gemma_path: str = "weights/gemma-3-12b",
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
-    vae_decoder_backend: str = "simple",
-    vae_spatial_padding: str = "reflect",
+    vae_decoder_backend: str = "native-conv3d",
+    vae_spatial_padding: str = "zero",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
     spatial_upscaler_weights: str = None,
@@ -2152,6 +2165,10 @@ def generate_video(
         mx.clear_cache()
     vae_tiling_config, vae_auto_tiling = build_vae_tiling_config(
         vae_tiling_mode,
+        height=height,
+        width=width,
+        num_frames=num_frames,
+        decoder_backend=vae_decoder_backend,
         force_tiled=tiled_vae,
         temporal_tile_frames=vae_temporal_tile_frames,
         temporal_overlap_frames=vae_temporal_overlap_frames,
@@ -2271,11 +2288,11 @@ def generate_video(
     if skip_vae:
         print(f"VAE decoding: SKIPPED")
     elif vae_decoder_backend == "native-conv3d":
-        print("VAE decoder: native Conv3d (experimental)")
+        print("VAE decoder: native Conv3d")
     else:
         print("VAE decoder: simple slice-conv baseline")
     if not skip_vae and vae_spatial_padding == "zero":
-        print("VAE spatial padding: zero (experimental boundary-flicker mitigation)")
+        print("VAE spatial padding: zero (boundary-flicker mitigation)")
     elif not skip_vae:
         print("VAE spatial padding: reflect")
     if upscale_spatial:
@@ -3197,7 +3214,7 @@ def generate_video(
             rescale_scale=rescale_scale if rescale_scale is not None else (0.0 if model_variant == "distilled" else 0.7),
             dtype=compute_dtype,
             tiling_config=vae_tiling_config,
-            auto_tiling=vae_auto_tiling,
+            auto_tiling=False,  # Already resolved by build_vae_tiling_config().
             profile_transformer_steps=active_profile_steps,
             profile_transformer_blocks=active_profile_blocks,
             audio_enabled=generate_audio,
@@ -3993,21 +4010,21 @@ def main():
     parser.add_argument(
         "--vae-decoder",
         choices=["simple", "native-conv3d"],
-        default="simple",
+        default="native-conv3d",
         help=(
-            "Video VAE decoder backend. simple is the current PyTorch-layout "
-            "slice-conv baseline; native-conv3d is an experimental MLX Conv3d "
-            "decoder for A/B testing."
+            "Video VAE decoder backend. native-conv3d is the default lower-memory "
+            "MLX Conv3d decoder; simple keeps the PyTorch-layout slice-conv baseline "
+            "for A/B testing."
         ),
     )
     parser.add_argument(
         "--vae-spatial-padding",
         choices=["reflect", "zero"],
-        default="reflect",
+        default="zero",
         help=(
-            "Spatial padding mode for VAE decoder convolutions. reflect matches the "
-            "released Lightricks decoder; zero is an experimental mitigation for "
-            "edge/background flicker."
+            "Spatial padding mode for VAE decoder convolutions. zero is the default "
+            "boundary-flicker mitigation; reflect keeps the released Lightricks "
+            "boundary behavior for A/B testing."
         ),
     )
     parser.add_argument(

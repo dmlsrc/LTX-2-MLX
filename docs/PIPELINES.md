@@ -168,7 +168,9 @@ python scripts/generate.py "Your prompt" \
 | `--output` | Output video path | outputs/output.mp4 |
 | `--weights` | Path to weights file | weights/ltx-2/ltx-2-19b-distilled.safetensors |
 | `--dtype` | Compute dtype: `bfloat16`, `float16`, or `float32` | bfloat16 |
-| `--vae-spatial-padding` | VAE decoder spatial padding: canonical `reflect` or opt-in `zero` boundary mitigation | reflect |
+| `--vae-decoder` | VAE decoder backend: `native-conv3d` or `simple` A/B baseline | native-conv3d |
+| `--vae-tiling` | VAE decode tiling policy: RAM-aware `auto`, `off`, or `custom` | auto |
+| `--vae-spatial-padding` | VAE decoder spatial padding: default `zero` boundary mitigation or `reflect` A/B baseline | zero |
 | `--model-variant` | `distilled` (fast) or `dev` (quality) | distilled |
 | `--spatial-upscaler-weights` | Path to spatial upscaler weights (for two-stage) | None |
 | `--temporal-upscaler-weights` | Path to temporal upscaler weights | None |
@@ -192,7 +194,7 @@ python scripts/generate.py "Your prompt" \
 - Scheduler/time/position math and tiled VAE blending keep FP32 where needed for stability.
 - Audio VAE decode and the plain vocoder follow the configured compute dtype.
 - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
-- The VAE decoder uses Lightricks-compatible reflect spatial padding by default. `--vae-spatial-padding zero` is non-canonical, but saved-latent A/B tests showed it can strongly reduce edge ghosting, background flicker, and boundary smearing without changing denoising.
+- The VAE decoder defaults to native Conv3d with zero spatial padding and RAM-aware auto tiling. `--vae-decoder simple` and `--vae-spatial-padding reflect` remain available for decode A/Bs against the earlier baseline.
 
 ## Frame Count
 

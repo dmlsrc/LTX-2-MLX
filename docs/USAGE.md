@@ -189,23 +189,23 @@ Precision exceptions are intentionally narrow:
 - Audio VAE decode and the plain vocoder follow `--dtype`.
 - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
 
-### VAE Spatial Padding
+### VAE Decode Defaults
 
-The decoder defaults to `--vae-spatial-padding reflect`, matching the released
-Lightricks VAE behavior. `--vae-spatial-padding zero` is an opt-in,
-non-canonical decode mode that changes only the VAE decoder's spatial
-convolution boundary condition:
+Video decode defaults to the native Conv3d VAE decoder with
+`--vae-spatial-padding zero` and `--vae-tiling auto`. That keeps the common
+command short while using the RAM-aware native tiling planner. Use
+`--vae-decoder simple` or `--vae-spatial-padding reflect` only when you want an
+A/B baseline against the older decode path:
 
 ```bash
 python scripts/generate.py "Your prompt" \
-    --vae-spatial-padding zero
+    --vae-decoder simple \
+    --vae-spatial-padding reflect
 ```
 
 Saved-latent A/B tests on motion-heavy bakery and talking-subject clips showed
 `zero` substantially reduced edge ghosting, background flicker, and boundary
-smearing versus `reflect`, with no meaningful decode-time cost. Keep `reflect`
-when you need closest parity with the released decoder; try `zero` when visual
-stability at frame boundaries matters more than strict canonical behavior.
+smearing versus `reflect`, with no meaningful decode-time cost.
 
 ### Low Memory Mode
 

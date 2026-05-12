@@ -1,10 +1,9 @@
 """Native MLX Conv3d video VAE decoder.
 
-This is an experimental alternative to :mod:`simple_decoder`.  The active
-project decoder stores PyTorch-layout Conv3d weights and emulates each 3D
-convolution with temporal slices of 2D convolutions.  This decoder stores the
-same weights in MLX Conv3d layout and runs the VAE in BFHWC/channel-last form.
-It is intended to be A/B tested with the existing tiled decode wrapper.
+The older :mod:`simple_decoder` stores PyTorch-layout Conv3d weights and
+emulates each 3D convolution with temporal slices of 2D convolutions. This
+decoder stores the same weights in MLX Conv3d layout and runs the VAE in
+BFHWC/channel-last form. It works with the existing tiled decode wrapper.
 """
 
 from __future__ import annotations
