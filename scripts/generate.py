@@ -1621,6 +1621,7 @@ def load_transformer(
     weights_cache_dir: str | None = None,
     transformer_block_resident_blocks: int = 0,
     transformer_block_compile: bool = False,
+    transformer_block_compile_group_size: int = 0,
 ) -> LTXModel:
     """Load transformer with weights.
 
@@ -1671,6 +1672,7 @@ def load_transformer(
                 resident_blocks=transformer_block_resident_blocks,
             )
             model.transformer_block_compile = transformer_block_compile
+            model.transformer_block_compile_group_size = transformer_block_compile_group_size
             layouts_loaded_from_cache = True
         elif weights_cache_mode != "off":
             load_transformer_weights_cached(
@@ -1761,7 +1763,6 @@ def load_transformer(
             "  Experimental video attention layout: "
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
-
     return model
 
 
@@ -1787,6 +1788,7 @@ def load_av_transformer(
     weights_cache_dir: str | None = None,
     transformer_block_resident_blocks: int = 0,
     transformer_block_compile: bool = False,
+    transformer_block_compile_group_size: int = 0,
 ) -> LTXAVModel:
     """Load AudioVideo transformer with weights.
 
@@ -1841,6 +1843,7 @@ def load_av_transformer(
                 resident_blocks=transformer_block_resident_blocks,
             )
             model.transformer_block_compile = transformer_block_compile
+            model.transformer_block_compile_group_size = transformer_block_compile_group_size
             layouts_loaded_from_cache = True
         elif weights_cache_mode != "off":
             load_transformer_weights_cached(
@@ -1931,7 +1934,6 @@ def load_av_transformer(
             "  Experimental video attention layout: "
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
-
     return model
 
 
@@ -2056,6 +2058,7 @@ def generate_video(
     mlx_cache_limit_gb: float | None = None,
     transformer_block_resident_blocks: int = 0,
     transformer_block_compile: bool = False,
+    transformer_block_compile_group_size: int = 0,
     # New parameters
     image_path: str = None,
     image_strength: float = 0.95,
@@ -2132,6 +2135,15 @@ def generate_video(
         raise ValueError("--transformer-block-resident-blocks does not support on-the-fly FF quantization yet")
     if transformer_block_compile and not transformer_block_resident_blocks:
         raise ValueError("--transformer-block-compile requires --transformer-block-resident-blocks")
+    if transformer_block_compile_group_size and not transformer_block_compile:
+        raise ValueError("--transformer-block-compile-group-size requires --transformer-block-compile")
+    if transformer_block_compile_group_size and not transformer_block_resident_blocks:
+        raise ValueError("--transformer-block-compile-group-size requires --transformer-block-resident-blocks")
+    if (
+        transformer_block_compile_group_size
+        and transformer_block_compile_group_size > transformer_block_resident_blocks
+    ):
+        raise ValueError("--transformer-block-compile-group-size cannot exceed --transformer-block-resident-blocks")
     if transformer_block_resident_blocks and weights_cache_mode == "off":
         weights_cache_mode = "auto"
     if mlx_cache_limit_gb is not None:
@@ -2219,6 +2231,7 @@ def generate_video(
                 "mlx_cache_limit_gb": mlx_cache_limit_gb,
                 "transformer_block_resident_blocks": transformer_block_resident_blocks,
                 "transformer_block_compile": transformer_block_compile,
+                "transformer_block_compile_group_size": transformer_block_compile_group_size,
                 "save_latents": save_latents,
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
@@ -2341,7 +2354,13 @@ def generate_video(
             f"({transformer_block_resident_blocks} resident blocks)"
         )
         if transformer_block_compile:
-            print("Transformer block compile: ENABLED (experimental resident-group mx.compile)")
+            if transformer_block_compile_group_size:
+                print(
+                    "Transformer block compile: ENABLED "
+                    f"(experimental mx.compile, {transformer_block_compile_group_size}-block groups)"
+                )
+            else:
+                print("Transformer block compile: ENABLED (experimental resident-group mx.compile)")
     if mlx_cache_limit_gb is not None:
         print(f"MLX cache limit: {mlx_cache_limit_gb:g} GB")
     if active_profile_steps:
@@ -2544,6 +2563,7 @@ def generate_video(
                 weights_cache_dir=weights_cache_dir,
                 transformer_block_resident_blocks=transformer_block_resident_blocks,
                 transformer_block_compile=transformer_block_compile,
+                transformer_block_compile_group_size=transformer_block_compile_group_size,
                 caption_channels=None if v2 else 3840,
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
@@ -2573,6 +2593,7 @@ def generate_video(
                 weights_cache_dir=weights_cache_dir,
                 transformer_block_resident_blocks=transformer_block_resident_blocks,
                 transformer_block_compile=transformer_block_compile,
+                transformer_block_compile_group_size=transformer_block_compile_group_size,
             )
 
             # Apply cross-attention scaling if specified (improves text conditioning)
@@ -3926,6 +3947,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--transformer-block-compile-group-size",
+        type=parse_non_negative_int,
+        default=0,
+        metavar="BLOCKS",
+        help=(
+            "Experimental: with --transformer-block-compile, compile/eval at most "
+            "this many resident blocks per command-buffer group. 0 uses the full "
+            "resident window."
+        ),
+    )
+    parser.add_argument(
         "--placeholder",
         action="store_true",
         help="Use placeholder inference (skip model loading)"
@@ -4414,6 +4446,7 @@ def main():
         mlx_cache_limit_gb=args.mlx_cache_limit_gb,
         transformer_block_resident_blocks=args.transformer_block_resident_blocks,
         transformer_block_compile=args.transformer_block_compile,
+        transformer_block_compile_group_size=args.transformer_block_compile_group_size,
         # New parameters
         image_path=args.image,
         image_strength=args.image_strength,

@@ -803,10 +803,22 @@ seed 124:
 - 1024x576x481 with the same r16 resident-group compile shape completed step 1
   at `6m23s`, then aborted with Metal `Impacting Interactivity`. The latent
   grid was `61x18x32`, or 4x the 512x288 spatial token count, and attention work
-  scales roughly quadratically with video tokens. For this size, r16 compiled
-  groups are too large for the watchdog. Prefer smaller resident windows (`r4`
+  scales roughly quadratically with video tokens. For this size, full r16
+  compiled groups are too large for the watchdog. Prefer keeping the resident
+  window large enough for weight-cache locality, but splitting compiled/eval
+  command-buffer groups with `--transformer-block-compile-group-size 4` or `8`.
+  If that still stalls the desktop, fall back to smaller resident windows (`r4`
   first, then `r1` if needed) and `--mlx-cache-limit-gb 0` for stability, or add
   denoise/modality tiling before treating this as a viable full-size mode.
+- 1024x576x481 with r16 resident blocks and `--transformer-block-compile-group-size 4`
+  completed without a watchdog abort. It remained visibly laggy but usable, and
+  the resulting video looked good enough to keep this as a known-good direct
+  1024 render recipe rather than a failed path. Timing was STEP1 `6m49s`,
+  denoise RUN `56m38.5s`, average `424.8s/it`, tiled native Conv3d VAE decode
+  `5m01.2s` (`temporal=12`, `spatial=1x3`, `36` tiles), audio decode `13.0s`,
+  output save `25.5s`, total `62m21.7s`. Treat direct 1024 as a premium
+  walk-away mode; try compile group `8` only as a speed/stability A/B, and
+  compile group `2` only if desktop interactivity matters more than runtime.
 - [MLX issue #3267](https://github.com/ml-explore/mlx/issues/3267) points at
   active-display / WindowServer contention as a trigger for the same Metal
   `Impacting Interactivity` failure, even when memory is not the limiting
@@ -814,8 +826,23 @@ seed 124:
   `MLX_MAX_OPS_PER_BUFFER` and `MLX_MAX_MB_PER_BUFFER`, with Metal defaults
   around `40` ops / `40 MB` on base/pro architectures. These can split command
   buffers between ops, but cannot split a single oversized op; treat them as a
-  watchdog-pressure experiment to combine with smaller resident windows, not as
-  a replacement for denoise/modality tiling at larger token counts.
+  watchdog-pressure experiment to combine with smaller compile groups or smaller
+  resident windows, not as a replacement for denoise/modality tiling at larger
+  token counts.
+- The SDPA-specific watchdog path is plausibly the same failure class discussed
+  in [MLX issue #3302](https://github.com/ml-explore/mlx/issues/3302) and the
+  closed chunked-SDPA PR #3307. Current MLX 0.31.2 does not expose
+  `MLX_SDPA_CHUNK_THRESHOLD` / `MLX_SDPA_CHUNK_SIZE`, and the PR's default
+  `65536` key threshold would not trigger for the 1024x576 LTX latent grid
+  (`35136` tokens). Local SDPA-query and FF-token chunking experiments matched
+  baseline math on tiny tests, but did not show a useful runtime win and added
+  more hot-path branches than they earned, so they were removed.
+- Added `--transformer-block-compile-group-size` as the cleaner watchdog lever
+  for cache-backed block streaming. It keeps the resident block window unchanged
+  for weight locality, but splits compiled/eval command-buffer groups into
+  smaller subgroups. Example: `--transformer-block-resident-blocks 16
+  --transformer-block-compile --transformer-block-compile-group-size 4` keeps
+  16 resident blocks hot while materializing four blocks at a time.
 - Tried packed attention layouts on the quiet r16 path. `self_qkv:pack` plus
   `to_out:pretranspose` reached stable `53s/it`; adding `kv:pack` also landed
   around `53s/it`. Both packing paths were removed because the measured speedup
@@ -1014,9 +1041,10 @@ Use a fixed command and change only one thing at a time.
 | `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | neutral vs project_out only | Same-math and safe for inference, but bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone. Keep as supported, not the recommended minimal setting. |
 | `--video-attn-layout to_out:pretranspose` | yes | medium | marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. Keep available, but FF `project_out` remains the main same-math win. |
 | `--mlx-cache-limit-gb 0` or `1` | no | low | no cost observed at 1GB | Same-math allocator-cache cap. `1` GB dropped bakery AV average process RAM from about 44GB to about 40GB with no observed time penalty. `0` returns freed buffers immediately and is worth trying for watchdog/cache pressure, but it will not make oversized compiled groups safe by itself. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
-| `MLX_MAX_OPS_PER_BUFFER=1 MLX_MAX_MB_PER_BUFFER=10` | no | low | unknown | Must be set before Python starts. Real MLX command-buffer split knobs; useful for watchdog-pressure A/B after a Metal `Impacting Interactivity` abort. They can split between ops, not inside one huge op, so pair with smaller resident windows or denoise/modality tiling for larger token grids. |
+| `MLX_MAX_OPS_PER_BUFFER=1 MLX_MAX_MB_PER_BUFFER=10` | no | low | unknown | Must be set before Python starts. Real MLX command-buffer split knobs; useful for watchdog-pressure A/B after a Metal `Impacting Interactivity` abort. They can split between ops, not inside one huge op, so pair with smaller compile groups, smaller resident windows, or denoise/modality tiling for larger token grids. |
 | `--transformer-block-resident-blocks` | yes | low | slower | Cache-backed block streaming cuts process RAM dramatically, e.g. r4 around 8GB average on the bakery smoke, but denoise slowed to about 70.5s/it. Use as a constrained-memory mode, not a fast path. |
-| `--transformer-block-compile` | yes | low to medium | mixed | Original per-resident-block `mx.compile(inputs=block)` improved r4 streaming denoise from `9m24s` to `9m01s`, about 67.6s/it, but later-step drift remained. Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. |
+| `--transformer-block-compile` | yes | low to medium | mixed | Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. Pair with compile group sizing for larger token grids. |
+| `--transformer-block-compile-group-size` | yes | low to medium | stabilizes larger shapes, adds overhead | Splits compiled/eval command-buffer groups while keeping the resident block window unchanged. At 1024x576x481, resident 16 with group 4 completed without watchdog abort but still had usable desktop lag and took about 424.8s/it. |
 | `--vae-decoder native-conv3d` | yes | medium | none for denoise | Decode A/B path validated in full generate with `--vae-tiling off`: bakery AV smoke total `8m07.3s`, denoise avg `53.4s/it`. Compare against `simple` on the same saved final latent; do not count this as a transformer speed win. Pair with `--mlx-cache-limit-gb` if allocator cache growth matters. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |

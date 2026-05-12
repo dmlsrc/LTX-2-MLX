@@ -569,6 +569,7 @@ class LTXModel(nn.Module):
         self.profile_transformer_blocks: Tuple[int, ...] = ()
         self.transformer_block_streamer = None
         self.transformer_block_compile = False
+        self.transformer_block_compile_group_size = 0
         object.__setattr__(self, "_compiled_transformer_block_groups", {})
         self._transformer_block_compile_disabled = False
         self.cross_attention_adaln = cross_attention_adaln
@@ -975,11 +976,13 @@ class LTXModel(nn.Module):
                 compiled_groups = {}
                 object.__setattr__(self, "_compiled_transformer_block_groups", compiled_groups)
 
+            compile_group_limit = self.transformer_block_compile_group_size or resident_blocks
+            compile_group_limit = max(1, min(compile_group_limit, resident_blocks))
             compiled_group_enabled = True
-            for group_start in range(0, total_blocks, resident_blocks):
-                group_size = min(resident_blocks, total_blocks - group_start)
-                for offset in range(group_size):
-                    block_idx = group_start + offset
+            for window_start in range(0, total_blocks, resident_blocks):
+                window_size = min(resident_blocks, total_blocks - window_start)
+                for offset in range(window_size):
+                    block_idx = window_start + offset
                     block_streamer.bind(
                         self.transformer_blocks[offset],
                         block_idx,
@@ -987,56 +990,62 @@ class LTXModel(nn.Module):
                     )
                     previous_slot_layers[offset] = block_idx
 
-                if compiled_group_enabled:
-                    group_callable = compiled_groups.get(group_size)
-                    if group_callable is None:
-                        group_callable = _compile_transformer_block_group(
-                            self.transformer_blocks[:group_size]
-                        )
-                        compiled_groups[group_size] = group_callable
+                for group_offset in range(0, window_size, compile_group_limit):
+                    group_size = min(compile_group_limit, window_size - group_offset)
+                    block_start = window_start + group_offset
+                    block_end = block_start + group_size - 1
+                    slot_blocks = self.transformer_blocks[
+                        group_offset : group_offset + group_size
+                    ]
 
-                    try:
-                        video_packed, audio_packed = group_callable(
-                            _pack_transformer_args(video_args),
-                            _pack_transformer_args(audio_args),
-                        )
-                        video_args = _unpack_transformer_args(video_packed)
-                        audio_args = _unpack_transformer_args(audio_packed)
-                    except (RuntimeError, TypeError, ValueError) as exc:
-                        compiled_group_enabled = False
-                        self._transformer_block_compile_disabled = True
-                        object.__setattr__(self, "_compiled_transformer_block_groups", {})
-                        print(
-                            "  WARNING: Transformer resident group compile failed; "
-                            f"falling back to eager streaming ({exc})"
-                        )
+                    if compiled_group_enabled:
+                        group_key = (group_offset, group_size)
+                        group_callable = compiled_groups.get(group_key)
+                        if group_callable is None:
+                            group_callable = _compile_transformer_block_group(slot_blocks)
+                            compiled_groups[group_key] = group_callable
 
-                if not compiled_group_enabled:
-                    for offset in range(group_size):
-                        block = self.transformer_blocks[offset]
-                        video_args, audio_args = block(
-                            video_args,
-                            audio_args,
-                            perturbations=perturbations,
-                            profile_events=None,
-                        )
+                        try:
+                            video_packed, audio_packed = group_callable(
+                                _pack_transformer_args(video_args),
+                                _pack_transformer_args(audio_args),
+                            )
+                            video_args = _unpack_transformer_args(video_packed)
+                            audio_args = _unpack_transformer_args(audio_packed)
+                        except (RuntimeError, TypeError, ValueError) as exc:
+                            compiled_group_enabled = False
+                            self._transformer_block_compile_disabled = True
+                            object.__setattr__(self, "_compiled_transformer_block_groups", {})
+                            print(
+                                "  WARNING: Transformer resident group compile failed; "
+                                f"falling back to eager streaming ({exc})"
+                            )
 
-                # Streaming can only evict/rebind a resident slot after the
-                # previous window's graph is materialized.
-                arrays = []
-                if video_args is not None:
-                    arrays.append(video_args.x)
-                if audio_args is not None:
-                    arrays.append(audio_args.x)
-                if arrays:
-                    mx.eval(*arrays)
-                if profile_events is not None:
-                    now = time.perf_counter()
-                    profile_events.append((
-                        f"blocks {group_start:02d}-{group_start + group_size - 1:02d}",
-                        now - profile_group_started_at,
-                    ))
-                    profile_group_started_at = now
+                    if not compiled_group_enabled:
+                        for block in slot_blocks:
+                            video_args, audio_args = block(
+                                video_args,
+                                audio_args,
+                                perturbations=perturbations,
+                                profile_events=None,
+                            )
+
+                    # Streaming can only evict/rebind a resident slot after the
+                    # previous subgroup's graph is materialized.
+                    arrays = []
+                    if video_args is not None:
+                        arrays.append(video_args.x)
+                    if audio_args is not None:
+                        arrays.append(audio_args.x)
+                    if arrays:
+                        mx.eval(*arrays)
+                    if profile_events is not None:
+                        now = time.perf_counter()
+                        profile_events.append((
+                            f"blocks {block_start:02d}-{block_end:02d}",
+                            now - profile_group_started_at,
+                        ))
+                        profile_group_started_at = now
 
             return video_args, audio_args
 
