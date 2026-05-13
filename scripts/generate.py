@@ -49,6 +49,8 @@ from LTX_2_MLX.components.perturbations import create_batched_stg_config
 from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
 from LTX_2_MLX.loader import (
     LoRAConfig,
+    TRANSFORMER_CACHE_QUANTIZE_MODES,
+    TRANSFORMER_CACHE_QUANTIZE_OFF,
     ensure_weight_family_caches,
     load_av_transformer_weights,
     load_transformer_weights,
@@ -1896,6 +1898,7 @@ def load_transformer(
     video_ff_layout_layers: tuple[int, ...] = (),
     video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
     video_attn_layout_layers: tuple[int, ...] = (),
+    transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     weights_cache_mode: str = "off",
     weights_cache_dir: str | None = None,
     transformer_block_resident_blocks: int = 0,
@@ -1948,10 +1951,26 @@ def load_transformer(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                transformer_cache_quantize=transformer_cache_quantize,
+                video_ff_quantize_specs=video_ff_quantize_specs,
+                video_ff_quantize_layers=video_ff_quantize_layers,
+                video_ff_quantize_group_size=video_ff_quantize_group_size,
+                video_ff_quantize_bits=video_ff_quantize_bits,
                 resident_blocks=transformer_block_resident_blocks,
             )
             model.transformer_block_compile = transformer_block_compile
             model.transformer_block_compile_group_size = transformer_block_compile_group_size
+            if (
+                video_ff_quantize_specs
+                and video_ff_quantize_layers
+                and tuple(video_ff_quantize_layers) != DEFAULT_TRANSFORMER_LAYOUT_LAYERS
+            ):
+                if transformer_block_compile:
+                    print(
+                        "  Cached streaming FF quantization: disabling resident-group "
+                        "compile for partial-layer quantization"
+                    )
+                model.transformer_block_compile = False
             layouts_loaded_from_cache = True
         elif weights_cache_mode != "off":
             load_transformer_weights_cached(
@@ -1964,19 +1983,31 @@ def load_transformer(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                transformer_cache_quantize=transformer_cache_quantize,
             )
             layouts_loaded_from_cache = True
         else:
             load_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
-    if video_ff_quantize_specs:
-        count = model.enable_video_ff_quantization(
-            quantization_specs=video_ff_quantize_specs,
-            group_size=video_ff_quantize_group_size,
-            bits=video_ff_quantize_bits,
-            layers=video_ff_quantize_layers,
+    if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
+        print(
+            "  Transformer cache quantization: "
+            f"{transformer_cache_quantize} (MLX-native heavy block linears)"
         )
+    if video_ff_quantize_specs:
+        if transformer_block_resident_blocks and model.transformer_block_streamer is not None:
+            quant_layers = video_ff_quantize_layers or tuple(range(num_layers))
+            count = len(quant_layers) * len(video_ff_quantize_specs)
+            quant_label = "Cached streaming video FF quantization"
+        else:
+            count = model.enable_video_ff_quantization(
+                quantization_specs=video_ff_quantize_specs,
+                group_size=video_ff_quantize_group_size,
+                bits=video_ff_quantize_bits,
+                layers=video_ff_quantize_layers,
+            )
+            quant_label = "Experimental video FF quantization"
         layer_str = (
             ",".join(str(layer) for layer in video_ff_quantize_layers)
             if video_ff_quantize_layers
@@ -1984,7 +2015,7 @@ def load_transformer(
         )
         spec_str = ",".join(f"{target}:{mode}" for target, mode in video_ff_quantize_specs)
         print(
-            "  Experimental video FF quantization: "
+            f"  {quant_label}: "
             f"{count} projections, specs={spec_str}, "
             f"group_size={video_ff_quantize_group_size or 'default'}, "
             f"bits={video_ff_quantize_bits or 'default'}, "
@@ -2044,6 +2075,7 @@ def load_av_transformer(
     video_ff_layout_layers: tuple[int, ...] = (),
     video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
     video_attn_layout_layers: tuple[int, ...] = (),
+    transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     caption_channels: int | None = 3840,
     cross_attention_adaln: bool = False,
     apply_gated_attention: bool = False,
@@ -2103,10 +2135,26 @@ def load_av_transformer(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                transformer_cache_quantize=transformer_cache_quantize,
+                video_ff_quantize_specs=video_ff_quantize_specs,
+                video_ff_quantize_layers=video_ff_quantize_layers,
+                video_ff_quantize_group_size=video_ff_quantize_group_size,
+                video_ff_quantize_bits=video_ff_quantize_bits,
                 resident_blocks=transformer_block_resident_blocks,
             )
             model.transformer_block_compile = transformer_block_compile
             model.transformer_block_compile_group_size = transformer_block_compile_group_size
+            if (
+                video_ff_quantize_specs
+                and video_ff_quantize_layers
+                and tuple(video_ff_quantize_layers) != DEFAULT_TRANSFORMER_LAYOUT_LAYERS
+            ):
+                if transformer_block_compile:
+                    print(
+                        "  Cached streaming FF quantization: disabling resident-group "
+                        "compile for partial-layer quantization"
+                    )
+                model.transformer_block_compile = False
             layouts_loaded_from_cache = True
         elif weights_cache_mode != "off":
             load_transformer_weights_cached(
@@ -2119,19 +2167,31 @@ def load_av_transformer(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                transformer_cache_quantize=transformer_cache_quantize,
             )
             layouts_loaded_from_cache = True
         else:
             load_av_transformer_weights(model, weights_path)
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
-    if video_ff_quantize_specs:
-        count = model.enable_video_ff_quantization(
-            quantization_specs=video_ff_quantize_specs,
-            group_size=video_ff_quantize_group_size,
-            bits=video_ff_quantize_bits,
-            layers=video_ff_quantize_layers,
+    if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
+        print(
+            "  Transformer cache quantization: "
+            f"{transformer_cache_quantize} (MLX-native heavy block linears)"
         )
+    if video_ff_quantize_specs:
+        if transformer_block_resident_blocks and model.transformer_block_streamer is not None:
+            quant_layers = video_ff_quantize_layers or tuple(range(num_layers))
+            count = len(quant_layers) * len(video_ff_quantize_specs)
+            quant_label = "Cached streaming video FF quantization"
+        else:
+            count = model.enable_video_ff_quantization(
+                quantization_specs=video_ff_quantize_specs,
+                group_size=video_ff_quantize_group_size,
+                bits=video_ff_quantize_bits,
+                layers=video_ff_quantize_layers,
+            )
+            quant_label = "Experimental video FF quantization"
         layer_str = (
             ",".join(str(layer) for layer in video_ff_quantize_layers)
             if video_ff_quantize_layers
@@ -2139,7 +2199,7 @@ def load_av_transformer(
         )
         spec_str = ",".join(f"{target}:{mode}" for target, mode in video_ff_quantize_specs)
         print(
-            "  Experimental video FF quantization: "
+            f"  {quant_label}: "
             f"{count} projections, specs={spec_str}, "
             f"group_size={video_ff_quantize_group_size or 'default'}, "
             f"bits={video_ff_quantize_bits or 'default'}, "
@@ -2308,6 +2368,7 @@ def generate_video(
     video_ff_layout_layers: tuple[int, ...] = (),
     video_attn_layout_specs: tuple[tuple[str, str], ...] = DEFAULT_VIDEO_ATTN_LAYOUT_SPECS,
     video_attn_layout_layers: tuple[int, ...] = (),
+    transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     weights_cache_mode: str = "auto",
     weights_cache_dir: str | None = None,
     mlx_cache_limit_gb: float | None = 1.0,
@@ -2435,6 +2496,31 @@ def generate_video(
         video_attn_layout_specs,
         video_attn_layout_layers,
     )
+    video_ff_quantize_layers = normalize_layout_layers(
+        video_ff_quantize_specs,
+        video_ff_quantize_layers,
+    )
+    if transformer_cache_quantize not in TRANSFORMER_CACHE_QUANTIZE_MODES:
+        raise ValueError(
+            f"--transformer-cache-quantize must be one of: "
+            f"{', '.join(TRANSFORMER_CACHE_QUANTIZE_MODES)}"
+        )
+    if (
+        transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF
+        and weights_cache_mode == "off"
+    ):
+        weights_cache_mode = "auto"
+    transformer_cache_quantize_layouts_disabled = False
+    if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
+        if video_ff_quantize_specs:
+            raise ValueError("--transformer-cache-quantize and --video-ff-quantize are separate experiments")
+        transformer_cache_quantize_layouts_disabled = bool(
+            video_ff_layout_specs or video_attn_layout_specs
+        )
+        video_ff_layout_specs = ()
+        video_ff_layout_layers = ()
+        video_attn_layout_specs = ()
+        video_attn_layout_layers = ()
 
     compute_dtype = parse_compute_dtype(dtype)
     requested_profile_steps = set(profile_transformer_steps or ())
@@ -2458,8 +2544,6 @@ def generate_video(
     )
     if video_ff_quantize_specs and video_ff_layout_specs:
         raise ValueError("--video-ff-quantize and --video-ff-layout should be tested separately")
-    if transformer_block_resident_blocks and video_ff_quantize_specs:
-        raise ValueError("--transformer-block-resident-blocks does not support on-the-fly FF quantization yet")
     if transformer_block_compile and not transformer_block_resident_blocks:
         raise ValueError("--transformer-block-compile requires --transformer-block-resident-blocks")
     if transformer_block_compile_group_size and not transformer_block_compile:
@@ -2565,6 +2649,8 @@ def generate_video(
                     for target, layout in video_attn_layout_specs
                 ],
                 "video_attn_layout_layers": list(video_attn_layout_layers),
+                "transformer_cache_quantize": transformer_cache_quantize,
+                "transformer_cache_quantize_layouts_disabled": transformer_cache_quantize_layouts_disabled,
                 "weights_cache_mode": weights_cache_mode,
                 "weights_cache_dir": weights_cache_dir,
                 "mlx_cache_limit_gb": mlx_cache_limit_gb,
@@ -2661,6 +2747,13 @@ def generate_video(
         print(f"Low memory mode: ENABLED (sequential CFG, aggressive eval)")
     if fast_mode:
         print(f"Fast mode: ENABLED (no intermediate evals)")
+    if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
+        print(
+            "Transformer cache quantization: ENABLED "
+            f"(mode={transformer_cache_quantize})"
+        )
+        if transformer_cache_quantize_layouts_disabled:
+            print("  Same-math transformer layouts disabled for quantized cache")
     if video_ff_quantize_specs:
         layer_str = (
             ",".join(str(layer) for layer in video_ff_quantize_layers)
@@ -2695,18 +2788,29 @@ def generate_video(
             "Weights cache: ENABLED "
             f"(mode={weights_cache_mode}, dir={cache_dir_str})"
         )
+    partial_cached_ff_quant = (
+        video_ff_quantize_specs
+        and transformer_block_resident_blocks
+        and video_ff_quantize_layers
+        and tuple(video_ff_quantize_layers) != DEFAULT_TRANSFORMER_LAYOUT_LAYERS
+    )
     if stream_transformer:
         group_desc = transformer_block_compile_group_size or transformer_block_resident_blocks
+        compile_desc = (
+            "compile disabled for partial FF quant"
+            if partial_cached_ff_quant
+            else f"compile, group {group_desc}"
+        )
         print(
             "Transformer streaming preset: ENABLED "
-            f"(r{transformer_block_resident_blocks}, compile, group {group_desc})"
+            f"(r{transformer_block_resident_blocks}, {compile_desc})"
         )
     if transformer_block_resident_blocks:
         print(
             "Transformer block streaming: ENABLED "
             f"({transformer_block_resident_blocks} resident blocks)"
         )
-        if transformer_block_compile:
+        if transformer_block_compile and not partial_cached_ff_quant:
             if transformer_block_compile_group_size:
                 print(
                     "Transformer block compile: ENABLED "
@@ -2922,6 +3026,7 @@ def generate_video(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                transformer_cache_quantize=transformer_cache_quantize,
                 weights_cache_mode=weights_cache_mode,
                 weights_cache_dir=weights_cache_dir,
                 transformer_block_resident_blocks=transformer_block_resident_blocks,
@@ -2952,6 +3057,7 @@ def generate_video(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                transformer_cache_quantize=transformer_cache_quantize,
                 weights_cache_mode=weights_cache_mode,
                 weights_cache_dir=weights_cache_dir,
                 transformer_block_resident_blocks=transformer_block_resident_blocks,
@@ -4633,6 +4739,18 @@ def main():
              "Leave unset to use MLX defaults for the selected mode."
     )
     parser.add_argument(
+        "--transformer-cache-quantize",
+        choices=TRANSFORMER_CACHE_QUANTIZE_MODES,
+        default=TRANSFORMER_CACHE_QUANTIZE_OFF,
+        help=(
+            "Build/load a quantized transformer block cache. "
+            "'mxfp8-blocks' mirrors the downloaded MXFP8 block32 policy in "
+            "MLX-native QuantizedLinear format; 'mxfp8-blocks-pretranspose' "
+            "packs weight.T and uses transpose=False quantized matmul. "
+            "Can run resident or with block streaming."
+        ),
+    )
+    parser.add_argument(
         "--video-ff-layout",
         type=parse_video_ff_layout_specs,
         default=DEFAULT_VIDEO_FF_LAYOUT_SPECS,
@@ -4957,6 +5075,7 @@ def main():
         video_ff_layout_layers=args.video_ff_layout_layers,
         video_attn_layout_specs=args.video_attn_layout,
         video_attn_layout_layers=args.video_attn_layout_layers,
+        transformer_cache_quantize=args.transformer_cache_quantize,
         weights_cache_mode=args.weights_cache,
         weights_cache_dir=args.weights_cache_dir,
         mlx_cache_limit_gb=args.mlx_cache_limit_gb,

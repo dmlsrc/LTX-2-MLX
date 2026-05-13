@@ -15,6 +15,15 @@ def gelu_approx(x: mx.array) -> mx.array:
     return nn.gelu_approx(x)
 
 
+def _empty_linear() -> nn.Linear:
+    """Create an update-ready Linear without allocating full random weights."""
+    linear = nn.Linear.__new__(nn.Linear)
+    nn.Module.__init__(linear)
+    linear.weight = mx.zeros((0, 0), dtype=mx.float32)
+    linear.bias = mx.zeros((0,), dtype=mx.float32)
+    return linear
+
+
 class GELUApprox(nn.Module):
     """Linear layer followed by GELU (tanh approximation)."""
 
@@ -45,6 +54,9 @@ class FeedForward(nn.Module):
         super().__init__()
         inner_dim = int(dim * mult)
 
+        self.dim = dim
+        self.dim_out = dim_out
+        self.inner_dim = inner_dim
         self.project_in = GELUApprox(dim, inner_dim)
         self.project_out = nn.Linear(inner_dim, dim_out)
         self._project_in_weight_t = None
@@ -132,6 +144,20 @@ class FeedForward(nn.Module):
                     del self.project_out.weight
             else:
                 raise ValueError(f"Unsupported FF layout spec: {target}:{layout}")
+
+    def restore_linear_projections(
+        self,
+        targets: tuple[str, ...] = ("project_in", "project_out"),
+    ) -> None:
+        """Restore projection modules after in-place quantization experiments."""
+        if "project_in" in targets:
+            self._project_in_weight_t = None
+            if not isinstance(self.project_in.proj, nn.Linear):
+                self.project_in.proj = _empty_linear()
+        if "project_out" in targets:
+            self._project_out_weight_t = None
+            if not isinstance(self.project_out, nn.Linear):
+                self.project_out = _empty_linear()
 
     def _quantized_linear_arrays(self, linear: nn.QuantizedLinear) -> list[mx.array]:
         arrays = [linear.weight, linear.scales]

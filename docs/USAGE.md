@@ -163,6 +163,27 @@ python scripts/generate.py "A cat walking through a garden" \
 - Fast generation (~2 minutes for 65 frames at 512×768)
 - Good quality for most use cases
 
+### Stage-2 Harness
+
+Use `scripts/stage2_harness.py` to A/B the full-resolution distilled stage-2
+path without rerunning prompt encoding or stage 1:
+
+```bash
+python scripts/stage2_harness.py \
+    --stage1-latents /path/to/exact_run.npz \
+    --embedding /path/to/exact_run_text.npz \
+    --seed 124 \
+    --generate-audio \
+    --stream-transformer \
+    --save-all-sidecars \
+    --output-prefix ltx_stage2_ab
+```
+
+The harness infers frame count and final resolution from
+`stage_1_video_latent`, loads adjacent run metadata when present, burns the
+stage-1 RNG draws by default for same-seed parity, then runs spatial upscale,
+stage-2 denoise, VAE/audio decode, and export.
+
 ### One-Stage Pipeline
 
 Full CFG control for maximum quality:
@@ -415,7 +436,8 @@ equivalent to passing:
 - Reduce resolution and frames
 - Use `--profile-transformer-steps 1,2,8` and optionally `--profile-transformer-blocks 40,47` when you need cold/warm transformer timing breakdowns
 - The default `--mlx-cache-limit-gb 1` caps MLX's in-memory allocator cache. Use `--mlx-cache-limit-gb 0` only when testing stricter cache pressure.
-- For experimental same-settings denoise A/Bs, try `--video-ff-quantize project_out:mxfp8` to replace video FF projections with MLX weight-only quantized linears after loading stock BF16 weights. Use `project_in:mxfp8` to test the FF input projection by itself, or `project_in:mxfp8,project_out:mxfp8` to test both. Add `--video-ff-quantize-layers 40-47` to test only selected 0-based layers. This is non-canonical and needs visual/audio validation.
+- For experimental same-settings denoise A/Bs, try `--video-ff-quantize project_out:mxfp8` to replace video FF projections with MLX weight-only quantized linears. With `--stream-transformer`, selected FF tensors are quantized into the converted transformer cache and streamed as quantized weights; all-layer streaming quant can keep resident-group compile, while partial-layer streaming quant disables compile. Use `project_in:mxfp8` to test the FF input projection by itself, or `project_in:mxfp8,project_out:mxfp8` to test both. Add `--video-ff-quantize-layers 40-47` to test only selected 0-based layers. This is non-canonical and needs visual/audio validation.
+- For a broader non-parity quantized-cache experiment, use `--stream-transformer --transformer-cache-quantize mxfp8-blocks`. This mirrors the downloaded MXFP8 block32 transformer policy in MLX-native cache form by quantizing heavy attention/FF block linears while leaving biases, norms, AdaLN tables, connector, patch/output projections, VAE, audio VAE, and vocoder in their normal precision. It disables same-math layout caches because the relevant weights are replaced by quantized linears. To test whether the lost pretranspose layout is the bottleneck, use `--transformer-cache-quantize mxfp8-blocks-pretranspose`; that packs `weight.T` and calls quantized matmul with `transpose=False`.
 - Same-math FF and attention pretranspose layouts are enabled by default. Use `--video-ff-layout off --video-attn-layout off` when you need a baseline A/B against untransposed stock layout.
 - For same-settings denoise-speed research, see [Performance Optimization Notes](PERFORMANCE.md)
 

@@ -1239,6 +1239,277 @@ class OneStagePipeline:
 
         return video, audio_waveform
 
+    def generate_distilled_stage2_from_latents(
+        self,
+        stage_1_video_latent: mx.array,
+        positive_encoding: mx.array,
+        config: OneStageCFGConfig,
+        spatial_upscaler,
+        stage_1_audio_latent: Optional[mx.array] = None,
+        images: Optional[List[ImageCondition]] = None,
+        callback: Optional[Callable[[int, int], None]] = None,
+        stage_callback: Optional[Callable[[str, int, int], None]] = None,
+        progress_message: Optional[Callable[[str], None]] = None,
+        positive_audio_encoding: Optional[mx.array] = None,
+        latent_save_path: Optional[str] = None,
+        burn_stage1_rng: bool = True,
+    ) -> Tuple[mx.array, Optional[mx.array]]:
+        """
+        Resume the distilled two-stage pipeline from saved stage-1 latents.
+
+        The input latents must be the unpatchified stage-1 latents saved by
+        `_save_distilled_two_stage_latents`. By default the method burns the
+        stage-1 video/audio RNG draws before stage-2 noising so a same-seed
+        harness run can match a full two-stage run's stage-2 noise stream.
+        """
+        call_start = time.perf_counter()
+        self.last_timing_sections = []
+        images = images or []
+
+        if config.height % 64 != 0 or config.width % 64 != 0:
+            raise ValueError(
+                f"Distilled stage-2 harness requires resolution divisible by 64, "
+                f"got {config.height}x{config.width}."
+            )
+        if self.video_encoder is None:
+            raise ValueError("Video encoder required for distilled stage-2 upscaling.")
+        if self.video_decoder is None:
+            raise ValueError("Video decoder required for VAE decode.")
+        if spatial_upscaler is None:
+            raise ValueError("Spatial upscaler required for distilled stage-2 generation.")
+        if stage_1_video_latent.ndim != 5:
+            raise ValueError(
+                "stage_1_video_latent must be a 5D unpatchified latent "
+                f"(B,C,F,H,W), got shape {stage_1_video_latent.shape}."
+            )
+
+        stage_1_frames = (stage_1_video_latent.shape[2] - 1) * 8 + 1
+        expected_height = stage_1_video_latent.shape[3] * 64
+        expected_width = stage_1_video_latent.shape[4] * 64
+        if config.num_frames != stage_1_frames:
+            raise ValueError(
+                f"Config frames ({config.num_frames}) do not match stage-1 "
+                f"latent frames ({stage_1_frames})."
+            )
+        if config.height != expected_height or config.width != expected_width:
+            raise ValueError(
+                f"Config resolution ({config.height}x{config.width}) does not "
+                f"match stage-1 latent-derived resolution "
+                f"({expected_height}x{expected_width})."
+            )
+
+        internal_audio_active = self.is_av_model and (
+            config.use_internal_audio_branch or config.audio_enabled
+        )
+        if internal_audio_active:
+            if positive_audio_encoding is None:
+                raise ValueError(
+                    "Positive audio encoding required for AudioVideo distilled stage-2 generation."
+                )
+            if stage_1_audio_latent is None:
+                raise ValueError(
+                    "stage_1_audio_latent required when the AV audio branch is active."
+                )
+        if config.audio_enabled and (self.audio_decoder is None or self.vocoder is None):
+            raise ValueError("Audio decoder and vocoder required when audio_enabled is True.")
+
+        mx.random.seed(config.seed)
+        if burn_stage1_rng:
+            burn_arrays = [
+                mx.random.normal(
+                    shape=stage_1_video_latent.shape,
+                    dtype=config.dtype,
+                )
+            ]
+            if internal_audio_active and stage_1_audio_latent is not None:
+                burn_arrays.append(
+                    mx.random.normal(
+                        shape=stage_1_audio_latent.shape,
+                        dtype=config.dtype,
+                    )
+                )
+            mx.eval(*burn_arrays)
+            del burn_arrays
+
+        noiser = GaussianNoiser()
+        stepper = self.diffusion_step
+        stage_2_sigmas = mx.array(STAGE_2_DISTILLED_SIGMA_VALUES)
+        total_steps = len(stage_2_sigmas) - 1
+        if callback:
+            callback(0, total_steps)
+
+        def emit_progress_message(message: str) -> None:
+            if progress_message is not None:
+                progress_message(message)
+            else:
+                print(message)
+
+        stage_1_video_latent = stage_1_video_latent.astype(config.dtype)
+        stage_1_audio_latent_for_save = None
+        if stage_1_audio_latent is not None:
+            stage_1_audio_latent = stage_1_audio_latent.astype(config.dtype)
+            stage_1_audio_latent_for_save = (
+                stage_1_audio_latent if latent_save_path is not None else None
+            )
+        stage_1_video_latent_for_save = (
+            stage_1_video_latent if latent_save_path is not None else None
+        )
+
+        upscale_start = time.perf_counter()
+        emit_progress_message("  Upsampling saved stage-1 latent 2x with spatial upscaler...")
+        latent_unnorm = self.video_encoder.per_channel_statistics.un_normalize(
+            stage_1_video_latent
+        )
+        upscaled_unnorm = spatial_upscaler(latent_unnorm)
+        mx.eval(upscaled_unnorm)
+        upscaled_video_latent = self.video_encoder.per_channel_statistics.normalize(
+            upscaled_unnorm
+        )
+        mx.eval(upscaled_video_latent)
+        del latent_unnorm, upscaled_unnorm
+        if stage_1_video_latent_for_save is None:
+            del stage_1_video_latent
+        gc.collect()
+        mx.clear_cache()
+        upscale_elapsed = time.perf_counter() - upscale_start
+
+        stage_2_pixel_shape = VideoPixelShape(
+            batch=1,
+            frames=config.num_frames,
+            height=config.height,
+            width=config.width,
+            fps=config.fps,
+        )
+        stage_2_latent_shape = VideoLatentShape.from_pixel_shape(
+            stage_2_pixel_shape, latent_channels=128
+        )
+        video_tools_2 = self._create_video_tools(stage_2_latent_shape, config.fps)
+        conditionings_2 = create_image_conditionings(
+            images,
+            self.video_encoder,
+            config.height,
+            config.width,
+            config.dtype,
+        )
+        video_state_2 = video_tools_2.create_initial_state(
+            dtype=config.dtype,
+            initial_latent=upscaled_video_latent,
+        )
+        video_state_2 = apply_conditionings(video_state_2, conditionings_2, video_tools_2)
+        video_state_2 = noiser(video_state_2, noise_scale=float(stage_2_sigmas[0]))
+
+        audio_state_2 = None
+        audio_tools_2 = None
+        if internal_audio_active:
+            audio_shape_2 = AudioLatentShape.from_video_pixel_shape(
+                stage_2_pixel_shape,
+                channels=config.audio_vae_channels,
+                mel_bins=config.audio_mel_bins,
+                sample_rate=config.audio_sample_rate,
+                hop_length=config.audio_hop_length,
+                audio_latent_downsample_factor=config.audio_downsample_factor,
+            )
+            audio_tools_2 = self._create_audio_tools(audio_shape_2)
+            audio_state_2 = audio_tools_2.create_initial_state(
+                dtype=config.dtype,
+                initial_latent=stage_1_audio_latent,
+            )
+            audio_state_2 = noiser(audio_state_2, noise_scale=float(stage_2_sigmas[0]))
+
+        emit_progress_message(
+            f"  Distilled stage 2: {len(stage_2_sigmas) - 1} steps at "
+            f"{config.height}x{config.width}"
+        )
+        if stage_callback:
+            stage_callback("stage_2", 0, len(stage_2_sigmas) - 1)
+
+        def stage_2_callback(step: int, _total: int):
+            if stage_callback:
+                stage_callback("stage_2", step, _total)
+            if callback:
+                callback(step, total_steps)
+
+        stage_2_start = time.perf_counter()
+        video_state_2, audio_state_2 = self._denoise_loop_simple_av(
+            video_state=video_state_2,
+            audio_state=audio_state_2,
+            sigmas=stage_2_sigmas,
+            video_context=positive_encoding,
+            audio_context=positive_audio_encoding,
+            stepper=stepper,
+            callback=stage_2_callback,
+        )
+        stage_2_elapsed = time.perf_counter() - stage_2_start
+        post_denoise_start = time.perf_counter()
+
+        video_state_2 = video_tools_2.clear_conditioning(video_state_2)
+        video_state_2 = video_tools_2.unpatchify(video_state_2)
+        final_video_latent = video_state_2.latent
+
+        final_audio_latent = None
+        if config.audio_enabled and audio_state_2 is not None and audio_tools_2 is not None:
+            audio_state_2 = audio_tools_2.clear_conditioning(audio_state_2)
+            audio_state_2 = audio_tools_2.unpatchify(audio_state_2)
+            final_audio_latent = audio_state_2.latent
+
+        del self.transformer
+        self.transformer = None
+        gc.collect()
+        mx.clear_cache()
+
+        if latent_save_path is not None:
+            self._save_distilled_two_stage_latents(
+                latent_save_path,
+                stage_1_video_latent=stage_1_video_latent_for_save,
+                stage_2_video_latent=final_video_latent,
+                stage_1_audio_latent=stage_1_audio_latent_for_save,
+                stage_2_audio_latent=final_audio_latent,
+            )
+            del stage_1_video_latent_for_save, stage_1_audio_latent_for_save
+            gc.collect()
+            mx.clear_cache()
+
+        effective_tiling = config._get_tiling_config()
+        post_denoise_elapsed = time.perf_counter() - post_denoise_start
+        decoder_name = self.video_decoder.__class__.__name__
+        tiling_desc = "tiled" if effective_tiling else "not tiled"
+        print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+        decode_start = time.perf_counter()
+        if effective_tiling:
+            print("  Using tiled VAE decoding (preventing GPU watchdog timeout)")
+            video = None
+            for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                mx.eval(video)
+                del chunk
+                gc.collect()
+                mx.clear_cache()
+        else:
+            video = decode_latent(final_video_latent, self.video_decoder)
+        mx.eval(video)
+        decode_elapsed = time.perf_counter() - decode_start
+        print(f"  VAE decode complete in {decode_elapsed:.1f}s")
+
+        audio_waveform = None
+        if final_audio_latent is not None:
+            audio_decode_start = time.perf_counter()
+            audio_waveform = self._decode_audio(final_audio_latent)
+            audio_decode_elapsed = time.perf_counter() - audio_decode_start
+        else:
+            audio_decode_elapsed = 0.0
+
+        self.last_timing_sections = [
+            ("pipeline setup", upscale_start - call_start),
+            ("spatial upscale", upscale_elapsed),
+            ("distilled stage 2 denoise", stage_2_elapsed),
+            ("post-denoise prep", post_denoise_elapsed),
+            ("vae decode", decode_elapsed),
+        ]
+        if audio_decode_elapsed:
+            self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
+
+        return video, audio_waveform
+
     def __call__(
         self,
         positive_encoding: mx.array,

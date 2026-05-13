@@ -188,6 +188,53 @@ and reuse it. They also note that `fast.metal_kernel` defaults to
 For transformer hot paths, any custom kernel must account for layout and avoid
 accidental copies.
 
+### SDPA kernel tile floor on M1 Max
+
+`mx.fast.scaled_dot_product_attention` dispatches to one of two Metal kernel
+paths based on the sequence length `T`:
+
+- `sdpa_full` — used when `T > 8`; covers all LTX latent grids.
+- `sdpa_vector_2pass` — used when `T ≤ 8`; not relevant to LTX.
+
+For `sdpa_full` on a non-NAX chip (M1 and M2 families,
+`applegpu_g13s/g13g/g14s/g14g`), the tile sizes at `head_dim = 128` are
+hardcoded in `mlx/backend/metal/scaled_dot_product_attention.cpp`:
+
+```
+bq = 32, bk = 16   # non-NAX, head_dim=128
+```
+
+For NAX-capable chips (M3 and later, `applegpu_g15s/g15g/g15p`):
+
+```
+bq = 64, bk = 32   # NAX
+```
+
+There is no env var or runtime flag to change tile sizes for `sdpa_full` in
+MLX 0.31.2. MLX PR #3455 adds `MLX_SDPA_BLOCKS`, but that env var only
+controls the `sdpa_vector_2pass` kernel (`T ≤ 8`) and has no effect on
+`sdpa_full`. It is therefore irrelevant to any LTX denoise step.
+
+At 1024×576×481, the video token count is `18 × 32 × 61 = 35,136` before audio
+tokens. At 512×288 the same model runs at about `55s/it`. At 1024×576 the token
+count is 4× larger; the observed `~425s/it` step time confirms that attention
+scaling dominates and there is no software knob to recover the 4× token overhead
+on this hardware.
+
+**Implications:**
+
+- On M1 Max, `sdpa_full` is at the hardware tile floor for `head_dim = 128`.
+- Upgrading to M3+ (NAX) would double both tile dimensions and is the most
+  direct path to faster SDPA at this resolution.
+- A custom Metal kernel via `mx.fast.metal_kernel` could in principle implement
+  a larger tile, but writing and validating a correct SDPA replacement is a
+  significant engineering effort.
+- Python-level chunked or tiled SDPA does not change the Metal tile width;
+  prior experiments showed no runtime win at 1024×576 token counts.
+
+Treat stage-2 denoise at 1024×576 on M1 Max as an optimization floor within
+the current MLX 0.31.2 release.
+
 ### MLX 0.31.2 primitive scan
 
 The local `mlx-main/docs/src/python` API source and the installed MLX 0.31.2
@@ -492,11 +539,13 @@ local experiment is weight-only `nn.QuantizedLinear` on video FF projections:
 --video-ff-quantize project_out:mxfp8
 ```
 
-The flag keeps the stock checkpoint path. It loads normal BF16 weights first,
-then replaces selected video transformer block FF projections with in-memory
-MLX `QuantizedLinear` layers. It does not quantize audio FF layers. If the mode
-is omitted for a target, it defaults to `mxfp8`; the public API is
-`--video-ff-quantize target:mode[,target:mode]`.
+The flag keeps the stock checkpoint path. For normal non-streaming loads it
+loads BF16 weights first, then replaces selected video transformer block FF
+projections with in-memory MLX `QuantizedLinear` layers. For block streaming it
+builds a separate cache artifact with the selected FF tensors already quantized
+so resident blocks can stream quantized weights directly. It does not quantize
+audio FF layers. If the mode is omitted for a target, it defaults to `mxfp8`;
+the public API is `--video-ff-quantize target:mode[,target:mode]`.
 
 Local `project_out` layer-range results on the fixed 352x192, 15s, 8-step AV
 kitten smoke with cached text conditioning, BF16 compute, low-memory mode, and
@@ -558,6 +607,34 @@ Stronger compression modes can be tested explicitly:
 ```bash
 --video-ff-quantize project_out:affine
 ```
+
+The broader Comfy-style MXFP8 policy is exposed as a separate cache mode:
+
+```bash
+--stream-transformer \
+--transformer-cache-quantize mxfp8-blocks
+```
+
+This does not consume Comfy checkpoint tensors directly. It rebuilds the local
+converted transformer cache from the stock BF16 checkpoint and stores heavy
+block linears as MLX-native `QuantizedLinear` tensors. The policy mirrors the
+downloaded `mxfp8_block32` transformer split: attention Q/K/V/out/gate and
+video/audio FF linears are quantized, while biases, Q/K norm weights, AdaLN
+tables, connector weights, patch/output projections, VAE, audio VAE, and
+vocoder remain full precision. Same-math FF/attention layout caches are disabled
+for this mode because those weights are replaced by quantized linears.
+
+To test whether the quant path mostly lost the same-math pretranspose win, use:
+
+```bash
+--stream-transformer \
+--transformer-cache-quantize mxfp8-blocks-pretranspose
+```
+
+This packs `weight.T` and uses `mx.quantized_matmul(..., transpose=False)`.
+It is a deliberately separate A/B mode because the quantization groups are now
+formed along the transposed matrix axis, so quality and error distribution can
+move relative to the plain `mxfp8-blocks` cache.
 
 Risks:
 
@@ -908,7 +985,39 @@ denoise optimization. It may still help:
 Keep this separate from the main denoise hot path unless profiling points at a
 real Python loop.
 
-### 14. Add a fused split-RoPE kernel
+### 14. Transformer cache quantize (`mxfp8-blocks`) at 1024×576
+
+Status: tested at 1024×576×481, no net speed win over the pretranspose-layout
+path; auto-disables same-math layouts.
+
+`--transformer-cache-quantize mxfp8-blocks` quantizes KV cache residual tensors
+to mxfp8 after each block using block-granularity scaling. When this mode is
+active the runtime sets `transformer_cache_quantize_layouts_disabled: true`
+automatically, skipping the pretranspose FF and attention layouts because the
+quantized cache already changes the in-memory layout contract.
+
+Stage-2-only result at 1024×576×481 frames, full-resident (no streaming),
+seed 124, distilled 3-step stage-2 denoise:
+
+| Mode | Stage-2 denoise | Avg per step |
+| --- | ---: | ---: |
+| `mxfp8-blocks` (no layouts) | `1380.8s` | `460s/it` |
+
+The existing `--stream-transformer` preset at the same resolution (r16,
+compile, group-4, with pretranspose layouts) completed at about `424.8s/it`.
+The mxfp8-blocks full-resident path is slower than the streaming pretranspose
+path, not faster.
+
+`mxfp8-blocks-pretranspose` (a separate cache mode that packs `weight.T` before
+quantizing, so `mx.quantized_matmul` receives a pre-transposed matrix) was also
+tested. That result matched `mxfp8-blocks`-only speed: the layout benefit does
+not stack on top of a quantized cache at this resolution.
+
+Conclusion: `mxfp8-blocks` does not improve denoise throughput at 1024×576 on
+M1 Max under MLX 0.31.2. Keep the flag as a memory-pressure and hardware
+experiment, but do not promote it as a speed preset.
+
+### 15. Add a fused split-RoPE kernel
 
 Status: only consider after RoPE precompute/profiling.
 
@@ -920,7 +1029,7 @@ Before writing a custom kernel, test whether `mx.fast.rope` can represent the
 needed LTX-2.3 SPLIT 3D RoPE exactly. If it cannot, a custom Metal kernel should
 be built once and should avoid hidden row-contiguity copies.
 
-### 15. Distributed tensor parallelism
+### 16. Distributed tensor parallelism
 
 Status: separate project, not a local optimization.
 
@@ -935,7 +1044,7 @@ require a distributed launch workflow, sharded loader/weights, communication
 benchmarking, and quality/performance validation. Track it separately if the
 project ever targets multi-Mac inference.
 
-### 16. Defer AV text encoder load until after Gemma
+### 17. Defer AV text encoder load until after Gemma
 
 Status: implemented for prompt-encode peak memory.
 
@@ -1105,17 +1214,23 @@ Use a fixed command and change only one thing at a time.
 | Fast GELU approximation | no | low | unlikely | FFN sub-profile showed GELU at about 0.7% of a clean block; skip unless future profiles differ. |
 | Historical compile experiments | yes | medium to high | none observed | Full transformer and video FF subpath compile were removed from the CLI after bakery AV smokes tied baseline speed while adding complexity and memory risk. |
 | `mx.qqmm` FF linears | no | medium to high | blocked locally | Current Metal runtime throws `[QQMatmul] NYI for the general case` on LTX FFN-shaped tests. |
-| `--video-ff-quantize` | yes | medium | useful in selected ranges | `project_out:mxfp8` layers 32-47 improved 352x192 15s AV denoise from about 24.4s/it to 22.1s/it with slight visual differences. Layers 0-23 and 24-47 were both visibly different; all-layer `mxfp8` is much faster but non-parity. All-layer `mxfp4` and `nvfp4` were slower than `mxfp8` on the bakery smoke, so keep `mxfp8` as the runtime-quant candidate for now. `project_in:mxfp8` was slower than BF16 and hurt identity stability. Official NVFP4 checkpoint support remains a separate loading/compatibility experiment. |
+| `--video-ff-quantize` | yes | medium | useful in selected ranges | `project_out:mxfp8` layers 32-47 improved 352x192 15s AV denoise from about 24.4s/it to 22.1s/it with slight visual differences. Layers 0-23 and 24-47 were both visibly different; all-layer `mxfp8` is much faster but non-parity. With block streaming, quantized FF tensors are now stored in the converted cache and can keep resident-group compile for all-layer quantization; partial-layer streaming quant disables compile to avoid resident-slot type changes. All-layer `mxfp4` and `nvfp4` were slower than `mxfp8` on the bakery smoke, so keep `mxfp8` as the runtime-quant candidate for now. `project_in:mxfp8` was slower than BF16 and hurt identity stability. Official NVFP4 checkpoint support remains a separate loading/compatibility experiment. |
+| `--transformer-cache-quantize mxfp8-blocks` | yes | medium to high | new non-parity cache experiment | Mirrors the downloaded Comfy MXFP8 block32 transformer policy in MLX-native cache form: quantize heavy attention and FF block linears, keep biases/norms/AdaLN/glue full precision, and require block streaming. This disables same-math layouts for the quantized weights and should be judged as a fast/draft-quality mode, not parity. |
+| `--transformer-cache-quantize mxfp8-blocks-pretranspose` | yes | medium to high | new A/B mode | Same target set as `mxfp8-blocks`, but packs `weight.T` and calls quantized matmul with `transpose=False` to probe whether the plain quant path is losing the layout win. It changes quantization grouping orientation, so compare output quality separately. |
 | `--video-ff-layout project_out:pretranspose` | yes | medium | default same-math win | Replacement-layout all-layer bakery AV smoke improved from roughly 77s/it BF16 baseline to about 55s/it, stable around 44GB process memory. Original duplicate-cache implementation was slower and more memory hungry. |
 | `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | yes | medium | default | Same-math and safe for inference. Bakery smoke showed about the same memory and about the same 55s/it as `project_out` alone, so it is included in the default layout stack for simplicity. |
 | `--video-attn-layout to_out:pretranspose` | yes | medium | default marginal positive | Combined with `project_out:pretranspose`, all-layer bakery AV smoke improved slightly to about 54s/it with the same steady memory. |
 | `--mlx-cache-limit-gb 0` or `1` | no | low | default 1GB | Same-math allocator-cache cap. `1` GB dropped bakery AV average process RAM from about 44GB to about 40GB with no observed time penalty. `0` returns freed buffers immediately and is worth trying for watchdog/cache pressure, but it will not make oversized compiled groups safe by itself. Keep separate from `--weights-cache`, which is an on-disk converted-weight cache. |
 | `MLX_MAX_OPS_PER_BUFFER=1 MLX_MAX_MB_PER_BUFFER=10` | no | low | unknown | Must be set before Python starts. Real MLX command-buffer split knobs; useful for watchdog-pressure A/B after a Metal `Impacting Interactivity` abort. They can split between ops, not inside one huge op, so pair with smaller compile groups, smaller resident windows, or denoise/modality tiling for larger token grids. |
 | `--stream-transformer` | yes | low to medium | constrained-memory preset | Expands to r16 resident blocks, resident-group compile, and 4-block compile groups. This is the preferred user-facing switch before reaching for the lower-level block streaming flags. |
+| Stage-2 SVD/residual cache experiment | no | medium to high | removed | Removed wholesale after local A/Bs showed the quality/speed tradeoff was upside down. Broad block-window probes were fast but visibly distorted: `8-39` plus final-step reuse produced video relative MAE around 0.46, and `16-31` with the final step exact still produced foreground noise with video relative MAE around 0.26. The narrow `24-27` probe saved only about 15s on stage 2 while still showing moving-foreground noise and video relative MAE around 0.18. Stage-2 full-resolution refinement is too sensitive for this hidden-residual reuse path; keep it exact. |
 | `--transformer-block-resident-blocks` | yes | low | slower | Cache-backed block streaming cuts process RAM dramatically, e.g. r4 around 8GB average on the bakery smoke, but denoise slowed to about 70.5s/it. Use as a constrained-memory mode, not a fast path. |
 | `--transformer-block-compile` | yes | low to medium | mixed | Resident-group compile r8 without `--low-memory` completed at about 61.2s/it after one prior Metal watchdog abort, so it is promising but cache/watchdog-sensitive. Pair with compile group sizing for larger token grids. |
 | `--transformer-block-compile-group-size` | yes | low to medium | stabilizes larger shapes, adds overhead | Splits compiled/eval command-buffer groups while keeping the resident block window unchanged. At 1024x576x481, resident 16 with group 4 completed without watchdog abort but still had usable desktop lag and took about 424.8s/it. |
 | `--vae-decoder native-conv3d` | yes | medium | none for denoise | Default decode path. Validated in full generate with `--vae-tiling off`: bakery AV smoke total `8m07.3s`, denoise avg `53.4s/it`. Compare against `--vae-decoder simple` on the same saved final latent; do not count this as a transformer speed win. Pair with `--mlx-cache-limit-gb` if allocator cache growth matters. |
+| `--transformer-cache-quantize mxfp8-blocks` | yes | medium | none observed at 1024×576 | Full-resident test at 1024×576×481 stage 2: `460s/it`. Auto-disables same-math layouts. Slower than `--stream-transformer` pretranspose path (`~425s/it`). Keep as memory/hardware experiment only. |
+| `--transformer-cache-quantize mxfp8-blocks-pretranspose` | yes | medium | none observed at 1024×576 | Packs `weight.T` before quantizing. Tested alongside `mxfp8-blocks`; matched its speed — the layout gain does not stack on a quantized cache at this resolution. |
+| `MLX_SDPA_BLOCKS` (MLX PR #3455) | no | none | inapplicable | Controls `sdpa_vector_2pass` (T≤8) only. LTX uses `sdpa_full` (T=35,136 tokens at 1024×576). No effect on any LTX denoise step. |
 | Weight-only quantized transformer | yes | medium | unknown | Broader quantization than project_out only; separate quality/checkpoint tradeoff. |
 | `mx.block_masked_mm` | no | high | unknown | Only relevant if we introduce structured block sparsity or pruning. |
 | `mx.gather_mm` / `mx.gather_qmm` | no | high | unknown | Relevant to MoE/routing or selected batched matrices, not current dense LTX. |
