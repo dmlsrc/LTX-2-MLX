@@ -58,9 +58,7 @@ def to_velocity(
     sample_f32 = sample.astype(mx.float32)
     denoised_f32 = denoised_sample.astype(mx.float32)
 
-    velocity = (sample_f32 - denoised_f32) / sigma
-
-    return velocity.astype(sample.dtype)
+    return (sample_f32 - denoised_f32) / sigma
 
 
 def to_denoised(

@@ -89,6 +89,22 @@ def apply_interleaved_rotary_emb(
     return input_tensor * cos_freqs + input_tensor_rot * sin_freqs
 
 
+@mx.compile
+def _apply_split_rope_4d(
+    x: mx.array,
+    cos_freqs: mx.array,
+    sin_freqs: mx.array,
+) -> mx.array:
+    """Compiled split RoPE kernel: x is (B, H, T, D), cos/sin are (B, H, T, D//2)."""
+    half = x.shape[-1] // 2
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    return mx.concatenate(
+        [x1 * cos_freqs - x2 * sin_freqs, x1 * sin_freqs + x2 * cos_freqs],
+        axis=-1,
+    )
+
+
 def apply_split_rotary_emb(
     input_tensor: mx.array,
     cos_freqs: mx.array,
@@ -100,46 +116,23 @@ def apply_split_rotary_emb(
     The split format divides the dimension in half: first_half rotates with second_half.
 
     Args:
-        input_tensor: Input tensor.
+        input_tensor: Input tensor of shape (B, T, H*D) or (B, H, T, D).
         cos_freqs: Cosine frequencies of shape (B, H, T, D//2).
         sin_freqs: Sine frequencies of shape (B, H, T, D//2).
 
     Returns:
-        Tensor with rotary embeddings applied.
+        Tensor with rotary embeddings applied, same shape as input_tensor.
     """
-    needs_reshape = False
-    original_shape = input_tensor.shape
-
-    # Handle dimension mismatch
-    if input_tensor.ndim != 4 and cos_freqs.ndim == 4:
+    needs_reshape = input_tensor.ndim != 4 and cos_freqs.ndim == 4
+    if needs_reshape:
         b, h, t, _ = cos_freqs.shape
-        # Reshape from (B, T, H*D) to (B, H, T, D)
-        input_tensor = input_tensor.reshape(b, t, h, -1)
-        input_tensor = input_tensor.transpose(0, 2, 1, 3)
-        needs_reshape = True
+        input_tensor = input_tensor.reshape(b, t, h, -1).transpose(0, 2, 1, 3)
 
-    # Split into two halves: (..., dim) -> (..., 2, dim//2)
-    dim = input_tensor.shape[-1]
-    split_input = input_tensor.reshape(*input_tensor.shape[:-1], 2, dim // 2)
-
-    first_half = split_input[..., 0, :]  # Shape: (..., dim//2)
-    second_half = split_input[..., 1, :]  # Shape: (..., dim//2)
-
-    # Apply rotation (functional, no in-place ops)
-    # first_half_out = first_half * cos - second_half * sin
-    # second_half_out = second_half * cos + first_half * sin
-    first_half_out = first_half * cos_freqs - second_half * sin_freqs
-    second_half_out = second_half * cos_freqs + first_half * sin_freqs
-
-    # Stack back together
-    output = mx.stack([first_half_out, second_half_out], axis=-2)
-    output = output.reshape(*output.shape[:-2], dim)
+    output = _apply_split_rope_4d(input_tensor, cos_freqs, sin_freqs)
 
     if needs_reshape:
         b, h, t, d = output.shape
-        # Reshape from (B, H, T, D) back to (B, T, H*D)
-        output = output.transpose(0, 2, 1, 3)
-        output = output.reshape(b, t, h * d)
+        output = output.transpose(0, 2, 1, 3).reshape(b, t, h * d)
 
     return output
 

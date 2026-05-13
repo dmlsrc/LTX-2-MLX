@@ -304,7 +304,7 @@ class DistilledPipeline:
 
         # Create noiser and steppers
         noiser = GaussianNoiser()
-        stage_1_stepper = self.diffusion_step
+        stage_1_stepper = self.diffusion_step_ancestral
         stage_2_stepper = self.diffusion_step
 
         # ====== STAGE 1: Half resolution generation ======

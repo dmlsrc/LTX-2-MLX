@@ -234,19 +234,8 @@ class TwoStagePipeline:
         if self.audio_decoder is None or self.vocoder is None:
             raise ValueError("Audio decoder and vocoder required for audio decoding")
 
-        # Decode latent to mel spectrogram
         mel_spectrogram = self.audio_decoder(audio_latent)
         mx.eval(mel_spectrogram)
-
-        # Diagnostic: save mel spectrogram for comparison with ComfyUI
-        import numpy as _np
-        _mel_np = _np.array(mel_spectrogram)
-        _np.save("/tmp/mlx_mel_spectrogram.npy", _mel_np)
-        print(f"  [diag] Saved mel spectrogram: shape={_mel_np.shape}, "
-              f"mean={_mel_np.mean():.4f}, std={_mel_np.std():.4f}, "
-              f"min={_mel_np.min():.4f}, max={_mel_np.max():.4f}")
-
-        # Convert mel spectrogram to waveform
         waveform = self.vocoder(mel_spectrogram)
         mx.eval(waveform)
 
@@ -259,7 +248,6 @@ class TwoStagePipeline:
         positive_context: mx.array,
         negative_context: mx.array,
         video_guider: CFGGuider,
-        audio_guider: CFGGuider,
         stepper: EulerDiffusionStep,
         guidance_rescale: float = 0.0,
         callback: Optional[Callable[[str, int, int], None]] = None,
@@ -277,14 +265,14 @@ class TwoStagePipeline:
             pos_denoised = self.transformer(pos_modality)
 
             # Run negative (unconditioned) prediction for CFG
-            if guider.enabled():
+            if video_guider.enabled():
                 neg_modality = modality_from_state(
                     video_state, negative_context, sigma
                 )
                 neg_denoised = self.transformer(neg_modality)
 
                 # Apply CFG guidance
-                denoised = guider.guide(pos_denoised, neg_denoised)
+                denoised = video_guider.guide(pos_denoised, neg_denoised)
 
                 # Apply guidance rescale to prevent variance explosion
                 if guidance_rescale > 0:
@@ -641,7 +629,7 @@ class TwoStagePipeline:
                 sigmas=sigmas,
                 positive_context=positive_encoding,
                 negative_context=negative_encoding,
-                guider=video_guider,
+                video_guider=video_guider,
                 stepper=stepper,
                 guidance_rescale=config.guidance_rescale,
                 callback=callback,

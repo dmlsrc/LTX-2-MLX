@@ -426,7 +426,7 @@ class OneStagePipeline:
             )
 
             video_state = video_state.replace(latent=new_latent)
-            mx.eval(video_state.latent)
+            mx.async_eval(video_state.latent)
 
             if callback:
                 callback(step_idx + 1, num_steps)
@@ -524,7 +524,7 @@ class OneStagePipeline:
             # Skip corrector on last step (sigma_next == 0)
             if sigma_next == 0:
                 video_state = video_state.replace(latent=denoised)
-                mx.eval(video_state.latent)
+                mx.async_eval(video_state.latent)
                 if callback:
                     callback(step_idx + 1, num_steps)
                 continue
@@ -559,7 +559,7 @@ class OneStagePipeline:
             )
 
             video_state = video_state.replace(latent=new_latent)
-            mx.eval(video_state.latent)
+            mx.async_eval(video_state.latent)
 
             if callback:
                 callback(step_idx + 1, num_steps)
@@ -699,7 +699,7 @@ class OneStagePipeline:
             video_state = video_state.replace(latent=new_video_latent)
             audio_state = audio_state.replace(latent=new_audio_latent)
 
-            mx.eval(video_state.latent, audio_state.latent)
+            mx.async_eval(video_state.latent, audio_state.latent)
             mark_profile("state eval")
             if profile_events is not None:
                 print_profile(profile_step, profile_events)
@@ -803,7 +803,7 @@ class OneStagePipeline:
             if sigma_next == 0:
                 video_state = video_state.replace(latent=video_denoised)
                 audio_state = audio_state.replace(latent=audio_denoised)
-                mx.eval(video_state.latent, audio_state.latent)
+                mx.async_eval(video_state.latent, audio_state.latent)
                 if callback:
                     callback(step_idx + 1, num_steps)
                 continue
@@ -860,7 +860,7 @@ class OneStagePipeline:
 
             video_state = video_state.replace(latent=new_video_latent)
             audio_state = audio_state.replace(latent=new_audio_latent)
-            mx.eval(video_state.latent, audio_state.latent)
+            mx.async_eval(video_state.latent, audio_state.latent)
 
             if callback:
                 callback(step_idx + 1, num_steps)
@@ -929,9 +929,9 @@ class OneStagePipeline:
                     step_index=step_idx,
                 )
                 audio_state = audio_state.replace(latent=new_audio_latent)
-                mx.eval(video_state.latent, audio_state.latent)
+                mx.async_eval(video_state.latent, audio_state.latent)
             else:
-                mx.eval(video_state.latent)
+                mx.async_eval(video_state.latent)
 
             if callback:
                 callback(step_idx + 1, num_steps)
