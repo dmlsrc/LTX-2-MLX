@@ -25,6 +25,7 @@ from .common import (
     modality_from_state,
     audio_modality_from_state,
     post_process_latent,
+    maybe_post_process_latent,
 )
 from ..components import (
     CFGGuider,
@@ -413,9 +414,7 @@ class OneStagePipeline:
                 prev_velocity = current_velocity
 
             # Post-process with denoise mask
-            denoised = post_process_latent(
-                denoised, video_state.denoise_mask, video_state.clean_latent
-            )
+            denoised = maybe_post_process_latent(denoised, video_state)
 
             # Euler step
             new_latent = stepper.step(
@@ -509,9 +508,7 @@ class OneStagePipeline:
                     denoised = video_state.latent - total_velocity * sigma
                 prev_velocity = current_velocity
 
-            denoised = post_process_latent(
-                denoised, video_state.denoise_mask, video_state.clean_latent
-            )
+            denoised = maybe_post_process_latent(denoised, video_state)
 
             # ── Euler prediction to get predicted sample ──
             from ..core_utils import to_velocity
@@ -545,9 +542,7 @@ class OneStagePipeline:
             else:
                 denoised_at_predicted = pos_denoised_2
 
-            denoised_at_predicted = post_process_latent(
-                denoised_at_predicted, video_state.denoise_mask, video_state.clean_latent
-            )
+            denoised_at_predicted = maybe_post_process_latent(denoised_at_predicted, video_state)
 
             # ── Heun corrector step ──
             new_latent = stepper.step(
@@ -674,12 +669,8 @@ class OneStagePipeline:
                     video_denoised = video_state.latent - total_velocity * sigma
                 prev_velocity = current_velocity
 
-            video_denoised = post_process_latent(
-                video_denoised, video_state.denoise_mask, video_state.clean_latent
-            )
-            audio_denoised = post_process_latent(
-                audio_denoised, audio_state.denoise_mask, audio_state.clean_latent
-            )
+            video_denoised = maybe_post_process_latent(video_denoised, video_state)
+            audio_denoised = maybe_post_process_latent(audio_denoised, audio_state)
             mark_profile("guidance/postprocess", video_denoised, audio_denoised)
 
             new_video_latent = stepper.step(
@@ -784,12 +775,8 @@ class OneStagePipeline:
                     video_denoised = video_state.latent - total_velocity * sigma
                 prev_velocity = current_velocity
 
-            video_denoised = post_process_latent(
-                video_denoised, video_state.denoise_mask, video_state.clean_latent
-            )
-            audio_denoised = post_process_latent(
-                audio_denoised, audio_state.denoise_mask, audio_state.clean_latent
-            )
+            video_denoised = maybe_post_process_latent(video_denoised, video_state)
+            audio_denoised = maybe_post_process_latent(audio_denoised, audio_state)
 
             video_velocity = to_velocity(video_state.latent, sigmas[step_idx], video_denoised)
             audio_velocity = to_velocity(audio_state.latent, sigmas[step_idx], audio_denoised)
@@ -836,12 +823,8 @@ class OneStagePipeline:
                 video_denoised_at_predicted = pos_video_denoised_2
                 audio_denoised_at_predicted = pos_audio_denoised_2
 
-            video_denoised_at_predicted = post_process_latent(
-                video_denoised_at_predicted, video_state.denoise_mask, video_state.clean_latent
-            )
-            audio_denoised_at_predicted = post_process_latent(
-                audio_denoised_at_predicted, audio_state.denoise_mask, audio_state.clean_latent
-            )
+            video_denoised_at_predicted = maybe_post_process_latent(video_denoised_at_predicted, video_state)
+            audio_denoised_at_predicted = maybe_post_process_latent(audio_denoised_at_predicted, audio_state)
 
             new_video_latent = stepper.step(
                 sample=video_state.latent,
@@ -907,9 +890,7 @@ class OneStagePipeline:
                 video_denoised = self.transformer(video_modality)
                 audio_denoised = None
 
-            video_denoised = post_process_latent(
-                video_denoised, video_state.denoise_mask, video_state.clean_latent
-            )
+            video_denoised = maybe_post_process_latent(video_denoised, video_state)
             new_video_latent = stepper.step(
                 sample=video_state.latent,
                 denoised_sample=video_denoised,
@@ -919,9 +900,7 @@ class OneStagePipeline:
             video_state = video_state.replace(latent=new_video_latent)
 
             if audio_state is not None and audio_denoised is not None:
-                audio_denoised = post_process_latent(
-                    audio_denoised, audio_state.denoise_mask, audio_state.clean_latent
-                )
+                audio_denoised = maybe_post_process_latent(audio_denoised, audio_state)
                 new_audio_latent = stepper.step(
                     sample=audio_state.latent,
                     denoised_sample=audio_denoised,

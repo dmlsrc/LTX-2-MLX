@@ -186,12 +186,35 @@ class LatentState:
     denoise_mask: mx.array
     positions: mx.array
     clean_latent: mx.array
+    # Python-side flag: True iff denoise_mask is all-ones (every token at full sigma).
+    # Used to skip the per-token timestep embedding and post-process blend in the
+    # hot denoise path.  Set to False whenever the mask is explicitly mixed
+    # (keyframe conditioning, retake, frozen audio, image strength < 1).
+    uniform_mask: bool = True
 
     def replace(self, **kwargs) -> "LatentState":
-        """Return a new LatentState with specified fields replaced."""
+        """Return a new LatentState with specified fields replaced.
+
+        IMPORTANT — uniform_mask footgun:
+        If you replace ``denoise_mask`` with a non-all-ones mask you MUST also
+        pass ``uniform_mask=False``.  This method cannot infer uniformity from
+        the mask values without forcing an MLX eval in the hot path, so it
+        simply preserves the existing flag.  Silent staleness here would cause
+        the scalar-timestep fastpath to fire with a mixed mask, producing wrong
+        AdaLN conditioning.
+
+            # correct
+            state = state.replace(denoise_mask=new_mask, uniform_mask=False)
+
+            # WRONG — fastpath stays active with a non-uniform mask
+            state = state.replace(denoise_mask=new_mask)
+
+        Patchify/unpatchify are safe because they reshape without changing values.
+        """
         return LatentState(
             latent=kwargs.get("latent", self.latent),
             denoise_mask=kwargs.get("denoise_mask", self.denoise_mask),
             positions=kwargs.get("positions", self.positions),
             clean_latent=kwargs.get("clean_latent", self.clean_latent),
+            uniform_mask=kwargs.get("uniform_mask", self.uniform_mask),
         )

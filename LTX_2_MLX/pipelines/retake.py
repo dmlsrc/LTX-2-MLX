@@ -20,6 +20,7 @@ from .common import (
     modality_from_state,
     audio_modality_from_state,
     post_process_latent,
+    maybe_post_process_latent,
 )
 from ..components import (
     DISTILLED_SIGMA_VALUES,
@@ -193,6 +194,7 @@ class TemporalRegionMask:
             denoise_mask=mask,
             positions=latent_state.positions,
             clean_latent=latent_state.clean_latent,
+            uniform_mask=False,  # retake mask is sparse (zeros outside target region)
         )
 
 
@@ -274,13 +276,13 @@ class RetakePipeline:
                     denoised_a = uncond_a + cfg_scale * (denoised_a - uncond_a)
 
             # Post-process with mask (preserves clean_latent outside mask)
-            denoised_v = post_process_latent(denoised_v, video_state.denoise_mask, video_state.clean_latent)
+            denoised_v = maybe_post_process_latent(denoised_v, video_state)
             new_v = self.stepper.step(video_state.latent, denoised_v, sigmas, step_idx)
             video_state = video_state.replace(latent=new_v)
             mx.eval(video_state.latent)
 
             if audio_state is not None and denoised_a is not None:
-                denoised_a = post_process_latent(denoised_a, audio_state.denoise_mask, audio_state.clean_latent)
+                denoised_a = maybe_post_process_latent(denoised_a, audio_state)
                 new_a = self.stepper.step(audio_state.latent, denoised_a, sigmas, step_idx)
                 audio_state = audio_state.replace(latent=new_a)
                 mx.eval(audio_state.latent)

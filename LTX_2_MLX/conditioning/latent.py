@@ -114,4 +114,5 @@ class VideoConditionByLatentIndex:
             denoise_mask=new_denoise_mask,
             positions=latent_state.positions,  # Positions unchanged
             clean_latent=new_clean_latent,
+            uniform_mask=False,  # conditioning region has 1-strength mask splice
         )

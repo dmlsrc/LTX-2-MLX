@@ -84,4 +84,5 @@ class VideoConditionByKeyframeIndex:
             denoise_mask=mx.concatenate([latent_state.denoise_mask, denoise_mask], axis=1),
             positions=mx.concatenate([latent_state.positions, positions], axis=2),
             clean_latent=mx.concatenate([latent_state.clean_latent, tokens], axis=1),
+            uniform_mask=False,  # appended keyframe tokens have 1-strength mask
         )

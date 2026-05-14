@@ -221,15 +221,26 @@ def modality_from_state(
     Returns:
         Modality object ready for transformer input
     """
+    # When the mask is uniform (all tokens at sigma), use a scalar timestep
+    # (B,) instead of a per-token tensor (B, T).  This avoids running the
+    # sinusoidal embedding + AdaLN MLP on all T tokens when every token would
+    # produce the same result.  The preprocessor broadcasts (B, 1, 9, D) over
+    # T tokens — identical math, much less compute and memory.
+    sigma_tensor = mx.full((state.latent.shape[0],), sigma, dtype=mx.float32)
+    if state.uniform_mask:
+        timesteps = sigma_tensor
+    else:
+        timesteps = timesteps_from_mask(state.denoise_mask, sigma)
+
     # PyTorch always uses context_mask=None in modality_from_latent_state
     return Modality(
         enabled=enabled,
         latent=state.latent,
-        timesteps=timesteps_from_mask(state.denoise_mask, sigma),
+        timesteps=timesteps,
         positions=state.positions,
         context=context,
         context_mask=None,
-        sigma=mx.array([sigma]),
+        sigma=sigma_tensor,
     )
 
 
@@ -250,14 +261,42 @@ def audio_modality_from_state(
     Returns:
         Modality object ready for transformer input
     """
+    sigma_tensor = mx.full((state.latent.shape[0],), sigma, dtype=mx.float32)
+    if state.uniform_mask:
+        timesteps = sigma_tensor
+    else:
+        timesteps = timesteps_from_mask(state.denoise_mask, sigma)
+
     # Audio uses the same Modality structure as video
     # PyTorch always uses context_mask=None in modality_from_latent_state
     return Modality(
         enabled=enabled,
         latent=state.latent,
-        timesteps=timesteps_from_mask(state.denoise_mask, sigma),
+        timesteps=timesteps,
         positions=state.positions,
         context=context,
         context_mask=None,
-        sigma=mx.array([sigma]),
+        sigma=sigma_tensor,
     )
+
+
+def maybe_post_process_latent(
+    denoised: mx.array,
+    state: LatentState,
+) -> mx.array:
+    """Blend denoised output with clean state, skipping when mask is uniform.
+
+    When the denoise mask is all-ones (uniform_mask=True), every token is
+    fully denoised — the blend is ``denoised * 1 + clean * 0 == denoised``.
+    Skipping it avoids a full-latent elementwise op per step.
+
+    Args:
+        denoised: Denoised latent tensor.
+        state:    LatentState whose mask and clean_latent to use.
+
+    Returns:
+        Blended (or unmodified) latent tensor.
+    """
+    if state.uniform_mask:
+        return denoised
+    return post_process_latent(denoised, state.denoise_mask, state.clean_latent)

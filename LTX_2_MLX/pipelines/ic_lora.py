@@ -21,6 +21,7 @@ from .common import (
     create_image_conditionings,
     modality_from_state,
     post_process_latent,
+    maybe_post_process_latent,
     timesteps_from_mask,
 )
 from ..components import (
@@ -538,9 +539,7 @@ class ICLoraPipeline:
             denoised = self.transformer(modality)
 
             # Post-process with denoise mask
-            denoised = post_process_latent(
-                denoised, video_state.denoise_mask, video_state.clean_latent
-            )
+            denoised = maybe_post_process_latent(denoised, video_state)
 
             # Euler step
             new_latent = stepper.step(

@@ -19,6 +19,7 @@ from .common import (
     modality_from_state,
     audio_modality_from_state,
     post_process_latent,
+    maybe_post_process_latent,
 )
 from ..components import (
     CFGGuider,
@@ -281,9 +282,7 @@ class TwoStagePipeline:
                 denoised = pos_denoised
 
             # Post-process with denoise mask
-            denoised = post_process_latent(
-                denoised, video_state.denoise_mask, video_state.clean_latent
-            )
+            denoised = maybe_post_process_latent(denoised, video_state)
 
             # Euler step
             new_latent = stepper.step(
@@ -357,12 +356,8 @@ class TwoStagePipeline:
             audio_denoised = audio_guider.calculate(cond_a, uncond_a, 0.0, mod_a)
 
             # Post-process with denoise mask
-            video_denoised = post_process_latent(
-                video_denoised, video_state.denoise_mask, video_state.clean_latent
-            )
-            audio_denoised = post_process_latent(
-                audio_denoised, audio_state.denoise_mask, audio_state.clean_latent
-            )
+            video_denoised = maybe_post_process_latent(video_denoised, video_state)
+            audio_denoised = maybe_post_process_latent(audio_denoised, audio_state)
 
             # Euler step for both modalities
             new_video_latent = stepper.step(
@@ -408,9 +403,7 @@ class TwoStagePipeline:
             denoised = self.transformer(modality)
 
             # Post-process with denoise mask
-            denoised = post_process_latent(
-                denoised, video_state.denoise_mask, video_state.clean_latent
-            )
+            denoised = maybe_post_process_latent(denoised, video_state)
 
             # Euler step
             new_latent = stepper.step(
@@ -449,12 +442,8 @@ class TwoStagePipeline:
             video_denoised, audio_denoised = self.transformer(video_modality, audio_modality)
 
             # Post-process with denoise mask
-            video_denoised = post_process_latent(
-                video_denoised, video_state.denoise_mask, video_state.clean_latent
-            )
-            audio_denoised = post_process_latent(
-                audio_denoised, audio_state.denoise_mask, audio_state.clean_latent
-            )
+            video_denoised = maybe_post_process_latent(video_denoised, video_state)
+            audio_denoised = maybe_post_process_latent(audio_denoised, audio_state)
 
             # Euler step for both modalities
             new_video_latent = stepper.step(

@@ -20,6 +20,7 @@ from .common import (
     modality_from_state,
     audio_modality_from_state,
     post_process_latent,
+    maybe_post_process_latent,
 )
 from ..components import (
     DISTILLED_SIGMA_VALUES,
@@ -241,9 +242,7 @@ class DistilledPipeline:
                 audio_denoised = None
 
             # Post-process video
-            video_denoised = post_process_latent(
-                video_denoised, video_state.denoise_mask, video_state.clean_latent
-            )
+            video_denoised = maybe_post_process_latent(video_denoised, video_state)
             new_video_latent = stepper.step(
                 sample=video_state.latent,
                 denoised_sample=video_denoised,
@@ -255,9 +254,7 @@ class DistilledPipeline:
 
             # Post-process audio
             if audio_state is not None and audio_denoised is not None:
-                audio_denoised = post_process_latent(
-                    audio_denoised, audio_state.denoise_mask, audio_state.clean_latent
-                )
+                audio_denoised = maybe_post_process_latent(audio_denoised, audio_state)
                 new_audio_latent = stepper.step(
                     sample=audio_state.latent,
                     denoised_sample=audio_denoised,

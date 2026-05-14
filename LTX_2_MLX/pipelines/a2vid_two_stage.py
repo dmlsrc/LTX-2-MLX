@@ -20,6 +20,7 @@ from .common import (
     modality_from_state,
     audio_modality_from_state,
     post_process_latent,
+    maybe_post_process_latent,
 )
 from ..components import (
     STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -259,7 +260,7 @@ class A2VidPipelineTwoStage:
                 denoised_v = uncond_v + cfg_scale * (denoised_v - uncond_v)
 
             # Post-process and step VIDEO only
-            denoised_v = post_process_latent(denoised_v, video_state.denoise_mask, video_state.clean_latent)
+            denoised_v = maybe_post_process_latent(denoised_v, video_state)
             new_v = self.stepper.step(video_state.latent, denoised_v, sigmas, step_idx)
             video_state = video_state.replace(latent=new_v)
             mx.eval(video_state.latent)
@@ -355,6 +356,7 @@ class A2VidPipelineTwoStage:
                 denoise_mask=frozen_mask,
                 positions=audio_state.positions,
                 clean_latent=audio_state.clean_latent,
+                uniform_mask=False,  # all-zeros mask, not all-ones
             )
         else:
             # No encoded audio — generate from noise (but still with audio context)
@@ -431,6 +433,7 @@ class A2VidPipelineTwoStage:
             denoise_mask=mx.zeros_like(audio_state_2.denoise_mask),
             positions=audio_state_2.positions,
             clean_latent=audio_state_2.clean_latent,
+            uniform_mask=False,  # all-zeros mask, not all-ones
         )
 
         def stage_2_cb(step, total):
