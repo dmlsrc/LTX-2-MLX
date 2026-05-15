@@ -2512,13 +2512,18 @@ def generate_video(
     requested_profile_steps = set(profile_transformer_steps or ())
     if profile_transformer_once:
         requested_profile_steps.add(1)
+    # Distilled two-stage chains stage_1 (8 steps) and stage_2 (3 steps), so
+    # callers can profile global steps 1..11 (e.g. 9 = stage_2 step 1).
+    profile_step_upper = num_steps
+    if distilled_two_stage_requested:
+        profile_step_upper = num_steps + (len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1)
     active_profile_steps = tuple(
         step for step in sorted(requested_profile_steps)
-        if step <= num_steps
+        if step <= profile_step_upper
     )
     ignored_profile_steps = tuple(
         step for step in sorted(requested_profile_steps)
-        if step > num_steps
+        if step > profile_step_upper
     )
     active_profile_blocks = tuple(
         block for block in sorted(set(profile_transformer_blocks or ()))

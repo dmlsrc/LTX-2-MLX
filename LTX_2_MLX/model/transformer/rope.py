@@ -1,6 +1,7 @@
 """3D Rotary Position Embeddings (RoPE) for LTX-2 Transformer."""
 
 import math
+import os
 from enum import Enum
 from functools import lru_cache
 from typing import Callable, List, Optional, Tuple
@@ -8,13 +9,18 @@ from typing import Callable, List, Optional, Tuple
 import mlx.core as mx
 import numpy as np
 
-# Import fused RoPE kernel for interleaved format
-try:
-    from LTX_2_MLX.kernels import interleaved_rope as _fused_interleaved_rope
-    _HAS_FUSED_ROPE = True
-except ImportError:
+# Import fused RoPE kernel for interleaved format.  Set LTX_DISABLE_FUSED_ROPE=1
+# to force the pure-MLX fallback (used to A/B kernel-launch overhead vs fusion).
+if os.environ.get("LTX_DISABLE_FUSED_ROPE"):
     _HAS_FUSED_ROPE = False
     _fused_interleaved_rope = None
+else:
+    try:
+        from LTX_2_MLX.kernels import interleaved_rope as _fused_interleaved_rope
+        _HAS_FUSED_ROPE = True
+    except ImportError:
+        _HAS_FUSED_ROPE = False
+        _fused_interleaved_rope = None
 
 
 class LTXRopeType(Enum):

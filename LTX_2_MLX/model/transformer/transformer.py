@@ -1,5 +1,6 @@
 """Transformer blocks for LTX-2."""
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
@@ -13,38 +14,35 @@ from .rope import LTXRopeType
 from ...components.perturbations import BatchedPerturbationConfig, PerturbationType
 
 
-# Compiled AdaLN helper - fuses normalization with scale/shift for better performance
-@mx.compile
-def _compiled_adaln_forward(
+def _adaln_inline(
     x: mx.array,
     scale: mx.array,
     shift: mx.array,
     eps: float = 1e-6,
 ) -> mx.array:
-    """
-    Compiled AdaLN forward: RMSNorm + scale + shift.
-
-    Fuses the normalization and modulation into a single compiled graph.
-    """
-    # RMS normalization
+    """Inline AdaLN: RMSNorm + scale + shift, no compile boundary."""
     normed = mx.fast.rms_norm(x, None, eps)
-    # Apply adaptive scale and shift
     return normed * (1 + scale) + shift
 
 
-# Compiled residual + gate - fuses residual connection with gating
-@mx.compile
-def _compiled_residual_gate(
+def _residual_gate_inline(
     x: mx.array,
     residual: mx.array,
     gate: mx.array,
 ) -> mx.array:
-    """
-    Compiled residual with gating: x + residual * gate.
-
-    Fuses the gate multiplication and residual addition.
-    """
+    """Inline residual + gate, no compile boundary."""
     return x + residual * gate
+
+
+# Set LTX_DISABLE_COMPILED_HELPERS=1 to bypass the @mx.compile wrappers around
+# the AdaLN and residual-gate fused kernels.  Used to A/B whether our compile
+# boundaries are preventing MLX from doing cross-operation fusion at large T.
+if os.environ.get("LTX_DISABLE_COMPILED_HELPERS"):
+    _compiled_adaln_forward = _adaln_inline
+    _compiled_residual_gate = _residual_gate_inline
+else:
+    _compiled_adaln_forward = mx.compile(_adaln_inline)
+    _compiled_residual_gate = mx.compile(_residual_gate_inline)
 
 
 @dataclass

@@ -862,13 +862,42 @@ class OneStagePipeline:
         audio_context: Optional[mx.array],
         stepper: EulerDiffusionStep,
         callback: Optional[Callable[[int, int], None]] = None,
+        profile_steps: Tuple[int, ...] = (),
+        profile_blocks: Tuple[int, ...] = (),
     ) -> Tuple[LatentState, Optional[LatentState]]:
         """Run distilled denoising without CFG for video-only or AV transformers."""
         num_steps = len(sigmas) - 1
+        profile_step_set = set(profile_steps)
+
+        def print_profile(step: int, events: List[Tuple[str, float]]) -> None:
+            total = sum(seconds for _, seconds in events)
+            print(f"\n  AV denoise step {step} profile (forced eval diagnostics):")
+            for name, seconds in events:
+                pct = (seconds / total * 100.0) if total > 0 else 0.0
+                print(f"    {name:<24} {seconds:7.2f}s  {pct:5.1f}%")
+            print(f"    {'profiled total':<24} {total:7.2f}s")
 
         for step_idx in range(num_steps):
             sigma = float(sigmas[step_idx])
+
+            profile_step = step_idx + 1
+            profile_events: Optional[List[Tuple[str, float]]] = (
+                [] if profile_step in profile_step_set else None
+            )
+            profile_started_at = time.perf_counter() if profile_events is not None else 0.0
+
+            def mark_profile(name: str, *arrays: mx.array) -> None:
+                nonlocal profile_started_at
+                if profile_events is None:
+                    return
+                if arrays:
+                    mx.eval(*arrays)
+                now = time.perf_counter()
+                profile_events.append((name, now - profile_started_at))
+                profile_started_at = now
+
             video_modality = modality_from_state(video_state, video_context, sigma)
+            mark_profile("modality setup")
 
             if self.is_av_model:
                 audio_modality = (
@@ -876,6 +905,11 @@ class OneStagePipeline:
                     if audio_state is not None
                     else None
                 )
+                if profile_events is not None:
+                    self._profile_next_transformer_call(
+                        f"step {profile_step}",
+                        blocks=profile_blocks,
+                    )
                 result = (
                     self.transformer(video_modality, audio_modality)
                     if audio_modality is not None
@@ -887,8 +921,14 @@ class OneStagePipeline:
                     video_denoised = result
                     audio_denoised = None
             else:
+                if profile_events is not None:
+                    self._profile_next_transformer_call(
+                        f"step {profile_step}",
+                        blocks=profile_blocks,
+                    )
                 video_denoised = self.transformer(video_modality)
                 audio_denoised = None
+            mark_profile("transformer call", video_denoised, audio_denoised) if audio_denoised is not None else mark_profile("transformer call", video_denoised)
 
             video_denoised = maybe_post_process_latent(video_denoised, video_state)
             new_video_latent = stepper.step(
@@ -911,6 +951,10 @@ class OneStagePipeline:
                 mx.async_eval(video_state.latent, audio_state.latent)
             else:
                 mx.async_eval(video_state.latent)
+            mark_profile("post + stepper", video_state.latent)
+
+            if profile_events is not None:
+                print_profile(profile_step, profile_events)
 
             if callback:
                 callback(step_idx + 1, num_steps)
@@ -1033,6 +1077,19 @@ class OneStagePipeline:
             if callback:
                 callback(step, total_steps)
 
+        # Map global profile step numbers to per-stage local step numbers.
+        # Stage 1 covers global steps 1..(len(stage_1_sigmas)-1).
+        # Stage 2 covers global steps len(stage_1_sigmas)..total_steps.
+        global_profile_steps = tuple(config.profile_transformer_steps or ())
+        global_profile_blocks = tuple(config.profile_transformer_blocks or ())
+        stage_1_step_count = len(stage_1_sigmas) - 1
+        stage_1_profile_steps = tuple(
+            s for s in global_profile_steps if 1 <= s <= stage_1_step_count
+        )
+        stage_2_profile_steps = tuple(
+            s - stage_1_step_count for s in global_profile_steps if s > stage_1_step_count
+        )
+
         stage_1_start = time.perf_counter()
         video_state, audio_state = self._denoise_loop_simple_av(
             video_state=video_state,
@@ -1042,6 +1099,8 @@ class OneStagePipeline:
             audio_context=positive_audio_encoding,
             stepper=stepper,
             callback=stage_1_callback,
+            profile_steps=stage_1_profile_steps,
+            profile_blocks=global_profile_blocks,
         )
         stage_1_elapsed = time.perf_counter() - stage_1_start
 
@@ -1145,6 +1204,8 @@ class OneStagePipeline:
             audio_context=positive_audio_encoding,
             stepper=stepper,
             callback=stage_2_callback,
+            profile_steps=stage_2_profile_steps,
+            profile_blocks=global_profile_blocks,
         )
         stage_2_elapsed = time.perf_counter() - stage_2_start
         post_denoise_start = time.perf_counter()

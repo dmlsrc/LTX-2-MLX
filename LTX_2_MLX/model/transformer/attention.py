@@ -1,5 +1,6 @@
 """Attention mechanisms for LTX-2 Transformer."""
 
+import os
 from collections.abc import Callable
 from typing import Optional
 
@@ -9,16 +10,19 @@ import mlx.nn as nn
 from .rope import LTXRopeType, apply_rotary_emb
 
 
-# Compiled attention core (without mask) - fuses reshape + SDPA + reshape
-@mx.compile
-def _compiled_attention_core_no_mask(
+# Set LTX_DISABLE_COMPILED_ATTN=1 to bypass the @mx.compile wrappers around the
+# reshape+SDPA+reshape sequence.  Used to A/B compile overhead vs fusion.
+_USE_COMPILED_ATTN = not os.environ.get("LTX_DISABLE_COMPILED_ATTN")
+
+
+def _attention_core_inline_no_mask(
     q: mx.array,
     k: mx.array,
     v: mx.array,
     heads: int,
     dim_head: int,
 ) -> mx.array:
-    """Compiled attention core without mask."""
+    """Inline (uncompiled) attention core without mask."""
     b, t_q, _ = q.shape
     _, t_k, _ = k.shape
 
@@ -35,9 +39,7 @@ def _compiled_attention_core_no_mask(
     return out.transpose(0, 2, 1, 3).reshape(b, t_q, heads * dim_head)
 
 
-# Compiled attention core (with mask) - fuses reshape + SDPA + reshape
-@mx.compile
-def _compiled_attention_core_with_mask(
+def _attention_core_inline_with_mask(
     q: mx.array,
     k: mx.array,
     v: mx.array,
@@ -45,7 +47,7 @@ def _compiled_attention_core_with_mask(
     dim_head: int,
     mask: mx.array,
 ) -> mx.array:
-    """Compiled attention core with mask."""
+    """Inline (uncompiled) attention core with mask."""
     b, t_q, _ = q.shape
     _, t_k, _ = k.shape
 
@@ -69,6 +71,16 @@ def _compiled_attention_core_with_mask(
 
     # Reshape back: (B, H, T, D) -> (B, T, H*D)
     return out.transpose(0, 2, 1, 3).reshape(b, t_q, heads * dim_head)
+
+
+# Compiled attention core (without mask) - fuses reshape + SDPA + reshape.
+# Falls through to the inline version when LTX_DISABLE_COMPILED_ATTN is set.
+if _USE_COMPILED_ATTN:
+    _compiled_attention_core_no_mask = mx.compile(_attention_core_inline_no_mask)
+    _compiled_attention_core_with_mask = mx.compile(_attention_core_inline_with_mask)
+else:
+    _compiled_attention_core_no_mask = _attention_core_inline_no_mask
+    _compiled_attention_core_with_mask = _attention_core_inline_with_mask
 
 
 def _attention_core(
@@ -277,36 +289,46 @@ class Attention(nn.Module):
 
         Returns:
             Attention output of shape (B, T, D).
-        """
-        # Project to Q, K, V
-        q = self.to_q(x)
-        context = x if context is None else context
-        k = self.to_k(context)
-        v = self.to_v(context)
 
-        # Apply RMSNorm to Q and K
+        Note on op order: compute gate logits FIRST, then V, then Q/K.  This
+        matches mlx-video's pattern, which lets MLX's lazy graph pipeline the
+        gate-logits matmul alongside the V/Q/K projection matmuls instead of
+        serializing gate after SDPA.  At small T this measurably reduces
+        per-step time; at large T the effect is in the noise but still neutral.
+        """
+        # 1) Gate logits first — independent of V/Q/K, lets MLX schedule it
+        #    in parallel with the projections below.
+        gate = None
+        if self.to_gate_logits is not None:
+            # 2 * sigmoid so zero-init weight gives identity (2 * 0.5 = 1.0)
+            gate = 2.0 * mx.sigmoid(self.to_gate_logits(x))  # (B, T, H)
+
+        # 2) Project V before Q, K (mlx-video order).
+        context = x if context is None else context
+        v = self.to_v(context)
+        q = self.to_q(x)
+        k = self.to_k(context)
+
+        # 3) Apply RMSNorm to Q and K
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        # Apply RoPE if position embeddings provided
+        # 4) Apply RoPE if position embeddings provided
         if pe is not None:
             q = apply_rotary_emb(q, pe, self.rope_type)
             k = apply_rotary_emb(k, pe if k_pe is None else k_pe, self.rope_type)
 
-        # Use compiled attention core for better performance
+        # 5) Attention core (compiled or inline depending on env toggle).
         out = _attention_core(q, k, v, self.heads, self.dim_head, mask)
 
-        # Apply per-head gating if enabled (V2)
-        if self.to_gate_logits is not None:
-            gate_logits = self.to_gate_logits(x)  # (B, T, H)
+        # 6) Apply per-head gating if enabled (V2).
+        if gate is not None:
             b, t, _ = out.shape
             out = out.reshape(b, t, self.heads, self.dim_head)
-            # 2 * sigmoid so zero-init gives identity (2 * 0.5 = 1.0)
-            gates = 2.0 * mx.sigmoid(gate_logits)
-            out = out * gates[:, :, :, None]  # (B, T, H, D) * (B, T, H, 1)
+            out = out * gate[:, :, :, None]  # (B, T, H, D) * (B, T, H, 1)
             out = out.reshape(b, t, self.heads * self.dim_head)
 
-        # Output projection
+        # 7) Output projection
         return self._to_out(out)
 
     def profile(
