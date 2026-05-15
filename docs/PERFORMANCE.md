@@ -1066,6 +1066,61 @@ Do not remove Gemma's per-layer `mx.eval(hidden_states)` as a first move for
 memory. It may help speed, but it may also allow a much larger lazy graph to
 accumulate across the 48-layer text model.
 
+### 18. Throttle terminal redraws
+
+Status: implemented.
+
+Terminal.app and WindowServer are GPU-accelerated on macOS. Any time the
+denoise progress line repaints, that paint runs through Core Text and Metal on
+the same GPU MLX is using for the diffusion forward pass. Activity Monitor on
+the bakery 1024x576 distilled run showed Terminal at ~15% GPU and WindowServer
+at ~15% during stage 2; both dropped to zero the moment the denoise loop ended
+and VAE decode started, confirming the contention.
+
+The previous `DenoiseProgress` class ran a daemon thread that called `_render`
+every `0.12s` (~8 Hz). Each render printed a ~120-char line with eight ANSI
+color escapes and a `\033[2K` full-line clear, then `flush=True`. For a 6-min
+stage-2 step that is roughly `3000` GPU-accelerated repaints per step, all
+contending with MLX. Other progress bars in the project used `tqdm` defaults
+(10 Hz refresh, unicode block-char bar) for VAE encode/decode, tiled decode,
+Gemma forward, weight loading, upscaler loading, and frame saving.
+
+Changes:
+
+- `DenoiseProgress` no longer spawns a heartbeat thread. The line is repainted
+  only on actual step boundaries via `update()`, plus once at `start()` and
+  `finish()`. The spinner glyph, all ANSI color escapes, and the `\033[2K`
+  clear are gone. Repaints `\r`-overwrite and pad to the previous line length
+  with spaces, so Terminal only re-rasterizes the changed characters
+  (typically the right-hand `RUN`/`ETA`/pace fields). A byte-equality cache on
+  the rendered line skips the `write(2)+flush` entirely when nothing changed.
+- All `tqdm(...)` call sites in `scripts/` and `LTX_2_MLX/` pass
+  `ascii=True` (plain `#` bar instead of unicode block chars, which Terminal
+  routes through font fallback and glyph shaping) plus `mininterval=2.0` for
+  hot paths during MLX GPU work (VAE encode/decode, tiled decode, denoise
+  helper) and `mininterval=1.0` for cold paths (weight/shard/upscaler load,
+  Gemma forward, frame saving).
+
+Measured bakery 1024x576x481 distilled AV (same prompt, seed 124, weights,
+flags, machine; only diff is the redraw policy):
+
+| Phase                     | Before    | After     | delta     |
+|---------------------------|-----------|-----------|-----------|
+| Stage 1 denoise (8 steps) | 7m 04.2s  | 7m 00s    | -4.2s     |
+| Stage 2 denoise (3 steps) | 21m 10.7s | 19m 29s   | -101.7s   |
+| VAE decode (4 tiles)      | 2m 19.1s  | 2m 15s    | -4.1s     |
+| Total                     | 31m 28.9s | 29m 38s   | -1m 50.9s |
+
+Stage 2 went from ~423.6 s/it to ~389.5 s/it. The win scales with step
+duration: longer steps had more per-step redraws crammed into them, so killing
+the heartbeat reclaims more wall time per step. ~6% off total wall time and
+~8% off the dominant phase from a terminal-redraw fix is unusual but
+reproducible on a GPU-accelerated terminal stack.
+
+If profiling on a non-macOS or non-GPU-accelerated terminal, expect the gain
+to be much smaller — most of the cost was Terminal.app's Metal repaint, not
+syscall overhead.
+
 ## Ideas To Avoid As First Moves
 
 ### KV caching text cross-attention
@@ -1238,6 +1293,7 @@ Use a fixed command and change only one thing at a time.
 | `mx.fast.rope` / split-RoPE kernel | yes | low to medium | unknown | Only after proving exact RoPE parity. |
 | Distributed tensor parallelism | yes | high | unknown | Separate multi-machine project. |
 | FP8 conversion primitives | no | high | unknown | `mx.to_fp8` / `mx.from_fp8` are storage/compute research items, not safe BF16 path changes. |
+| Terminal redraw throttling | yes | none | default win on macOS | Removed `DenoiseProgress` heartbeat thread; all `tqdm` use `ascii=True` plus `mininterval=1-2s`. Bakery 1024x576x481 distilled total `31m 28.9s` -> `29m 38s` (-5.9%); stage 2 alone `21m 10.7s` -> `19m 29s` (-8.0%). Win comes from killing GPU contention with Terminal.app/WindowServer; expect smaller gain on non-macOS terminals. See section 18. |
 
 ## Experiment Log Template
 

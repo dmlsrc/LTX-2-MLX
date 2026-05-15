@@ -529,7 +529,9 @@ class SimpleVideoDecoder(nn.Module):
         total_steps = num_blocks + 3  # +3 for conv_in, conv_out, unpatchify
 
         if has_tqdm:
-            pbar = tqdm(total=total_steps, desc="VAE decode", ncols=80)
+            # ascii + mininterval keeps Terminal.app from re-rasterizing a
+            # unicode block-bar at 10 Hz while MLX is on the GPU.
+            pbar = tqdm(total=total_steps, desc="VAE decode", ncols=80, ascii=True, mininterval=2.0)
 
         # Denormalize latent using per-channel statistics
         x = latent * self.std_of_means[None, :, None, None, None]

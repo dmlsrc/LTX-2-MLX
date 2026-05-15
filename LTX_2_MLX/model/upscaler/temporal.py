@@ -326,7 +326,7 @@ def load_temporal_upscaler_weights(upscaler: TemporalUpscaler, weights_path: str
     weights = mx.load(weights_path)
 
     if has_tqdm:
-        key_iter = tqdm(weights.items(), desc="Loading upscaler", ncols=80, total=len(weights))
+        key_iter = tqdm(weights.items(), desc="Loading upscaler", ncols=80, total=len(weights), ascii=True, mininterval=1.0)
     else:
         key_iter = weights.items()
 

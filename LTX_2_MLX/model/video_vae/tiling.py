@@ -592,7 +592,10 @@ def decode_tiled(
     pending_weights: Optional[mx.array] = None
     pending_start = 0
 
-    progress = tqdm(total=total_jobs, desc="Tiled decode", ncols=80) if tqdm else None
+    progress = (
+        tqdm(total=total_jobs, desc="Tiled decode", ncols=80, ascii=True, mininterval=2.0)
+        if tqdm else None
+    )
 
     try:
         for ti in range(temporal_count):

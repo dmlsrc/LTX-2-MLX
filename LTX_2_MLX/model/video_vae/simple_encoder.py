@@ -352,7 +352,7 @@ class SimpleVideoEncoder(nn.Module):
             return x
 
         if has_tqdm:
-            pbar = tqdm(total=12, desc="VAE encode", ncols=80)
+            pbar = tqdm(total=12, desc="VAE encode", ncols=80, ascii=True, mininterval=2.0)
 
         # Patchify: (B, 3, F, H, W) -> (B, 48, F, H/4, W/4)
         x = patchify(video, patch_size_hw=self.patch_size, patch_size_t=1)

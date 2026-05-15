@@ -141,7 +141,7 @@ def _video_to_uint8_frames(label: str, video: mx.array) -> np.ndarray:
     try:
         from tqdm import tqdm
 
-        iterator = tqdm(range(frame_count), desc=f"{label} frames", ncols=80)
+        iterator = tqdm(range(frame_count), desc=f"{label} frames", ncols=80, ascii=True, mininterval=1.0, miniters=10)
     except ImportError:
         iterator = range(frame_count)
 
@@ -279,7 +279,7 @@ def _write_mp4_from_frames(
         try:
             from tqdm import tqdm
 
-            iterator = tqdm(frames, total=frame_count, desc="video frames", ncols=80)
+            iterator = tqdm(frames, total=frame_count, desc="video frames", ncols=80, ascii=True, mininterval=1.0, miniters=10)
         except ImportError:
             iterator = frames
         for frame in iterator:

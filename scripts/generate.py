@@ -835,6 +835,9 @@ class RunTimings:
 
 
 class DenoiseProgress:
+    """Step-driven progress line for the denoise loop.  See PERFORMANCE.md
+    section "Throttle terminal redraws" for the design rationale."""
+
     def __init__(self, label: str = "Denoising", width: int = 28, total: int | None = None):
         self.label = label
         self.width = width
@@ -844,21 +847,13 @@ class DenoiseProgress:
         self._step_durations: list[float] = []
         self.step = 0
         self.total = total or 0
-        self.spinner_index = 0
-        encoding = (sys.stdout.encoding or "").lower()
-        self.spinner = "◐◓◑◒" if "utf" in encoding else "|/-\\"
-        self.use_color = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
         self._lock = threading.Lock()
         self._output_lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
         self._rendered = False
         self._finished = False
         self._newline_printed = False
+        self._last_line = ""
         self._last_line_len = 0
-
-    def _color(self, code: str) -> str:
-        return f"\033[{code}m" if self.use_color else ""
 
     def start(self) -> None:
         self.started_at = time.perf_counter()
@@ -867,12 +862,6 @@ class DenoiseProgress:
         self._step_durations = []
         self.step = 0
         self._render()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
-        self._thread.start()
-
-    def _spin(self) -> None:
-        while not self._stop.wait(0.12):
-            self._render()
 
     def update(self, step: int, total: int) -> None:
         now = time.perf_counter()
@@ -904,8 +893,6 @@ class DenoiseProgress:
             total = self.total
             denoise_started_at = self.denoise_started_at
             step_durations = list(self._step_durations)
-            spinner = self.spinner[self.spinner_index % len(self.spinner)]
-            self.spinner_index += 1
 
         now = time.perf_counter()
         run_start = denoise_started_at or now
@@ -922,32 +909,26 @@ class DenoiseProgress:
             seconds_per_step = sum(step_durations) / len(step_durations)
             eta_text = format_progress_duration(seconds_per_step * max(0, total - step))
             if seconds_per_step >= 1.0:
-                pace = f"avg {seconds_per_step:.1f}s/it"
+                pace = f"{seconds_per_step:.1f}s/it"
             else:
-                pace = f"avg {1.0 / seconds_per_step:.2f} it/s"
+                pace = f"{1.0 / seconds_per_step:.2f}it/s"
         else:
             eta_text = "--"
             pace = "warming up" if denoise_started_at is None else "measuring"
-        cyan = self._color("36")
-        green = self._color("32")
-        yellow = self._color("33")
-        reset = self._color("0")
 
         line = (
-            f"\r  {cyan}{spinner} {self.label}{reset} "
-            f"{green}[{bar}]{reset} {step:>3}/{total:<3} "
-            f"{progress * 100:5.1f}% "
-            f"| STEP1 {first_step_text} "
+            f"  {self.label} [{bar}] {step:>3}/{total:<3} "
+            f"{progress * 100:5.1f}% | STEP1 {first_step_text} "
             f"| RUN {format_progress_duration(run_elapsed)} "
-            f"| ETA {eta_text} "
-            f"| {yellow}{pace}{reset}"
+            f"| ETA {eta_text} | {pace}"
         )
         with self._output_lock:
-            if sys.stdout.isatty():
-                print("\r\033[2K" + line[1:], end="", flush=True)
-            else:
-                padding = " " * max(0, self._last_line_len - len(line))
-                print(line + padding, end="", flush=True)
+            # Skip the syscall + GPU repaint if nothing visible changed.
+            if line == self._last_line and not final:
+                return
+            pad = " " * max(0, self._last_line_len - len(line))
+            print("\r" + line + pad, end="", flush=True)
+            self._last_line = line
             self._last_line_len = len(line)
             self._rendered = True
 
@@ -957,23 +938,13 @@ class DenoiseProgress:
             if self._finished or not self._rendered or self._newline_printed:
                 print(message, flush=True)
                 return
-            if sys.stdout.isatty():
-                print("\r\033[2K" + message, flush=True)
-            else:
-                padding = " " * max(0, self._last_line_len - len(message))
-                print("\r" + message + padding, flush=True)
+            pad = " " * max(0, self._last_line_len - len(message))
+            print("\r" + message + pad, flush=True)
+            self._last_line = ""
             self._last_line_len = 0
             self._rendered = False
 
     def finish(self) -> None:
-        self._stop.set()
-        if (
-            self._thread is not None
-            and self._thread.is_alive()
-            and self._thread is not threading.current_thread()
-        ):
-            self._thread.join(timeout=1.0)
-
         with self._lock:
             already_finished = self._finished
             self._finished = True
@@ -1218,19 +1189,34 @@ except ImportError:
 
 
 def progress_bar(iterable, desc=None, total=None):
-    """Create a progress bar wrapper."""
+    """Create a progress bar wrapper.
+
+    ``ascii`` and ``mininterval`` keep Terminal.app from re-rasterizing a
+    fancy unicode bar at 10 Hz while MLX is using the GPU.
+    """
     if HAS_TQDM:
-        return tqdm(iterable, desc=desc, total=total, ncols=80)
+        return tqdm(iterable, desc=desc, total=total, ncols=80, ascii=True, mininterval=2.0)
     else:
         return _simple_progress(iterable, desc, total)
 
 
 def _simple_progress(iterable, desc, total):
-    """Simple progress fallback when tqdm is not available."""
+    """Simple progress fallback when tqdm is not available.
+
+    Updates at most every 2 s (and skips identical lines) so the fallback
+    matches the throttled tqdm path.
+    """
     items = list(iterable)
     total = len(items) if total is None else total
+    last_print = 0.0
+    last_text = ""
     for i, item in enumerate(items):
-        print(f"\r{desc}: {i+1}/{total}", end="", flush=True)
+        now = time.perf_counter()
+        text = f"{desc}: {i+1}/{total}"
+        if (now - last_print) >= 2.0 and text != last_text:
+            print(f"\r{text}", end="", flush=True)
+            last_print = now
+            last_text = text
         yield item
     print()  # newline after completion
 
@@ -4224,7 +4210,7 @@ def save_video(frames: list, output_path: str, fps: float = NATIVE_FPS, speed: f
         # Save frames as images with progress
         print("  Writing frames...")
         if HAS_TQDM:
-            iterator = tqdm(enumerate(frames), desc="  Saving frames", total=len(frames), ncols=80)
+            iterator = tqdm(enumerate(frames), desc="  Saving frames", total=len(frames), ncols=80, ascii=True, mininterval=1.0, miniters=10)
         else:
             iterator = enumerate(frames)
 
@@ -4300,7 +4286,7 @@ def save_video_with_audio(
         # Save frames as images with progress
         print("  Writing frames...")
         if HAS_TQDM:
-            iterator = tqdm(enumerate(frames), desc="  Saving frames", total=len(frames), ncols=80)
+            iterator = tqdm(enumerate(frames), desc="  Saving frames", total=len(frames), ncols=80, ascii=True, mininterval=1.0, miniters=10)
         else:
             iterator = enumerate(frames)
 

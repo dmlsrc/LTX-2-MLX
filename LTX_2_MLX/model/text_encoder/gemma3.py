@@ -386,7 +386,7 @@ class Gemma3Model(nn.Module):
         # Process through layers
         try:
             from tqdm import tqdm
-            layer_iter = list(enumerate(tqdm(self.layers, desc="Gemma forward", ncols=80, leave=False)))
+            layer_iter = list(enumerate(tqdm(self.layers, desc="Gemma forward", ncols=80, leave=False, ascii=True, mininterval=1.0)))
         except ImportError:
             layer_iter = list(enumerate(self.layers))
 
@@ -428,7 +428,7 @@ def load_gemma3_weights(
 
     try:
         from tqdm import tqdm
-        shard_iter = tqdm(shard_files, desc="Loading Gemma shards", ncols=80)
+        shard_iter = tqdm(shard_files, desc="Loading Gemma shards", ncols=80, ascii=True, mininterval=1.0)
     except ImportError:
         shard_iter = shard_files
         print(f"Loading Gemma 3 weights from {len(shard_files)} shards...")

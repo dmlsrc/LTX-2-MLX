@@ -341,6 +341,8 @@ def load_transformer_weights(
             desc="Loading transformer",
             ncols=80,
             total=len(raw_weights),
+            ascii=True,
+            mininterval=1.0,
         )
     else:
         key_iter = raw_weights.items()
