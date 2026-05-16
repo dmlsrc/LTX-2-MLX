@@ -1251,12 +1251,196 @@ even when reported peak memory is unchanged, fewer materialization boundaries ca
 increase graph size, reduce watchdog safety margin, and behave worse at larger
 resolutions or under system pressure.
 
+## 2026-05-15 Session: Audio pretranspose, skip-negative, and bakery parity
+
+Investigation kicked off from a measured per-step gap to mlx-video at small T
+(distilled `--generate-audio` at 256x256x25). Starting baseline was 46.85s
+end-to-end (8+3 step distilled two-stage). Bakery (1024x576x481 frames) was
+about 28-30 minutes total, with stage 2 alone at 18m 41s (~373s/it).
+
+### What shipped (defaults changed)
+
+#### `--internal-audio auto` and reverse-engineered audio-branch dispatch
+
+`internal_audio_active = is_av_model and (use_internal_audio_branch or
+audio_enabled)` in `pipelines/one_stage.py` made the legacy
+`LTX_DISABLE_INTERNAL_AUDIO=1` knob silently ignored whenever
+`--generate-audio` was set, because `audio_enabled` short-circuits the `or`.
+Without `--generate-audio` the AV transformer model was still running the full
+audio branch (audio self-attn + audio text-attn + A2V/V2A cross-modal) every
+denoise step and discarding the result. The transformer call site dispatches
+`self.transformer(video, audio)` whenever `audio_state is not None`; the
+audio_state was always being created.
+
+Fix: new `--internal-audio auto|on|off` flag in `scripts/generate.py`.
+`auto` (default) resolves to `on` only when `--generate-audio` is set. A loud
+startup banner now prints `Internal audio branch: ON|OFF [source]`. The
+`--internal-audio off --generate-audio` combination errors at argv parse with
+a clear message (you cannot output audio without running the branch). The
+`LTX_DISABLE_INTERNAL_AUDIO=1` env var still works as a legacy override.
+
+Impact on the 256x256x25 small bench (no `--generate-audio`): `47.50s ->
+30.91s` (-34.9%) by skipping audio attention/FFN/cross-modal across every
+step. This is a pure correctness fix: prior behavior was paying for audio
+compute that was then thrown away.
+
+mlx-video does the same thing already (see
+`mlx_video/models/ltx_2/generate.py:1985-1991`): the distilled branch
+encodes a single positive prompt, the dev branch encodes positive and negative
+for CFG. Our prior behavior was strictly more work than the reference.
+
+#### Audio module pretranspose (cache-integrated)
+
+The existing same-math layout pipeline only walked the *video-Q* attention
+modules (`attn1`, `attn2`, `audio_to_video_attn`) and `block.ff`. The
+audio-side modules (`audio_attn1`, `audio_attn2`, `video_to_audio_attn`,
+`audio_ff`) were running `mx.addmm(bias, x, weight.T)` with an implicit
+transpose op on every per-step call.
+
+Per AV block: 6 attention modules, each previously contributing 1
+un-pretransposed `to_out` plus the 3 Q/K/V projections, plus 2
+un-pretransposed audio FF projections. Across 48 blocks that is hundreds of
+implicit transpose ops per step that the GPU pays for and then throws away.
+
+Wiring touched `LTX_2_MLX/loader/transformer_cache.py` (added
+`audio_ff_layout_specs` and `audio_attn_layout_specs` payload entries +
+recognition in `_layout_cache_key`), `LTX_2_MLX/model/transformer/model.py`
+(new `apply_audio_ff_layout` and `apply_audio_attn_layout`), and the
+`load_av_transformer` call path. The cache hash bumps automatically because
+the payload now includes the audio layout specs; old caches stay valid for
+callers that haven't updated.
+
+Opt out with `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`.
+
+Impact on the 256x256x25 small bench: `46.85s -> 41.61s` (-11.2%) with audio
+pretranspose alone after audio FF + audio attn `to_out` were cached.
+
+#### QKV pretranspose
+
+Extended the attention layout machinery to `to_q`, `to_k`, `to_v` in addition
+to `to_out`. Per AV block: 6 attention modules x 3 QKV projections = 18 more
+matmuls per block per step where the implicit `weight.T` is now eliminated.
+Defaults updated so all four attention projections are pretransposed by
+default for both video and audio. Cache hash bumps; previously-built caches
+under the old hash stay valid.
+
+Impact: `41.61s -> 40.09s` (-3.7%) on top of the audio pretranspose, for a
+combined `-14.4%` from the original 46.85s baseline.
+
+#### Skip negative prompt encoding for distilled two-stage
+
+`generate_distilled_two_stage` does not accept a negative encoding at all; its
+docstring even says "There is intentionally no CFG in either stage." The
+prompt encoding path was still tokenizing + running Gemma 3 + running the AV
+text encoder twice (positive AND negative) and then passing `null_encoding`
+to a function signature that never read it.
+
+Fix in `scripts/generate.py`: when `distilled_two_stage_requested` and
+`save_text_embeddings` is off, encode only `[prompt]` not `[prompt,
+neg_prompt]`. Sets `null_encoding = null_audio_encoding = null_mask = None`
+since they are never consumed. Verified mlx-video does the same.
+
+Impact: `prompt encoding 12.20s -> 8.25s`, total `41.61s -> 36.21s` (-10%).
+Re-enable the full encoding with `LTX_ENCODE_UNUSED_NEGATIVE=1` if you need
+the negative encoding in a sidecar.
+
+#### Tokenize without `padding="max_length"`
+
+For a 2-token real prompt, `encode_av_gemma_batch` was padding to 1024
+tokens and running the 12B Gemma forward on the full padded sequence before
+trimming. The trim happened after the O(N^2) attention had already done the
+work.
+
+Fix: `padding=False` (default) in the tokenizer call inside
+`encode_av_gemma_batch`. The hidden-state trim that already existed becomes a
+no-op when the input is already minimal. Re-enable padding with
+`LTX_PAD_PROMPT_TO_MAX=1` for debugging.
+
+Impact: `prompt encoding 8.25s -> 6.24s`, total `36.21s -> 34.30s` (-5%).
+Cumulative on the small-T AV bench from baseline: `46.85s -> 34.30s`
+(-26.8%).
+
+### Bakery (1024x576x481)
+
+Re-run with the cumulative defaults: `28m 24s` total. Reference mlx-video
+bakery time was `28m 20s`. We are at parity at the bakery scale; the small-T
+gap was the symptomatic edge that the larger workload mostly masked. Stage 2
+denoise specifically: `18m 41s` (~373s/it for 3 steps), with current
+defaults, no compile.
+
+### Experiments tried and found neutral (kept env-toggleable)
+
+- `LTX_VELOCITY_MODE=1` (in `pipelines/one_stage.py`) bypasses `X0Model` and
+  does the velocity-form Euler update inline. Mathematically identical;
+  measured zero change at both 256x256 (46.85s -> 46.85s) and bakery scale.
+  Confirms `X0Model` wrapper does not add measurable overhead. Kept gated
+  for future MLX versions that may handle it differently.
+- `LTX_COMPILE_BLOCK_GROUPS=N` (eager-path block-group `mx.compile`).
+  Tested at 256x256 with `N=4` (40.21s warm vs 40.09s no-compile = neutral)
+  and at the bakery with `N=48` (stage 2 18m 29s vs 18m 41s baseline =
+  -1%). Compile-trace cost (5+ minutes at bakery scale) is paid up front and
+  per-step does not recover it. mlx-video uses zero `mx.compile` and gets
+  the same numbers. Earlier MEMORY note that `compile-group > 4` watchdog-
+  hangs did not reproduce in this session at 1024x576; the warning is kept
+  but the clamp is lifted.
+- `LTX_ADALN_PRETRANSPOSE=1` extends the pretranspose to the eight
+  `AdaLayerNormSingle.linear` projections (cache-integrated). At small T
+  measured `+0.7s` vs baseline (slight regression). The aggregate adaln
+  matmuls are too few per step (8/step) on a tiny batch to recover the
+  per-tensor dispatch overhead. Code kept; not in defaults.
+- `LTX_ROPE_PRECOMPUTE=1` matches mlx-video's per-stage RoPE precompute
+  pattern. `Modality.positional_embeddings` field accepts an optional
+  precomputed `(cos, sin)` tuple; the preprocessor honors it. Measured
+  neutral (within noise) at small T - MLX's lazy graph already deduplicates
+  the per-step `precompute_freqs_cis` calls.
+- `to_gate_logits` pretranspose: machinery added under
+  `ATTN_LAYOUT_SPECS["to_gate_logits"]`, removed from the default attention
+  layout spec set. Weight is too small (4096x32 / 2048x32) for the implicit
+  transpose to matter; measured `+0.81s` when included. Opt-in via explicit
+  `--video-attn-layout to_out:pretranspose,...,to_gate_logits:pretranspose`.
+
+### Experiments tried and removed
+
+- `LTX_DISABLE_BLOCK_OVERHEAD=1` stripped-down `_fast_call` path in
+  `BasicAVTransformerBlock` (removed `mark_profile` closure allocation,
+  perturbation checks, asserts, the `_cross_attn_scale` getattr lookup, and
+  the `TransformerArgs.replace()` kwargs.get loop). Measured zero change at
+  small T and 159 lines of duplicate hot-loop code was not worth keeping.
+  Theory: Python overhead between block calls is not the bottleneck. MLX's
+  lazy graph already pipelines around Python-side dispatch.
+
+### Profile tooling notes
+
+`scripts/profile-watch.sh` (py-spy auto-attach watcher) was removed.
+`scripts/profile.sh` keeps only the macOS `sample` backend; the py-spy
+backend was removed because SIP gates `task_for_pid` on Darwin and the
+no-root-for-child workaround is Linux-only. `sample` is sufficient for
+"where is the time going" questions; use Instruments for deeper Metal
+traces.
+
+For Python flame graphs of MLX work specifically, note that `py-spy`
+(without `--native`, which is Linux/Windows only) collapses almost all
+time onto the `mx.eval` line because MLX is lazy and the actual execution
+is on a different thread. Block-level `--profile-transformer-steps` +
+`--profile-transformer-blocks` instrumentation is a better tool for
+attributing time to specific phases inside one step.
+
 ## Benchmark Matrix
 
 Use a fixed command and change only one thing at a time.
 
 | Experiment | Code change? | Memory risk | Expected denoise speed impact | Notes |
 | --- | --- | --- | --- | --- |
+| `--internal-audio auto` (default) | yes | none | -35% wall on video-only (256x256x25) | New CLI flag. Default `auto` resolves to `on` iff `--generate-audio`. Off otherwise. Replaces the silently-overridden `LTX_DISABLE_INTERNAL_AUDIO=1` legacy env. Matches mlx-video's distilled path. |
+| Audio module pretranspose (default) | yes | medium | -11% AV (256x256x25) | `audio_attn1/2.to_*`, `video_to_audio_attn.to_*`, `audio_ff.project_*` now go through the same `mx.contiguous(weight.T)` cache path the video modules use. Cache hash bumps; old caches stay valid. Opt out with `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`. |
+| QKV pretranspose (default) | yes | medium | -4% additional AV | `to_q/to_k/to_v` added to the default attention layout spec. 18 more matmuls per AV block per step with the implicit transpose eliminated. Cache hash bumps. |
+| Skip negative prompt encoding (distilled two-stage) | yes | none | -10% AV (256x256x25) | `generate_distilled_two_stage` doesn't accept a negative encoding, so we no longer encode one. Re-enable with `LTX_ENCODE_UNUSED_NEGATIVE=1` for sidecar debugging. Matches mlx-video. |
+| Tokenize without max-length padding | yes | none | -5% AV (256x256x25) | Tokenizer was padding 2 real tokens to 1024 before the Gemma forward; trim happened after the wasted O(N^2) attention. Re-enable with `LTX_PAD_PROMPT_TO_MAX=1`. |
+| `LTX_VELOCITY_MODE=1` | yes | low | neutral | Bypasses `X0Model` and does the velocity-form Euler update inline in `_denoise_loop_simple_av`. Same math. Tested at small T and bakery; both neutral. Kept env-gated for future MLX versions. |
+| `LTX_COMPILE_BLOCK_GROUPS=N` | yes | medium | neutral at all tested scales | Eager-path `mx.compile` over N-block groups. `N=4` tested at small T (neutral), `N=48` at bakery (neutral: 18m 29s vs 18m 41s baseline). Compile-trace cost paid up front; per-step does not recover it. mlx-video uses zero compile and gets the same numbers. |
+| `LTX_ADALN_PRETRANSPOSE=1` | yes | low | slight regression at small T | Cache-integrated pretranspose for the 8 `AdaLayerNormSingle.linear` projections. The 8 calls per step on a tiny batch don't amortize the per-tensor dispatch overhead. Kept opt-in. |
+| `LTX_ROPE_PRECOMPUTE=1` | yes | none | neutral | mlx-video pattern: compute RoPE once per stage and pass through `Modality.positional_embeddings`. MLX's lazy graph already deduplicates per-step `precompute_freqs_cis` calls, so the savings don't show. |
+| `to_gate_logits` pretranspose (opt-in) | yes | low | slight regression | Pretranspose support for the V2 per-head gate-logits Linear. Weight (4096x32 / 2048x32) is too small for the implicit transpose to matter. Opt-in via `--video-attn-layout to_out:pretranspose,...,to_gate_logits:pretranspose`. |
 | `--profile-transformer-steps` | yes | low | diagnostic only | Forces eval checkpoints during selected denoise steps to locate hotspots. Do not use for final timing. |
 | `--profile-transformer-blocks` | yes | low | diagnostic only | Adds forced eval checkpoints inside selected blocks for already-profiled steps. Block profiles now split attention into setup/AdaLN, Q/K/V, Q/K norm, RoPE, SDPA, gate, output, and residual sections. |
 | FFN sub-profile | yes | low | diagnostic only | Selected block profiles also split FFN into AdaLN, `project_in`, GELU, `project_out`, and residual gate. |
