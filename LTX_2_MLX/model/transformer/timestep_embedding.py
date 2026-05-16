@@ -183,6 +183,27 @@ class AdaLayerNormSingle(nn.Module):
         )
         self.silu = nn.SiLU()
         self.linear = nn.Linear(embedding_dim, num_embeddings * embedding_dim, bias=True)
+        # Pretranspose cache for self.linear.  Materialized via
+        # ``pretranspose_linear()`` and used in ``__call__`` when present.
+        self._linear_weight_t = None
+
+    def pretranspose_linear(self) -> list[mx.array]:
+        """Cache mx.contiguous(linear.weight.T) — saves the implicit transpose
+        op on every per-step adaln call.  Returns the arrays to ``mx.eval``."""
+        if self._linear_weight_t is not None:
+            arrays = [self._linear_weight_t]
+            bias = self.linear.get("bias")
+            if bias is not None:
+                arrays.append(bias)
+            return arrays
+        if "weight" not in self.linear:
+            raise ValueError("AdaLayerNormSingle linear weight is unavailable")
+        self._linear_weight_t = mx.contiguous(self.linear.weight.T)
+        arrays = [self._linear_weight_t]
+        bias = self.linear.get("bias")
+        if bias is not None:
+            arrays.append(bias)
+        return arrays
 
     def __call__(self, timestep: mx.array) -> tuple:
         """
@@ -198,5 +219,12 @@ class AdaLayerNormSingle(nn.Module):
         """
         embedded_timestep = self.emb(timestep)
         emb = self.silu(embedded_timestep)
-        emb = self.linear(emb)
+        if self._linear_weight_t is None:
+            emb = self.linear(emb)
+        else:
+            bias = self.linear.get("bias")
+            if bias is not None:
+                emb = mx.addmm(bias, emb, self._linear_weight_t)
+            else:
+                emb = emb @ self._linear_weight_t
         return emb, embedded_timestep

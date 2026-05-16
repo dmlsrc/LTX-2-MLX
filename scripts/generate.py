@@ -89,12 +89,27 @@ FF_LAYOUT_SPECS = {
 }
 ATTN_LAYOUT_SPECS = {
     "to_out": ("pretranspose",),
+    "to_q": ("pretranspose",),
+    "to_k": ("pretranspose",),
+    "to_v": ("pretranspose",),
+    # to_gate_logits is supported but measured neutral-to-slight-regression
+    # (weights too tiny — 4096*32 / 2048*32 — for the implicit transpose to
+    # matter).  Opt-in via explicit --video-attn-layout if you want to A/B.
+    "to_gate_logits": ("pretranspose",),
 }
 DEFAULT_VIDEO_FF_LAYOUT_SPECS = (
     ("project_in", "pretranspose"),
     ("project_out", "pretranspose"),
 )
-DEFAULT_VIDEO_ATTN_LAYOUT_SPECS = (("to_out", "pretranspose"),)
+# Pretranspose all four large attention projections by default.  to_gate_logits
+# is intentionally excluded — its tiny weight shape gives no measurable benefit
+# and adds cache-load + dispatch overhead.
+DEFAULT_VIDEO_ATTN_LAYOUT_SPECS = (
+    ("to_out", "pretranspose"),
+    ("to_q",   "pretranspose"),
+    ("to_k",   "pretranspose"),
+    ("to_v",   "pretranspose"),
+)
 DEFAULT_TRANSFORMER_LAYOUT_LAYERS = tuple(range(48))
 DEFAULT_LTX_REPO_ID = "Lightricks/LTX-2.3"
 LEGACY_LTX_REPO_ID = "Lightricks/LTX-2"
@@ -1056,7 +1071,7 @@ def _read_checkpoint_config(checkpoint_path: str) -> dict:
     import json
     try:
         from safetensors import safe_open
-        with safe_open(checkpoint_path, framework="pt") as f:
+        with safe_open(checkpoint_path, framework="numpy") as f:
             metadata = f.metadata() or {}
         config_str = metadata.get("config", "{}")
         return json.loads(config_str)
@@ -1153,7 +1168,7 @@ def detect_model_version(checkpoint_path: str) -> str:
     """
     try:
         from safetensors import safe_open
-        with safe_open(checkpoint_path, framework="pt") as f:
+        with safe_open(checkpoint_path, framework="numpy") as f:
             metadata = f.metadata() or {}
         return metadata.get("model_version", "")
     except Exception:
@@ -1171,7 +1186,7 @@ def get_vae_config(checkpoint_path: str) -> dict:
     try:
         import json
         from safetensors import safe_open
-        with safe_open(checkpoint_path, framework="pt") as f:
+        with safe_open(checkpoint_path, framework="numpy") as f:
             metadata = f.metadata() or {}
         config = json.loads(metadata.get("config", "{}"))
         return config.get("vae", {})
@@ -1493,17 +1508,32 @@ def encode_av_gemma_batch(
     gemma = Gemma3Model(config)
     load_gemma3_weights(gemma, gemma_path)
 
+    # LTX_PAD_PROMPT_TO_MAX=1 restores the legacy padding-to-max behavior for
+    # debugging.  Default skips it — running Gemma on a 1024-token padded
+    # sequence when the real prompt is only a few tokens wastes O(N^2) attention
+    # work that's discarded by the post-forward trim below.
+    pad_to_max = bool(os.environ.get("LTX_PAD_PROMPT_TO_MAX"))
+
     gemma_outputs = []
     for i, prompt in enumerate(prompts):
         label = prompt_label(i, len(prompts))
         print(f"  Tokenizing {label}...")
-        encoding = tokenizer(
-            prompt,
-            return_tensors="np",
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-        )
+        if pad_to_max:
+            encoding = tokenizer(
+                prompt,
+                return_tensors="np",
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+            )
+        else:
+            encoding = tokenizer(
+                prompt,
+                return_tensors="np",
+                padding=False,
+                truncation=True,
+                max_length=max_length,
+            )
 
         input_ids = mx.array(encoding["input_ids"])
         attention_mask = mx.array(encoding["attention_mask"])
@@ -1511,7 +1541,8 @@ def encode_av_gemma_batch(
         num_tokens = int(attention_mask.sum())
         print(f"  Token count: {num_tokens}/{max_length}")
 
-        print(f"  Running Gemma 3 forward pass for {label} (48 layers)...")
+        print(f"  Running Gemma 3 forward pass for {label} (48 layers, "
+              f"{input_ids.shape[1]} tokens)...")
         last_hidden, all_hidden_states = gemma(
             input_ids,
             attention_mask=attention_mask,
@@ -2061,6 +2092,11 @@ def load_av_transformer(
     video_ff_layout_layers: tuple[int, ...] = (),
     video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
     video_attn_layout_layers: tuple[int, ...] = (),
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     caption_channels: int | None = 3840,
     cross_attention_adaln: bool = False,
@@ -2121,6 +2157,11 @@ def load_av_transformer(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                audio_ff_layout_specs=audio_ff_layout_specs,
+                audio_ff_layout_layers=audio_ff_layout_layers,
+                audio_attn_layout_specs=audio_attn_layout_specs,
+                audio_attn_layout_layers=audio_attn_layout_layers,
+                adaln_pretranspose=adaln_pretranspose,
                 transformer_cache_quantize=transformer_cache_quantize,
                 video_ff_quantize_specs=video_ff_quantize_specs,
                 video_ff_quantize_layers=video_ff_quantize_layers,
@@ -2153,6 +2194,11 @@ def load_av_transformer(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                audio_ff_layout_specs=audio_ff_layout_specs,
+                audio_ff_layout_layers=audio_ff_layout_layers,
+                audio_attn_layout_specs=audio_attn_layout_specs,
+                audio_attn_layout_layers=audio_attn_layout_layers,
+                adaln_pretranspose=adaln_pretranspose,
                 transformer_cache_quantize=transformer_cache_quantize,
             )
             layouts_loaded_from_cache = True
@@ -2225,6 +2271,47 @@ def load_av_transformer(
         spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
         print(
             "  Video attention layout: "
+            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
+        )
+
+    # Audio-side pretranspose for AV blocks (audio_ff, audio_attn1.to_out,
+    # audio_attn2.to_out, video_to_audio_attn.to_out).  Same fp16-safe
+    # weight.T contiguity trick as the video side, just targeting modules
+    # where Q comes from audio.  Cached when --weights-cache is on.
+    if audio_ff_layout_specs and not layouts_loaded_from_cache:
+        count = model.apply_audio_ff_layout(
+            layout_specs=audio_ff_layout_specs,
+            layers=audio_ff_layout_layers,
+        )
+        layer_str = describe_transformer_layers(audio_ff_layout_layers)
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in audio_ff_layout_specs)
+        print(
+            "  Audio FF layout: "
+            f"{count} projections, specs={spec_str}, layers={layer_str}"
+        )
+    elif audio_ff_layout_specs:
+        layer_str = describe_transformer_layers(audio_ff_layout_layers)
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in audio_ff_layout_specs)
+        print(
+            "  Audio FF layout: "
+            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
+        )
+    if audio_attn_layout_specs and not layouts_loaded_from_cache:
+        count = model.apply_audio_attn_layout(
+            layout_specs=audio_attn_layout_specs,
+            layers=audio_attn_layout_layers,
+        )
+        layer_str = describe_transformer_layers(audio_attn_layout_layers)
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in audio_attn_layout_specs)
+        print(
+            "  Audio attention layout: "
+            f"{count} projections, specs={spec_str}, layers={layer_str}"
+        )
+    elif audio_attn_layout_specs:
+        layer_str = describe_transformer_layers(audio_attn_layout_layers)
+        spec_str = ",".join(f"{target}:{layout}" for target, layout in audio_attn_layout_specs)
+        print(
+            "  Audio attention layout: "
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
     return model
@@ -2341,6 +2428,7 @@ def generate_video(
     upscale_temporal: bool = False,
     temporal_upscaler_weights: str = None,
     generate_audio: bool = False,
+    internal_audio: str = "auto",
     low_memory: bool = False,
     fast_mode: bool = False,
     profile_transformer_once: bool = False,
@@ -2716,6 +2804,38 @@ def generate_video(
         print(f"Temporal upscaling: 2x (frames will be ~{num_frames*2})")
     if generate_audio:
         print(f"Audio generation: ENABLED (stereo 24kHz)")
+
+    # Resolve and report internal-audio state.  Validation: --internal-audio off
+    # with --generate-audio is incoherent — the audio branch produces what the
+    # decoder needs.  Reject it loudly rather than silently turning off audio.
+    if internal_audio == "off" and generate_audio:
+        raise SystemExit(
+            "error: --internal-audio off cannot be combined with --generate-audio "
+            "(audio output requires the internal audio branch).  Drop one of the flags."
+        )
+    _env_disable = bool(os.environ.get("LTX_DISABLE_INTERNAL_AUDIO"))
+    if _env_disable:
+        _internal_resolved_state = "off"
+        _internal_source = "LTX_DISABLE_INTERNAL_AUDIO env"
+    elif internal_audio == "on":
+        _internal_resolved_state = "on"
+        _internal_source = "--internal-audio on"
+    elif internal_audio == "off":
+        _internal_resolved_state = "off"
+        _internal_source = "--internal-audio off"
+    else:  # auto
+        _internal_resolved_state = "on" if generate_audio else "off"
+        _internal_source = f"auto (--generate-audio={generate_audio})"
+    print(
+        f"Internal audio branch: {_internal_resolved_state.upper()} "
+        f"[{_internal_source}]"
+    )
+    if _internal_resolved_state == "on" and not generate_audio:
+        print(
+            "  Note: internal audio runs but no audio output will be saved.  "
+            "Pass --internal-audio off (or just omit --internal-audio) to skip "
+            "the audio branch entirely for a meaningful per-step speedup."
+        )
     if save_latents:
         print(f"Latent sidecar: ENABLED")
     if save_text_embeddings:
@@ -2927,25 +3047,52 @@ def generate_video(
         if use_av_encoder:
             # Encode both prompt AND negative prompt in one Gemma load, then
             # free Gemma before loading the AV connector to reduce peak memory.
-            neg_prompt = negative_prompt if negative_prompt else ""
-            results = encode_av_gemma_batch(
-                prompts=[prompt, neg_prompt],
-                gemma_path=gemma_path,
-                ltx_weights_path=connector_load_path,
-                ltx_config_path=config_weights_path,
+            #
+            # Skip the negative encoding entirely for distilled two-stage
+            # (which doesn't pass negative_encoding through the pipeline) when
+            # no text-embedding sidecar is requested.  Saves ~5-7s/run by
+            # avoiding one Gemma + one AV-connector forward pass.
+            # Re-enable with LTX_ENCODE_UNUSED_NEGATIVE=1 for debugging.
+            skip_negative = (
+                distilled_two_stage_requested
+                and not save_text_embeddings
+                and not os.environ.get("LTX_ENCODE_UNUSED_NEGATIVE")
             )
-            if results is None or results[0][0] is None:
-                print("  ERROR: Failed to encode prompt with AV encoder")
-                return
-            text_encoding, text_audio_encoding, text_mask = results[0]
-            null_encoding, null_audio_encoding, null_mask = results[1]
-            if null_encoding is None:
-                print("  WARNING: Failed to encode negative prompt, using zeros fallback")
-                null_encoding, null_mask = create_null_text_encoding(
-                    batch_size=1, max_tokens=text_encoding.shape[1], embed_dim=text_encoding.shape[2],
+            if skip_negative:
+                results = encode_av_gemma_batch(
+                    prompts=[prompt],
+                    gemma_path=gemma_path,
+                    ltx_weights_path=connector_load_path,
+                    ltx_config_path=config_weights_path,
                 )
-                null_audio_encoding = null_encoding
-            print(f"  Encoded both prompts with Gemma 3 (AudioVideo, single load)")
+                if results is None or results[0][0] is None:
+                    print("  ERROR: Failed to encode prompt with AV encoder")
+                    return
+                text_encoding, text_audio_encoding, text_mask = results[0]
+                # Negative not used by distilled two-stage; leave as None.
+                null_encoding, null_audio_encoding, null_mask = None, None, None
+                print("  Encoded positive prompt only with Gemma 3 "
+                      "(distilled two-stage doesn't use negative)")
+            else:
+                neg_prompt = negative_prompt if negative_prompt else ""
+                results = encode_av_gemma_batch(
+                    prompts=[prompt, neg_prompt],
+                    gemma_path=gemma_path,
+                    ltx_weights_path=connector_load_path,
+                    ltx_config_path=config_weights_path,
+                )
+                if results is None or results[0][0] is None:
+                    print("  ERROR: Failed to encode prompt with AV encoder")
+                    return
+                text_encoding, text_audio_encoding, text_mask = results[0]
+                null_encoding, null_audio_encoding, null_mask = results[1]
+                if null_encoding is None:
+                    print("  WARNING: Failed to encode negative prompt, using zeros fallback")
+                    null_encoding, null_mask = create_null_text_encoding(
+                        batch_size=1, max_tokens=text_encoding.shape[1], embed_dim=text_encoding.shape[2],
+                    )
+                    null_audio_encoding = null_encoding
+                print(f"  Encoded both prompts with Gemma 3 (AudioVideo, single load)")
         else:
             # Use video-only Gemma encoding (V1/V2.0 only)
             text_encoding, text_mask = encode_with_gemma(
@@ -3005,6 +3152,21 @@ def generate_video(
     if use_av_encoder:
         print("\n[2/5] Loading AudioVideo transformer...")
         if not use_placeholder and transformer_weights_path:
+            # Audio pretranspose mirrors video by default for AV models — the
+            # audio modules see the same per-step dispatch pattern, so the
+            # same weight.T contiguity helps.  Disable with
+            # LTX_DISABLE_AUDIO_PRETRANSPOSE=1.
+            if os.environ.get("LTX_DISABLE_AUDIO_PRETRANSPOSE"):
+                _audio_ff_layout_specs = ()
+                _audio_attn_layout_specs = ()
+            else:
+                _audio_ff_layout_specs = video_ff_layout_specs
+                _audio_attn_layout_specs = video_attn_layout_specs
+            # AdaLN pretranspose is cache-integrated (no per-load RAM spike),
+            # but measured neutral-to-slight-regression at small T because the
+            # per-step adaln matmul count is low (8) and batch is tiny.  Off
+            # by default; opt-in with LTX_ADALN_PRETRANSPOSE=1.
+            _adaln_pretranspose = bool(os.environ.get("LTX_ADALN_PRETRANSPOSE"))
             model = load_av_transformer(
                 transformer_weights_path, num_layers=48, compute_dtype=compute_dtype,
                 low_memory=low_memory,
@@ -3017,6 +3179,11 @@ def generate_video(
                 video_ff_layout_layers=video_ff_layout_layers,
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
+                audio_ff_layout_specs=_audio_ff_layout_specs,
+                audio_ff_layout_layers=video_ff_layout_layers,
+                audio_attn_layout_specs=_audio_attn_layout_specs,
+                audio_attn_layout_layers=video_attn_layout_layers,
+                adaln_pretranspose=_adaln_pretranspose,
                 transformer_cache_quantize=transformer_cache_quantize,
                 weights_cache_mode=weights_cache_mode,
                 weights_cache_dir=weights_cache_dir,
@@ -3650,6 +3817,25 @@ def generate_video(
 
         # Create config with audio enabled
         # LTX-2.3 reference: video_cfg=3.0, audio_cfg=7.0, rescale=0.7
+        #
+        # Internal-audio resolution.  By default V2/AV models always run the
+        # internal audio branch (audio self-attn + A2V/V2A cross-modal) even
+        # when --generate-audio is off, and discard the result — wasted compute.
+        # --internal-audio gives users control:
+        #   auto (default): on iff --generate-audio
+        #   on            : always on
+        #   off           : always off (also disables audio output)
+        # LTX_DISABLE_INTERNAL_AUDIO=1 is a legacy env override that forces off.
+        _env_disable_internal_audio = bool(os.environ.get("LTX_DISABLE_INTERNAL_AUDIO"))
+        if _env_disable_internal_audio:
+            _internal_audio_resolved = False
+        elif internal_audio == "on":
+            _internal_audio_resolved = True
+        elif internal_audio == "off":
+            _internal_audio_resolved = False
+        else:  # "auto"
+            _internal_audio_resolved = generate_audio
+        _disable_internal_audio = not _internal_audio_resolved
         av_config = OneStageCFGConfig(
             height=height,
             width=width,
@@ -3667,6 +3853,7 @@ def generate_video(
             profile_transformer_steps=active_profile_steps,
             profile_transformer_blocks=active_profile_blocks,
             audio_enabled=generate_audio,
+            use_internal_audio_branch=not _disable_internal_audio,
         )
 
         timings.mark("av pipeline prep")
@@ -4661,6 +4848,25 @@ def main():
         help="Generate synchronized audio with video (requires AudioVideo model weights)"
     )
     parser.add_argument(
+        "--internal-audio",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Control whether the AV transformer runs its internal audio branch "
+            "(audio self-attn, audio text-attn, A2V/V2A cross-modal).  This is "
+            "independent of audio output: the audio branch runs by default even "
+            "when --generate-audio is off, and discarding the result is wasted "
+            "compute.\n"
+            "  auto  (default): on iff --generate-audio is set.\n"
+            "  on            : always run the audio branch.\n"
+            "  off           : never run the audio branch.  Disables audio "
+            "output regardless of --generate-audio.\n"
+            "Effect on a small distilled run (256x256, 25 frames, V2.3): "
+            "stage-1 ~26s -> ~11s, stage-2 ~7.5s -> ~5.4s when off vs on.  "
+            "(LTX_DISABLE_INTERNAL_AUDIO=1 still works as a legacy override.)"
+        ),
+    )
+    parser.add_argument(
         "--low-memory",
         action="store_true",
         help=(
@@ -5053,6 +5259,7 @@ def main():
         upscale_temporal=args.upscale_temporal,
         temporal_upscaler_weights=args.temporal_upscaler_weights,
         generate_audio=args.generate_audio,
+        internal_audio=args.internal_audio,
         low_memory=args.low_memory,
         fast_mode=args.fast_mode,
         profile_transformer_once=args.profile_transformer_once,

@@ -6,7 +6,7 @@ implementations to avoid code duplication.
 
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import numpy as np
@@ -209,6 +209,7 @@ def modality_from_state(
     context: mx.array,
     sigma: float,
     enabled: bool = True,
+    positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
 ) -> Modality:
     """Create a Modality from a latent state.
 
@@ -217,6 +218,9 @@ def modality_from_state(
         context: Text context embeddings
         sigma: Current noise level (sigma value from scheduler)
         enabled: Whether this modality is enabled
+        positional_embeddings: Optional precomputed (cos, sin) RoPE tuple.
+            When provided the preprocessor reuses it instead of recomputing
+            ``precompute_freqs_cis`` every step.
 
     Returns:
         Modality object ready for transformer input
@@ -241,6 +245,7 @@ def modality_from_state(
         context=context,
         context_mask=None,
         sigma=sigma_tensor,
+        positional_embeddings=positional_embeddings,
     )
 
 
@@ -249,6 +254,7 @@ def audio_modality_from_state(
     context: mx.array,
     sigma: float,
     enabled: bool = True,
+    positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
 ) -> Modality:
     """Create a Modality from an audio latent state.
 
@@ -257,6 +263,7 @@ def audio_modality_from_state(
         context: Text context embeddings (audio encoding)
         sigma: Current noise level (sigma value from scheduler)
         enabled: Whether this modality is enabled
+        positional_embeddings: Optional precomputed (cos, sin) RoPE tuple.
 
     Returns:
         Modality object ready for transformer input
@@ -277,6 +284,7 @@ def audio_modality_from_state(
         context=context,
         context_mask=None,
         sigma=sigma_tensor,
+        positional_embeddings=positional_embeddings,
     )
 
 

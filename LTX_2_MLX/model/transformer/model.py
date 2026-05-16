@@ -1,6 +1,7 @@
 """LTX-2 Transformer Model for MLX (Unified Video/Audio)."""
 
 import gc
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -135,6 +136,10 @@ class Modality:
     positions: mx.array  # Shape: (B, n_dims, T) - position indices
     enabled: bool = True
     sigma: Optional[mx.array] = None  # Shape: (B,) - scalar noise level for V2 prompt_adaln
+    # Optional precomputed (cos, sin) RoPE.  When set, the preprocessor skips
+    # the per-step ``precompute_freqs_cis`` call.  Caller is responsible for
+    # invalidation when positions/max_pos/theta change between stages.
+    positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None
 
 
 class TransformerArgsPreprocessor:
@@ -335,8 +340,13 @@ class TransformerArgsPreprocessor:
             modality.context_mask, target_dtype=self.compute_dtype
         )
 
-        # Prepare positional embeddings (RoPE)
-        pe = self._prepare_positional_embeddings(modality.positions)
+        # Prepare positional embeddings (RoPE).  Skip the precompute_freqs_cis
+        # call when the caller supplied a precomputed (cos, sin) tuple — this
+        # mirrors mlx-video's per-stage RoPE precompute pattern.
+        if modality.positional_embeddings is not None:
+            pe = modality.positional_embeddings
+        else:
+            pe = self._prepare_positional_embeddings(modality.positions)
 
         return TransformerArgs(
             x=x,
@@ -837,15 +847,16 @@ class LTXModel(nn.Module):
         layers: Tuple[int, ...] = (),
     ) -> int:
         """Apply selected same-math video attention layout transforms."""
+        _SUPPORTED = {"to_out", "to_q", "to_k", "to_v"}
         count = 0
         selected_layers = set(layers)
-        output_specs = tuple(
+        supported_specs = tuple(
             spec for spec in layout_specs
-            if spec[0] == "to_out"
+            if spec[0] in _SUPPORTED
         )
         unsupported_specs = tuple(
             spec for spec in layout_specs
-            if spec[0] != "to_out"
+            if spec[0] not in _SUPPORTED
         )
         if unsupported_specs:
             spec_str = ",".join(f"{target}:{layout}" for target, layout in unsupported_specs)
@@ -855,7 +866,7 @@ class LTXModel(nn.Module):
             if selected_layers and i not in selected_layers:
                 continue
 
-            if output_specs:
+            if supported_specs:
                 attention_modules = [
                     getattr(block, "attn1", None),
                     getattr(block, "attn2", None),
@@ -864,14 +875,130 @@ class LTXModel(nn.Module):
                 for attn in attention_modules:
                     if attn is None:
                         continue
-                    arrays = attn.apply_layouts(output_specs)
+                    arrays = attn.apply_layouts(supported_specs)
                     if arrays:
                         mx.eval(*arrays)
-                        attn.drop_layout_sources(output_specs)
+                        attn.drop_layout_sources(supported_specs)
                         gc.collect()
                         mx.clear_cache()
-                    count += len(output_specs)
+                    count += len(supported_specs)
 
+        return count
+
+    def apply_audio_ff_layout(
+        self,
+        layout_specs: Tuple[Tuple[str, str], ...],
+        layers: Tuple[int, ...] = (),
+    ) -> int:
+        """Apply selected same-math audio feed-forward layout transforms.
+
+        Mirrors apply_video_ff_layout but targets ``audio_ff`` on AV blocks.
+        Only meaningful for AV (LTXAVModel) variants; no-op on video-only
+        blocks where ``audio_ff`` is absent.
+        """
+        count = 0
+        selected_layers = set(layers)
+        for i, block in enumerate(self.transformer_blocks):
+            if selected_layers and i not in selected_layers:
+                continue
+            ff = getattr(block, "audio_ff", None)
+            if ff is None:
+                continue
+            arrays = ff.apply_layouts(layout_specs)
+            if arrays:
+                mx.eval(*arrays)
+                ff.drop_layout_sources(layout_specs)
+                gc.collect()
+                mx.clear_cache()
+            count += len(layout_specs)
+
+        return count
+
+    def apply_audio_attn_layout(
+        self,
+        layout_specs: Tuple[Tuple[str, str], ...],
+        layers: Tuple[int, ...] = (),
+    ) -> int:
+        """Apply selected same-math audio attention layout transforms.
+
+        Mirrors apply_video_attn_layout but targets attention modules where Q
+        comes from the audio modality:
+          - audio_attn1            (audio self-attn)
+          - audio_attn2            (audio text cross-attn)
+          - video_to_audio_attn    (V2A cross-modal)
+        Only meaningful for AV variants; no-op on video-only blocks.
+        """
+        _SUPPORTED = {"to_out", "to_q", "to_k", "to_v"}
+        count = 0
+        selected_layers = set(layers)
+        supported_specs = tuple(
+            spec for spec in layout_specs
+            if spec[0] in _SUPPORTED
+        )
+        unsupported_specs = tuple(
+            spec for spec in layout_specs
+            if spec[0] not in _SUPPORTED
+        )
+        if unsupported_specs:
+            spec_str = ",".join(f"{target}:{layout}" for target, layout in unsupported_specs)
+            raise ValueError(f"Unsupported audio attention layout specs: {spec_str}")
+
+        for i, block in enumerate(self.transformer_blocks):
+            if selected_layers and i not in selected_layers:
+                continue
+
+            if supported_specs:
+                attention_modules = [
+                    getattr(block, "audio_attn1", None),
+                    getattr(block, "audio_attn2", None),
+                    getattr(block, "video_to_audio_attn", None),
+                ]
+                for attn in attention_modules:
+                    if attn is None:
+                        continue
+                    arrays = attn.apply_layouts(supported_specs)
+                    if arrays:
+                        mx.eval(*arrays)
+                        attn.drop_layout_sources(supported_specs)
+                        gc.collect()
+                        mx.clear_cache()
+                    count += len(supported_specs)
+
+        return count
+
+    def apply_adaln_pretranspose(self) -> int:
+        """Pretranspose every AdaLayerNormSingle.linear in the model.
+
+        Walks self.adaln_single, self.prompt_adaln_single, audio counterparts,
+        and the four av_ca_*_adaln_single modules.  Each holds a single Linear
+        whose weight matmul runs once per denoise step — pretransposing the
+        weight saves the implicit ``weight.T`` op on every call.
+
+        Not currently persisted to the on-disk transformer cache (the win is
+        small per-call and applied-at-load is cheap; we can promote it later
+        if it proves worthwhile).
+        """
+        count = 0
+        # Names of all AdaLayerNormSingle attrs the model may carry.
+        candidates = (
+            "adaln_single",
+            "audio_adaln_single",
+            "prompt_adaln_single",
+            "audio_prompt_adaln_single",
+            "av_ca_video_scale_shift_adaln_single",
+            "av_ca_audio_scale_shift_adaln_single",
+            "av_ca_a2v_gate_adaln_single",
+            "av_ca_v2a_gate_adaln_single",
+        )
+        arrays: List[mx.array] = []
+        for name in candidates:
+            module = getattr(self, name, None)
+            if module is None or not isinstance(module, AdaLayerNormSingle):
+                continue
+            arrays.extend(module.pretranspose_linear())
+            count += 1
+        if arrays:
+            mx.eval(*arrays)
         return count
 
     # Audio layer debug: set to a directory path to capture per-layer audio states
@@ -960,6 +1087,43 @@ class LTXModel(nn.Module):
         )
         resident_blocks = len(self.transformer_blocks)
         previous_slot_layers: List[Optional[int]] = [None] * resident_blocks
+
+        # LTX_COMPILE_BLOCK_GROUPS=N enables block-group mx.compile for the
+        # *non-streaming* path.  N is the group size.  Per prior experiments,
+        # N>4 has triggered Metal watchdog hangs at large shapes — warn but
+        # don't clamp (let the user A/B at their own risk).
+        # Compiled groups are cached on the model and reused across steps.
+        # Same compile-group machinery the streaming path uses; just
+        # bypasses block_streamer.bind() since there's no slot rotation.
+        eager_compile_group_size = 0
+        env_compile_groups = os.environ.get("LTX_COMPILE_BLOCK_GROUPS")
+        if (
+            env_compile_groups
+            and block_streamer is None
+            and not self._transformer_block_compile_disabled
+            and perturbations is None
+            and not profile_block_ids
+            and not capture
+            and (video_args is None or video_args.enabled)
+            and (audio_args is None or audio_args.enabled)
+        ):
+            try:
+                eager_compile_group_size = max(1, int(env_compile_groups))
+            except ValueError:
+                eager_compile_group_size = 4
+            if eager_compile_group_size > 4 and not getattr(
+                self, "_compile_group_warning_emitted", False,
+            ):
+                # Leading newline breaks out of the active progress-bar line
+                # so the warning doesn't get appended to it.
+                print(
+                    f"\n  WARNING: LTX_COMPILE_BLOCK_GROUPS={eager_compile_group_size} "
+                    ">4 has historically triggered Metal watchdog hangs at "
+                    "large T — Ctrl-C and reduce if the bench appears stuck.",
+                    flush=True,
+                )
+                object.__setattr__(self, "_compile_group_warning_emitted", True)
+
         use_compiled_groups = (
             block_streamer is not None
             and self.transformer_block_compile
@@ -1048,6 +1212,44 @@ class LTXModel(nn.Module):
                         profile_group_started_at = now
 
             return video_args, audio_args
+
+        # Eager-path block-group compile (LTX_COMPILE_BLOCK_GROUPS=N).
+        if eager_compile_group_size > 0:
+            compiled_groups = object.__getattribute__(self, "_compiled_transformer_block_groups")
+            if not isinstance(compiled_groups, dict):
+                compiled_groups = {}
+                object.__setattr__(self, "_compiled_transformer_block_groups", compiled_groups)
+
+            eager_compile_failed = False
+            for group_start in range(0, total_blocks, eager_compile_group_size):
+                group_size = min(eager_compile_group_size, total_blocks - group_start)
+                group_key = ("eager", group_start, group_size)
+                group_callable = compiled_groups.get(group_key)
+                if group_callable is None:
+                    slot_blocks = self.transformer_blocks[group_start : group_start + group_size]
+                    group_callable = _compile_transformer_block_group(slot_blocks)
+                    compiled_groups[group_key] = group_callable
+
+                try:
+                    video_packed, audio_packed = group_callable(
+                        _pack_transformer_args(video_args),
+                        _pack_transformer_args(audio_args),
+                    )
+                    video_args = _unpack_transformer_args(video_packed)
+                    audio_args = _unpack_transformer_args(audio_packed)
+                except (RuntimeError, TypeError, ValueError) as exc:
+                    eager_compile_failed = True
+                    self._transformer_block_compile_disabled = True
+                    object.__setattr__(self, "_compiled_transformer_block_groups", {})
+                    print(
+                        "  WARNING: Eager block-group compile failed; "
+                        f"falling back to per-block dispatch ({exc})"
+                    )
+                    break
+
+            if not eager_compile_failed:
+                return video_args, audio_args
+            # Fall through to the per-block loop below for this step.
 
         for i in range(total_blocks):
             slot = i

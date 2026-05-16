@@ -213,36 +213,83 @@ class Attention(nn.Module):
         # Output projection
         self.to_out = nn.Linear(inner_dim, query_dim, bias=True)
         self._to_out_weight_t = None
+        self._to_q_weight_t = None
+        self._to_k_weight_t = None
+        self._to_v_weight_t = None
+        self._to_gate_logits_weight_t = None  # only used when to_gate_logits is set
+
+    def _projection_call(
+        self,
+        linear: nn.Linear,
+        cached_t: Optional[mx.array],
+        x: mx.array,
+    ) -> mx.array:
+        """Apply a Linear, using a pre-transposed weight cache when present."""
+        if cached_t is None:
+            return linear(x)
+        bias = linear.get("bias")
+        if bias is not None:
+            return mx.addmm(bias, x, cached_t)
+        return x @ cached_t
 
     def _to_out(self, x: mx.array) -> mx.array:
         """Run to_out, optionally using a pre-transposed contiguous weight."""
-        if self._to_out_weight_t is None:
-            return self.to_out(x)
+        return self._projection_call(self.to_out, self._to_out_weight_t, x)
 
-        bias = self.to_out.get("bias")
-        if bias is not None:
-            return mx.addmm(bias, x, self._to_out_weight_t)
-        return x @ self._to_out_weight_t
-
-    def pretranspose_to_out(self) -> list[mx.array]:
-        """Cache a contiguous ``weight.T`` for to_out same-math experiments."""
-        if not isinstance(self.to_out, nn.Linear):
-            raise ValueError("to_out pretranspose only supports nn.Linear")
-        if self._to_out_weight_t is not None:
-            arrays = [self._to_out_weight_t]
-            bias = self.to_out.get("bias")
+    def _pretranspose_linear(
+        self,
+        linear_attr: str,
+        cache_attr: str,
+    ) -> list[mx.array]:
+        """Cache ``mx.contiguous(weight.T)`` on this Attention for ``linear_attr``."""
+        linear = getattr(self, linear_attr)
+        if not isinstance(linear, nn.Linear):
+            raise ValueError(f"{linear_attr} pretranspose only supports nn.Linear")
+        cached = getattr(self, cache_attr)
+        if cached is not None:
+            arrays = [cached]
+            bias = linear.get("bias")
             if bias is not None:
                 arrays.append(bias)
             return arrays
-        if "weight" not in self.to_out:
-            raise ValueError("to_out weight is unavailable for pretranspose")
+        if "weight" not in linear:
+            raise ValueError(f"{linear_attr} weight is unavailable for pretranspose")
 
-        self._to_out_weight_t = mx.contiguous(self.to_out.weight.T)
-        arrays = [self._to_out_weight_t]
-        bias = self.to_out.get("bias")
+        new_t = mx.contiguous(linear.weight.T)
+        setattr(self, cache_attr, new_t)
+        arrays = [new_t]
+        bias = linear.get("bias")
         if bias is not None:
             arrays.append(bias)
         return arrays
+
+    def pretranspose_to_out(self) -> list[mx.array]:
+        """Cache a contiguous ``weight.T`` for to_out same-math experiments."""
+        return self._pretranspose_linear("to_out", "_to_out_weight_t")
+
+    def pretranspose_to_q(self) -> list[mx.array]:
+        return self._pretranspose_linear("to_q", "_to_q_weight_t")
+
+    def pretranspose_to_k(self) -> list[mx.array]:
+        return self._pretranspose_linear("to_k", "_to_k_weight_t")
+
+    def pretranspose_to_v(self) -> list[mx.array]:
+        return self._pretranspose_linear("to_v", "_to_v_weight_t")
+
+    def pretranspose_to_gate_logits(self) -> list[mx.array]:
+        # No-op when this Attention is non-V2 (to_gate_logits is None).
+        if self.to_gate_logits is None:
+            return []
+        return self._pretranspose_linear("to_gate_logits", "_to_gate_logits_weight_t")
+
+    # Map layout-spec target → (apply method name, cache attr name).
+    _PRETRANSPOSE_TARGETS: dict[str, tuple[str, str]] = {
+        "to_out": ("pretranspose_to_out", "_to_out_weight_t"),
+        "to_q":   ("pretranspose_to_q",   "_to_q_weight_t"),
+        "to_k":   ("pretranspose_to_k",   "_to_k_weight_t"),
+        "to_v":   ("pretranspose_to_v",   "_to_v_weight_t"),
+        "to_gate_logits": ("pretranspose_to_gate_logits", "_to_gate_logits_weight_t"),
+    }
 
     def drop_layout_sources(
         self,
@@ -250,11 +297,16 @@ class Attention(nn.Module):
     ) -> None:
         """Drop original arrays replaced by materialized layout transforms."""
         for target, layout in layout_specs:
-            if target == "to_out" and layout == "pretranspose":
-                if self._to_out_weight_t is not None and "weight" in self.to_out:
-                    del self.to_out.weight
-            else:
+            if layout != "pretranspose" or target not in self._PRETRANSPOSE_TARGETS:
                 raise ValueError(f"Unsupported attention layout spec: {target}:{layout}")
+            _, cache_attr = self._PRETRANSPOSE_TARGETS[target]
+            cached = getattr(self, cache_attr)
+            linear = getattr(self, target, None)
+            # to_gate_logits can be None on non-V2 attentions — skip silently.
+            if linear is None:
+                continue
+            if cached is not None and "weight" in linear:
+                del linear.weight
 
     def apply_layouts(
         self,
@@ -263,10 +315,10 @@ class Attention(nn.Module):
         """Apply selected same-math layout transforms to attention projections."""
         arrays: list[mx.array] = []
         for target, layout in layout_specs:
-            if target == "to_out" and layout == "pretranspose":
-                arrays.extend(self.pretranspose_to_out())
-            else:
+            if layout != "pretranspose" or target not in self._PRETRANSPOSE_TARGETS:
                 raise ValueError(f"Unsupported attention layout spec: {target}:{layout}")
+            apply_method, _ = self._PRETRANSPOSE_TARGETS[target]
+            arrays.extend(getattr(self, apply_method)())
         return arrays
 
     def __call__(
@@ -301,13 +353,16 @@ class Attention(nn.Module):
         gate = None
         if self.to_gate_logits is not None:
             # 2 * sigmoid so zero-init weight gives identity (2 * 0.5 = 1.0)
-            gate = 2.0 * mx.sigmoid(self.to_gate_logits(x))  # (B, T, H)
+            gate_logits = self._projection_call(
+                self.to_gate_logits, self._to_gate_logits_weight_t, x,
+            )
+            gate = 2.0 * mx.sigmoid(gate_logits)  # (B, T, H)
 
         # 2) Project V before Q, K (mlx-video order).
         context = x if context is None else context
-        v = self.to_v(context)
-        q = self.to_q(x)
-        k = self.to_k(context)
+        v = self._projection_call(self.to_v, self._to_v_weight_t, context)
+        q = self._projection_call(self.to_q, self._to_q_weight_t, x)
+        k = self._projection_call(self.to_k, self._to_k_weight_t, context)
 
         # 3) Apply RMSNorm to Q and K
         q = self.q_norm(q)
@@ -342,14 +397,14 @@ class Attention(nn.Module):
         k_pe: Optional[tuple] = None,
     ) -> mx.array:
         """Forward pass with forced-eval timing checkpoints for diagnostics."""
-        q = self.to_q(x)
+        q = self._projection_call(self.to_q, self._to_q_weight_t, x)
         mark_profile(f"{name} q", q)
 
         context = x if context is None else context
-        k = self.to_k(context)
+        k = self._projection_call(self.to_k, self._to_k_weight_t, context)
         mark_profile(f"{name} k", k)
 
-        v = self.to_v(context)
+        v = self._projection_call(self.to_v, self._to_v_weight_t, context)
         mark_profile(f"{name} v", v)
 
         q = self.q_norm(q)
@@ -365,7 +420,9 @@ class Attention(nn.Module):
         mark_profile(f"{name} sdpa", out)
 
         if self.to_gate_logits is not None:
-            gate_logits = self.to_gate_logits(x)
+            gate_logits = self._projection_call(
+                self.to_gate_logits, self._to_gate_logits_weight_t, x,
+            )
             mark_profile(f"{name} gate logits", gate_logits)
             b, t, _ = out.shape
             out = out.reshape(b, t, self.heads, self.dim_head)

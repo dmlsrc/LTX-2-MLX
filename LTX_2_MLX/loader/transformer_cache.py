@@ -304,6 +304,11 @@ def _cache_payload(
     video_ff_layout_layers: Tuple[int, ...],
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
+    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_ff_layout_layers: Tuple[int, ...] = (),
+    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_attn_layout_layers: Tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
     video_ff_quantize_layers: Tuple[int, ...] = (),
@@ -321,6 +326,16 @@ def _cache_payload(
         "video_attn_layout_specs": _canonical_specs(video_attn_layout_specs),
         "video_attn_layout_layers": list(video_attn_layout_layers),
     }
+    # Only include audio layout keys in the payload when present, so existing
+    # audio-pretranspose-free caches keep their hash and stay valid.
+    if audio_ff_layout_specs:
+        payload["audio_ff_layout_specs"] = _canonical_specs(audio_ff_layout_specs)
+        payload["audio_ff_layout_layers"] = list(audio_ff_layout_layers)
+    if audio_attn_layout_specs:
+        payload["audio_attn_layout_specs"] = _canonical_specs(audio_attn_layout_specs)
+        payload["audio_attn_layout_layers"] = list(audio_attn_layout_layers)
+    if adaln_pretranspose:
+        payload["adaln_pretranspose"] = True
     if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
         payload["transformer_cache_quantize"] = transformer_cache_quantize
     if video_ff_quantize_specs:
@@ -368,6 +383,11 @@ def transformer_cache_paths(
     video_ff_layout_layers: Tuple[int, ...],
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
+    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_ff_layout_layers: Tuple[int, ...] = (),
+    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_attn_layout_layers: Tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
     video_ff_quantize_layers: Tuple[int, ...] = (),
@@ -382,6 +402,11 @@ def transformer_cache_paths(
         video_ff_layout_layers=video_ff_layout_layers,
         video_attn_layout_specs=video_attn_layout_specs,
         video_attn_layout_layers=video_attn_layout_layers,
+        audio_ff_layout_specs=audio_ff_layout_specs,
+        audio_ff_layout_layers=audio_ff_layout_layers,
+        audio_attn_layout_specs=audio_attn_layout_specs,
+        audio_attn_layout_layers=audio_attn_layout_layers,
+        adaln_pretranspose=adaln_pretranspose,
         transformer_cache_quantize=transformer_cache_quantize,
         video_ff_quantize_specs=video_ff_quantize_specs,
         video_ff_quantize_layers=video_ff_quantize_layers,
@@ -522,6 +547,21 @@ def _ff_quant_mode_for_key(
     return None
 
 
+# Top-level (non-transformer_blocks) AdaLayerNormSingle paths whose ``linear``
+# weights benefit from pretranspose.  When ``adaln_pretranspose`` is enabled,
+# the cache build emits a layout entry for each present key.
+_ADALN_TOP_LEVEL_LINEARS = (
+    "adaln_single.linear",
+    "audio_adaln_single.linear",
+    "prompt_adaln_single.linear",
+    "audio_prompt_adaln_single.linear",
+    "av_ca_video_scale_shift_adaln_single.linear",
+    "av_ca_audio_scale_shift_adaln_single.linear",
+    "av_ca_a2v_gate_adaln_single.linear",
+    "av_ca_v2a_gate_adaln_single.linear",
+)
+
+
 def _layout_cache_key(
     mlx_key: str,
     *,
@@ -529,9 +569,23 @@ def _layout_cache_key(
     video_ff_layout_layers: Tuple[int, ...],
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
+    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_ff_layout_layers: Tuple[int, ...] = (),
+    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_attn_layout_layers: Tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
 ) -> str | None:
     parts = mlx_key.split(".")
-    if len(parts) < 5 or parts[0] != "transformer_blocks" or parts[-1] != "weight":
+    if not parts or parts[-1] != "weight":
+        return None
+
+    # Top-level AdaLayerNormSingle.linear keys (no per-layer index).
+    if adaln_pretranspose and parts[0] != "transformer_blocks":
+        base = ".".join(parts[:-1])  # strip ".weight"
+        if base in _ADALN_TOP_LEVEL_LINEARS:
+            return f"{base}.weight_t"
+
+    if len(parts) < 5 or parts[0] != "transformer_blocks":
         return None
 
     try:
@@ -542,6 +596,8 @@ def _layout_cache_key(
     suffix = ".".join(parts[2:])
     ff_layers = _selected_layers(video_ff_layout_layers)
     attn_layers = _selected_layers(video_attn_layout_layers)
+    audio_ff_layers = _selected_layers(audio_ff_layout_layers)
+    audio_attn_layers = _selected_layers(audio_attn_layout_layers)
 
     if layer in ff_layers:
         if _has_spec(video_ff_layout_specs, "project_in") and suffix == "ff.project_in.proj.weight":
@@ -549,13 +605,33 @@ def _layout_cache_key(
         if _has_spec(video_ff_layout_specs, "project_out") and suffix == "ff.project_out.weight":
             return f"transformer_blocks.{layer}.ff.project_out.weight_t"
 
-    if layer in attn_layers and _has_spec(video_attn_layout_specs, "to_out"):
-        if suffix in (
-            "attn1.to_out.weight",
-            "attn2.to_out.weight",
-            "audio_to_video_attn.to_out.weight",
-        ):
-            return f"transformer_blocks.{layer}.{suffix[:-len('weight')]}weight_t"
+    _VIDEO_ATTN_MODULES = ("attn1", "attn2", "audio_to_video_attn")
+    _AUDIO_ATTN_MODULES = ("audio_attn1", "audio_attn2", "video_to_audio_attn")
+    _PROJ_TARGETS = ("to_out", "to_q", "to_k", "to_v", "to_gate_logits")
+
+    if layer in attn_layers:
+        for proj in _PROJ_TARGETS:
+            if not _has_spec(video_attn_layout_specs, proj):
+                continue
+            for module in _VIDEO_ATTN_MODULES:
+                if suffix == f"{module}.{proj}.weight":
+                    return f"transformer_blocks.{layer}.{module}.{proj}.weight_t"
+
+    # Audio-side layouts (V2/AV models only — no-op when keys aren't present
+    # in the source checkpoint).
+    if layer in audio_ff_layers:
+        if _has_spec(audio_ff_layout_specs, "project_in") and suffix == "audio_ff.project_in.proj.weight":
+            return f"transformer_blocks.{layer}.audio_ff.project_in.proj.weight_t"
+        if _has_spec(audio_ff_layout_specs, "project_out") and suffix == "audio_ff.project_out.weight":
+            return f"transformer_blocks.{layer}.audio_ff.project_out.weight_t"
+
+    if layer in audio_attn_layers:
+        for proj in _PROJ_TARGETS:
+            if not _has_spec(audio_attn_layout_specs, proj):
+                continue
+            for module in _AUDIO_ATTN_MODULES:
+                if suffix == f"{module}.{proj}.weight":
+                    return f"transformer_blocks.{layer}.{module}.{proj}.weight_t"
 
     return None
 
@@ -663,6 +739,11 @@ def build_transformer_cache(
     video_ff_layout_layers: Tuple[int, ...],
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
+    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_ff_layout_layers: Tuple[int, ...] = (),
+    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_attn_layout_layers: Tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
     video_ff_quantize_layers: Tuple[int, ...] = (),
@@ -729,6 +810,11 @@ def build_transformer_cache(
             video_ff_layout_layers=video_ff_layout_layers,
             video_attn_layout_specs=video_attn_layout_specs,
             video_attn_layout_layers=video_attn_layout_layers,
+            audio_ff_layout_specs=audio_ff_layout_specs,
+            audio_ff_layout_layers=audio_ff_layout_layers,
+            audio_attn_layout_specs=audio_attn_layout_specs,
+            audio_attn_layout_layers=audio_attn_layout_layers,
+            adaln_pretranspose=adaln_pretranspose,
         )
         if layout_key is not None:
             cache_weights[f"{LAYOUT_KEY_PREFIX}{layout_key}"] = mx.contiguous(value.T)
@@ -762,12 +848,29 @@ def _clear_block_layout_weights(block: nn.Module) -> None:
         if hasattr(ff, "_project_out_weight_t"):
             ff._project_out_weight_t = None
 
-    for attn_name in ("attn1", "attn2", "audio_to_video_attn"):
+    audio_ff = getattr(block, "audio_ff", None)
+    if audio_ff is not None:
+        if hasattr(audio_ff, "_project_in_weight_t"):
+            audio_ff._project_in_weight_t = None
+        if hasattr(audio_ff, "_project_out_weight_t"):
+            audio_ff._project_out_weight_t = None
+
+    for attn_name in (
+        "attn1", "attn2", "audio_to_video_attn",
+        "audio_attn1", "audio_attn2", "video_to_audio_attn",
+    ):
         attn = getattr(block, attn_name, None)
         if attn is None:
             continue
-        if hasattr(attn, "_to_out_weight_t"):
-            attn._to_out_weight_t = None
+        for cache_attr in (
+            "_to_out_weight_t",
+            "_to_q_weight_t",
+            "_to_k_weight_t",
+            "_to_v_weight_t",
+            "_to_gate_logits_weight_t",
+        ):
+            if hasattr(attn, cache_attr):
+                setattr(attn, cache_attr, None)
 
 
 def _empty_linear(*, has_bias: bool = True) -> nn.Linear:
@@ -968,6 +1071,15 @@ def _prepare_block_quantized_linears(
         )
 
 
+_ATTN_PROJ_TO_CACHE_ATTR = {
+    "to_out": "_to_out_weight_t",
+    "to_q":   "_to_q_weight_t",
+    "to_k":   "_to_k_weight_t",
+    "to_v":   "_to_v_weight_t",
+    "to_gate_logits": "_to_gate_logits_weight_t",
+}
+
+
 def _install_block_layout_weight(block: nn.Module, layout_key: str, value: mx.array) -> None:
     if layout_key == "ff.project_in.proj.weight_t":
         block.ff._project_in_weight_t = value
@@ -981,24 +1093,72 @@ def _install_block_layout_weight(block: nn.Module, layout_key: str, value: mx.ar
             del block.ff.project_out.weight
         return
 
-    for attn_name in ("attn1", "attn2", "audio_to_video_attn"):
-        if layout_key == f"{attn_name}.to_out.weight_t":
-            attn = getattr(block, attn_name, None)
-            if attn is None:
-                raise ValueError(f"Missing attention module for cache key: {layout_key}")
-            attn._to_out_weight_t = value
-            if "weight" in attn.to_out:
-                del attn.to_out.weight
-            return
+    if layout_key == "audio_ff.project_in.proj.weight_t":
+        block.audio_ff._project_in_weight_t = value
+        if "weight" in block.audio_ff.project_in.proj:
+            del block.audio_ff.project_in.proj.weight
+        return
+
+    if layout_key == "audio_ff.project_out.weight_t":
+        block.audio_ff._project_out_weight_t = value
+        if "weight" in block.audio_ff.project_out:
+            del block.audio_ff.project_out.weight
+        return
+
+    for attn_name in (
+        "attn1", "attn2", "audio_to_video_attn",
+        "audio_attn1", "audio_attn2", "video_to_audio_attn",
+    ):
+        for proj_name, cache_attr in _ATTN_PROJ_TO_CACHE_ATTR.items():
+            if layout_key == f"{attn_name}.{proj_name}.weight_t":
+                attn = getattr(block, attn_name, None)
+                if attn is None:
+                    raise ValueError(f"Missing attention module for cache key: {layout_key}")
+                setattr(attn, cache_attr, value)
+                linear = getattr(attn, proj_name, None)
+                # to_gate_logits is None on non-V2 attentions — install the
+                # cached weight but skip the source-weight delete.
+                if linear is not None and "weight" in linear:
+                    del linear.weight
+                return
 
     raise ValueError(f"Unsupported transformer cache layout key: {layout_key}")
 
 
+def _install_top_level_layout_weight(model: nn.Module, layout_key: str, value: mx.array) -> None:
+    """Install a top-level (non-transformer_blocks) layout tensor.
+
+    Currently used for ``<adaln>.linear.weight_t`` keys — sets the cached
+    pretransposed weight on the AdaLayerNormSingle and drops the original
+    weight to keep memory flat.
+    """
+    if not layout_key.endswith(".linear.weight_t"):
+        raise ValueError(f"Unsupported top-level layout key: {layout_key}")
+    base = layout_key[: -len(".linear.weight_t")]
+    module = getattr(model, base, None)
+    if module is None:
+        raise ValueError(f"Missing module for layout key: {layout_key} (looked for self.{base})")
+    if not hasattr(module, "_linear_weight_t"):
+        raise ValueError(
+            f"Module self.{base} doesn't support pretranspose "
+            "(expected AdaLayerNormSingle-style _linear_weight_t)"
+        )
+    module._linear_weight_t = value
+    if hasattr(module, "linear") and "weight" in module.linear:
+        del module.linear.weight
+
+
 def _install_layout_weight(model: nn.Module, layout_key: str, value: mx.array) -> None:
     parts = layout_key.split(".")
-    if len(parts) < 5 or parts[0] != "transformer_blocks":
+    if not parts:
         raise ValueError(f"Invalid transformer cache layout key: {layout_key}")
 
+    if parts[0] != "transformer_blocks":
+        _install_top_level_layout_weight(model, layout_key, value)
+        return
+
+    if len(parts) < 5:
+        raise ValueError(f"Invalid transformer cache layout key: {layout_key}")
     layer = int(parts[1])
     block = model.transformer_blocks[layer]
     _install_block_layout_weight(block, ".".join(parts[2:]), value)
@@ -1095,6 +1255,11 @@ def ensure_transformer_cache(
     video_ff_layout_layers: Tuple[int, ...],
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
+    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_ff_layout_layers: Tuple[int, ...] = (),
+    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_attn_layout_layers: Tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
     video_ff_quantize_layers: Tuple[int, ...] = (),
@@ -1113,6 +1278,11 @@ def ensure_transformer_cache(
         video_ff_layout_layers=video_ff_layout_layers,
         video_attn_layout_specs=video_attn_layout_specs,
         video_attn_layout_layers=video_attn_layout_layers,
+        audio_ff_layout_specs=audio_ff_layout_specs,
+        audio_ff_layout_layers=audio_ff_layout_layers,
+        audio_attn_layout_specs=audio_attn_layout_specs,
+        audio_attn_layout_layers=audio_attn_layout_layers,
+        adaln_pretranspose=adaln_pretranspose,
         transformer_cache_quantize=transformer_cache_quantize,
         video_ff_quantize_specs=video_ff_quantize_specs,
         video_ff_quantize_layers=video_ff_quantize_layers,
@@ -1133,6 +1303,11 @@ def ensure_transformer_cache(
             video_ff_layout_layers=video_ff_layout_layers,
             video_attn_layout_specs=video_attn_layout_specs,
             video_attn_layout_layers=video_attn_layout_layers,
+            audio_ff_layout_specs=audio_ff_layout_specs,
+            audio_ff_layout_layers=audio_ff_layout_layers,
+            audio_attn_layout_specs=audio_attn_layout_specs,
+            audio_attn_layout_layers=audio_attn_layout_layers,
+            adaln_pretranspose=adaln_pretranspose,
             transformer_cache_quantize=transformer_cache_quantize,
             video_ff_quantize_specs=video_ff_quantize_specs,
             video_ff_quantize_layers=video_ff_quantize_layers,
@@ -1162,6 +1337,11 @@ def load_transformer_weights_cached(
     video_ff_layout_layers: Tuple[int, ...],
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
+    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_ff_layout_layers: Tuple[int, ...] = (),
+    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_attn_layout_layers: Tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
 ) -> TransformerCacheResult:
     """Build if needed, then load a transformer cache into ``model``."""
@@ -1174,6 +1354,11 @@ def load_transformer_weights_cached(
         video_ff_layout_layers=video_ff_layout_layers,
         video_attn_layout_specs=video_attn_layout_specs,
         video_attn_layout_layers=video_attn_layout_layers,
+        audio_ff_layout_specs=audio_ff_layout_specs,
+        audio_ff_layout_layers=audio_ff_layout_layers,
+        audio_attn_layout_specs=audio_attn_layout_specs,
+        audio_attn_layout_layers=audio_attn_layout_layers,
+        adaln_pretranspose=adaln_pretranspose,
         transformer_cache_quantize=transformer_cache_quantize,
     )
 
@@ -1207,6 +1392,11 @@ def load_transformer_weights_cached_streaming(
     video_attn_layout_specs: Tuple[Tuple[str, str], ...],
     video_attn_layout_layers: Tuple[int, ...],
     resident_blocks: int,
+    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_ff_layout_layers: Tuple[int, ...] = (),
+    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
+    audio_attn_layout_layers: Tuple[int, ...] = (),
+    adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
     video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
     video_ff_quantize_layers: Tuple[int, ...] = (),
@@ -1226,6 +1416,11 @@ def load_transformer_weights_cached_streaming(
         video_ff_layout_layers=video_ff_layout_layers,
         video_attn_layout_specs=video_attn_layout_specs,
         video_attn_layout_layers=video_attn_layout_layers,
+        audio_ff_layout_specs=audio_ff_layout_specs,
+        audio_ff_layout_layers=audio_ff_layout_layers,
+        audio_attn_layout_specs=audio_attn_layout_specs,
+        audio_attn_layout_layers=audio_attn_layout_layers,
+        adaln_pretranspose=adaln_pretranspose,
         transformer_cache_quantize=transformer_cache_quantize,
         video_ff_quantize_specs=video_ff_quantize_specs,
         video_ff_quantize_layers=video_ff_quantize_layers,

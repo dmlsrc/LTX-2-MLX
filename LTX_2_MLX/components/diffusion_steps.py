@@ -50,21 +50,31 @@ class EulerDiffusionStep:
             step_index: Current step index in the schedule.
 
         Returns:
-            Updated sample at the next sigma level.
+            Updated sample at the next sigma level, cast back to ``sample``'s
+            dtype (typically bf16).
+
+        Math: x_{t+1} = denoised + (sigma_next/sigma) * (x_t - denoised),
+        algebraically equivalent to the velocity form ``sample + velocity *
+        dt`` but expressed as a single fused fp32 lerp instead of routing
+        through ``to_velocity`` + a redundant cast.  No measured speed
+        difference under MLX 0.31.2 (lazy graph fusion appears to elide the
+        redundancy already), but reads more directly.
         """
-        sigma = sigmas[step_index]
-        sigma_next = sigmas[step_index + 1]
-        dt = sigma_next - sigma
+        sigma = float(sigmas[step_index])
+        sigma_next = float(sigmas[step_index + 1])
 
-        velocity = to_velocity(sample, sigma, denoised_sample)
+        sample_dtype = sample.dtype
+        sample_f32 = sample if sample.dtype == mx.float32 else sample.astype(mx.float32)
+        denoised_f32 = (
+            denoised_sample if denoised_sample.dtype == mx.float32
+            else denoised_sample.astype(mx.float32)
+        )
 
-        # Compute in float32 for numerical stability
-        sample_f32 = sample.astype(mx.float32)
-        velocity_f32 = velocity.astype(mx.float32)
+        result = denoised_f32 + (sigma_next / sigma) * (sample_f32 - denoised_f32)
 
-        result = sample_f32 + velocity_f32 * float(dt)
-
-        return result.astype(sample.dtype)
+        if sample_dtype == mx.float32:
+            return result
+        return result.astype(sample_dtype)
 
 
 class EulerAncestralDiffusionStep:

@@ -18,6 +18,16 @@ from typing import Callable, List, Optional, Tuple
 import mlx.core as mx
 import numpy as np
 
+# LTX_VELOCITY_MODE=1 makes the simple AV distilled loop bypass X0Model and
+# do the velocity-form Euler update inline:
+#     denoised = latent - sigma * velocity   (skipped when no mask blend needed)
+#     next     = latent + (sigma_next - sigma) * velocity
+# Mathematically identical to the X0+stepper path; the goal is a leaner MLX
+# graph (fewer wrapper-class boundaries between transformer call and stepper).
+# Falls back to the X0 path automatically when state has a non-uniform mask
+# (image conditioning) or when the wrapped transformer isn't an X0Model.
+_USE_VELOCITY_MODE = bool(os.environ.get("LTX_VELOCITY_MODE"))
+
 from .common import (
     ImageCondition,
     apply_conditionings,
@@ -877,8 +887,54 @@ class OneStagePipeline:
                 print(f"    {name:<24} {seconds:7.2f}s  {pct:5.1f}%")
             print(f"    {'profiled total':<24} {total:7.2f}s")
 
+        # Velocity-mode eligibility: requires X0Model wrapper (so we can reach
+        # the underlying velocity_model) and uniform masks on both states (so
+        # we can skip the explicit denoised computation).
+        velocity_mode = (
+            _USE_VELOCITY_MODE
+            and hasattr(self.transformer, "velocity_model")
+            and video_state.uniform_mask
+            and (audio_state is None or audio_state.uniform_mask)
+        )
+        velocity_transformer = (
+            self._velocity_transformer() if velocity_mode else None
+        )
+
+        # Optional per-stage RoPE precompute (mirrors mlx-video's pattern).
+        # Measured neutral-to-slight-regression at small T because MLX's lazy
+        # graph already deduplicates the per-step ``precompute_freqs_cis``
+        # calls.  Off by default; opt-in with LTX_ROPE_PRECOMPUTE=1 for
+        # workloads where per-step setup might be heavier.
+        def _simple_preprocessor_of(preproc):
+            # Multi-modal preprocessor wraps a simple preprocessor; video-only
+            # is the simple preprocessor itself.
+            return getattr(preproc, "simple_preprocessor", preproc)
+
+        video_rope = None
+        audio_rope = None
+        if os.environ.get("LTX_ROPE_PRECOMPUTE"):
+            velocity_model = (
+                self.transformer.velocity_model
+                if hasattr(self.transformer, "velocity_model")
+                else self.transformer
+            )
+            video_pre = getattr(velocity_model, "_video_args_preprocessor", None)
+            if video_pre is not None:
+                video_rope = _simple_preprocessor_of(video_pre)._prepare_positional_embeddings(
+                    video_state.positions,
+                )
+                mx.eval(*video_rope)
+            audio_pre = getattr(velocity_model, "_audio_args_preprocessor", None)
+            if audio_state is not None and audio_pre is not None:
+                audio_rope = _simple_preprocessor_of(audio_pre)._prepare_positional_embeddings(
+                    audio_state.positions,
+                )
+                mx.eval(*audio_rope)
+
         for step_idx in range(num_steps):
             sigma = float(sigmas[step_idx])
+            sigma_next = float(sigmas[step_idx + 1])
+            dt = sigma_next - sigma
 
             profile_step = step_idx + 1
             profile_events: Optional[List[Tuple[str, float]]] = (
@@ -896,12 +952,19 @@ class OneStagePipeline:
                 profile_events.append((name, now - profile_started_at))
                 profile_started_at = now
 
-            video_modality = modality_from_state(video_state, video_context, sigma)
+            video_modality = modality_from_state(
+                video_state, video_context, sigma,
+                positional_embeddings=video_rope,
+            )
             mark_profile("modality setup")
 
+            # ----- Transformer forward -----
             if self.is_av_model:
                 audio_modality = (
-                    audio_modality_from_state(audio_state, audio_context, sigma)
+                    audio_modality_from_state(
+                        audio_state, audio_context, sigma,
+                        positional_embeddings=audio_rope,
+                    )
                     if audio_state is not None
                     else None
                 )
@@ -910,47 +973,77 @@ class OneStagePipeline:
                         f"step {profile_step}",
                         blocks=profile_blocks,
                     )
-                result = (
-                    self.transformer(video_modality, audio_modality)
-                    if audio_modality is not None
-                    else self.transformer(video_modality)
-                )
-                if isinstance(result, tuple):
-                    video_denoised, audio_denoised = result
+                if velocity_mode:
+                    # Raw velocity outputs — skip the X0 wrapper.
+                    result = (
+                        velocity_transformer(video_modality, audio_modality)
+                        if audio_modality is not None
+                        else velocity_transformer(video_modality)
+                    )
                 else:
-                    video_denoised = result
-                    audio_denoised = None
+                    result = (
+                        self.transformer(video_modality, audio_modality)
+                        if audio_modality is not None
+                        else self.transformer(video_modality)
+                    )
+                if isinstance(result, tuple):
+                    video_out, audio_out = result
+                else:
+                    video_out = result
+                    audio_out = None
             else:
                 if profile_events is not None:
                     self._profile_next_transformer_call(
                         f"step {profile_step}",
                         blocks=profile_blocks,
                     )
-                video_denoised = self.transformer(video_modality)
-                audio_denoised = None
-            mark_profile("transformer call", video_denoised, audio_denoised) if audio_denoised is not None else mark_profile("transformer call", video_denoised)
+                if velocity_mode:
+                    video_out = velocity_transformer(video_modality)
+                else:
+                    video_out = self.transformer(video_modality)
+                audio_out = None
+            mark_profile("transformer call", video_out, audio_out) if audio_out is not None else mark_profile("transformer call", video_out)
 
-            video_denoised = maybe_post_process_latent(video_denoised, video_state)
-            new_video_latent = stepper.step(
-                sample=video_state.latent,
-                denoised_sample=video_denoised,
-                sigmas=sigmas,
-                step_index=step_idx,
-            )
-            video_state = video_state.replace(latent=new_video_latent)
-
-            if audio_state is not None and audio_denoised is not None:
-                audio_denoised = maybe_post_process_latent(audio_denoised, audio_state)
-                new_audio_latent = stepper.step(
-                    sample=audio_state.latent,
-                    denoised_sample=audio_denoised,
+            # ----- Latent update -----
+            if velocity_mode:
+                # Inline velocity-form Euler step:
+                #     next = latent + (sigma_next - sigma) * velocity
+                # Cast pattern matches EulerDiffusionStep: do the lerp in
+                # the source dtype path; sigmas come in as Python floats.
+                new_video_latent = video_state.latent + dt * video_out
+                video_state = video_state.replace(latent=new_video_latent)
+                if audio_state is not None and audio_out is not None:
+                    new_audio_latent = audio_state.latent + dt * audio_out
+                    audio_state = audio_state.replace(latent=new_audio_latent)
+                    mx.eval(video_state.latent, audio_state.latent)
+                else:
+                    mx.eval(video_state.latent)
+            else:
+                video_denoised = maybe_post_process_latent(video_out, video_state)
+                new_video_latent = stepper.step(
+                    sample=video_state.latent,
+                    denoised_sample=video_denoised,
                     sigmas=sigmas,
                     step_index=step_idx,
                 )
-                audio_state = audio_state.replace(latent=new_audio_latent)
-                mx.async_eval(video_state.latent, audio_state.latent)
-            else:
-                mx.async_eval(video_state.latent)
+                video_state = video_state.replace(latent=new_video_latent)
+
+                if audio_state is not None and audio_out is not None:
+                    audio_denoised = maybe_post_process_latent(audio_out, audio_state)
+                    new_audio_latent = stepper.step(
+                        sample=audio_state.latent,
+                        denoised_sample=audio_denoised,
+                        sigmas=sigmas,
+                        step_index=step_idx,
+                    )
+                    audio_state = audio_state.replace(latent=new_audio_latent)
+                    # Sync eval (one call, both arrays).  Profiled vs async_eval:
+                    # same wall clock, but ~38% fewer set_copy_output_data calls
+                    # (125 → 78) so the lazy graph stays cleaner.  Profiled vs
+                    # separate calls: combined is slightly faster at small T.
+                    mx.eval(video_state.latent, audio_state.latent)
+                else:
+                    mx.eval(video_state.latent)
             mark_profile("post + stepper", video_state.latent)
 
             if profile_events is not None:

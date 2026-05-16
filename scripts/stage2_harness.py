@@ -448,6 +448,17 @@ def main() -> None:
     timings.mark("text conditioning load")
 
     print("\n[2/5] Loading AudioVideo transformer...")
+    # Mirror generate.py's default: audio pretranspose tracks video layout
+    # for AV models unless LTX_DISABLE_AUDIO_PRETRANSPOSE=1 is set.  Without
+    # this, the harness would build a different cache hash than generate.py
+    # and re-pretranspose only the video half.
+    if os.environ.get("LTX_DISABLE_AUDIO_PRETRANSPOSE"):
+        _audio_ff_layout_specs = ()
+        _audio_attn_layout_specs = ()
+    else:
+        _audio_ff_layout_specs = args.video_ff_layout
+        _audio_attn_layout_specs = args.video_attn_layout
+    _adaln_pretranspose = bool(os.environ.get("LTX_ADALN_PRETRANSPOSE"))
     model = gen.load_av_transformer(
         transformer_weights_path,
         num_layers=48,
@@ -460,6 +471,11 @@ def main() -> None:
         video_ff_layout_layers=ff_layout_layers,
         video_attn_layout_specs=args.video_attn_layout,
         video_attn_layout_layers=attn_layout_layers,
+        audio_ff_layout_specs=_audio_ff_layout_specs,
+        audio_ff_layout_layers=ff_layout_layers,
+        audio_attn_layout_specs=_audio_attn_layout_specs,
+        audio_attn_layout_layers=attn_layout_layers,
+        adaln_pretranspose=_adaln_pretranspose,
         transformer_cache_quantize=args.transformer_cache_quantize,
         weights_cache_mode=args.weights_cache,
         weights_cache_dir=args.weights_cache_dir,
@@ -556,10 +572,15 @@ def main() -> None:
         label="Stage 2 denoising",
         total=len(gen.STAGE_2_DISTILLED_SIGMA_VALUES) - 1,
     )
+    # DenoiseProgress tracks ``_rendered`` after first start().  No ``_thread``
+    # attribute exists; the old harness check was stale.
+    stage_progress_started = False
 
     def stage_callback(stage_name: str, step: int, total: int) -> None:
-        if not stage_progress._thread:
+        nonlocal stage_progress_started
+        if not stage_progress_started:
             stage_progress.start()
+            stage_progress_started = True
         stage_progress.update(step, total)
         if step >= total:
             stage_progress.finish()

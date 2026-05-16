@@ -675,7 +675,7 @@ def _read_transformer_config_from_checkpoint(weights_path: str) -> dict:
     from safetensors import safe_open
 
     try:
-        with safe_open(weights_path, framework="pt") as f:
+        with safe_open(weights_path, framework="numpy") as f:
             metadata = f.metadata() or {}
         config = json.loads(metadata.get("config", "{}"))
     except Exception:
