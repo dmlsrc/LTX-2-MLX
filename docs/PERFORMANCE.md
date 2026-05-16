@@ -1425,6 +1425,59 @@ is on a different thread. Block-level `--profile-transformer-steps` +
 `--profile-transformer-blocks` instrumentation is a better tool for
 attributing time to specific phases inside one step.
 
+### Monolithic-inlined transformer experiment (negative result)
+
+After ruling out every cheap structural change to the per-block forward
+(`LTX_DISABLE_BLOCK_OVERHEAD`, `LTX_VELOCITY_MODE`, `LTX_COMPILE_BLOCK_GROUPS`
+all neutral), the remaining steelman was: collapse the entire 48-block
+forward + preprocess + output projection into one inlined function with
+flat pretransposed weights, no `nn.Module` dispatch.  The hypothesis: if
+our `BasicAVTransformerBlock` / `LTXAVModel` / `X0Model` /
+`TransformerArgsPreprocessor` chain costs anything at the MLX-graph level,
+inlining should expose it.
+
+Implemented in `scripts/mono_pipeline.py` (`InlinedAVModel` +
+`transformer_step`).  `stage2_harness.py` swaps the pipeline's transformer
+when `LTX_MONO_INLINED=1` is set so the rest of the run (spatial upscale,
+sigma loop, modality construction, Euler step, VAE decode) stays
+byte-identical.
+
+Result on bakery 704x384 (3-step stage-2):
+
+- **Math is equivalent.** Source modular `stage_2_video_latent` vs inlined
+  `final_video_latent`: cosine similarity 0.99922 for video, 0.99977 for
+  audio.  Mean/std match to 4 decimals.  p99 abs diff < 0.15.  Visually
+  indistinguishable; classic BF16 rounding-order drift.
+- **Wall clock is neutral.** Inlined 6m04s vs modular ~6m at this shape,
+  within FaceTime/music GPU-contention noise.
+
+That confirms the abstraction-cost hypothesis is empirically wrong on this
+MLX version: the lazy graph optimizes through the `nn.Module` dispatch
+chain just as well as flat-function code.  The remaining per-step gap to
+mlx-video (when it exists) is structural at the MLX kernel / Metal
+command-buffer level — not anything to chase by restructuring Python.
+
+The code is left in place as a same-math reference implementation.  It
+also doubles as a documented worked example of "what the V2.3 distilled AV
+block actually computes," useful for future investigators who want to know
+the exact op sequence without reading the modular Module tree.
+
+Bug-hunt notes that may help if anyone resurrects the experiment:
+
+- `Attention.q_norm` and `k_norm` are `RMSNorm` modules with **learned
+  weights**, not just `mx.fast.rms_norm` with `weight=None`.  Missing this
+  produced uniform brown-noise output and was the first bug to fix.
+- `_prepare_timestep` multiplies the timestep by
+  `timestep_scale_multiplier` (= 1000 for V2.3) for **every** AdaLN call,
+  including `prompt_adaln`.  Forgetting the scale on prompt_adaln produces
+  subtly broken output that looks worse than just-noise (was the second
+  bug).
+- The latent that reaches the transformer is already patchified ((B, N,
+  128) by `create_initial_state`), not the 5D (B, C, F, H, W) the VAE
+  decoder consumes.  Don't re-patchify.
+- Cross-modal AdaLN is conditioned on the *other* modality's sigma:
+  video's cross-attn uses audio's sigma and vice versa.  Easy to swap.
+
 ## Benchmark Matrix
 
 Use a fixed command and change only one thing at a time.
@@ -1441,6 +1494,7 @@ Use a fixed command and change only one thing at a time.
 | `LTX_ADALN_PRETRANSPOSE=1` | yes | low | slight regression at small T | Cache-integrated pretranspose for the 8 `AdaLayerNormSingle.linear` projections. The 8 calls per step on a tiny batch don't amortize the per-tensor dispatch overhead. Kept opt-in. |
 | `LTX_ROPE_PRECOMPUTE=1` | yes | none | neutral | mlx-video pattern: compute RoPE once per stage and pass through `Modality.positional_embeddings`. MLX's lazy graph already deduplicates per-step `precompute_freqs_cis` calls, so the savings don't show. |
 | `to_gate_logits` pretranspose (opt-in) | yes | low | slight regression | Pretranspose support for the V2 per-head gate-logits Linear. Weight (4096x32 / 2048x32) is too small for the implicit transpose to matter. Opt-in via `--video-attn-layout to_out:pretranspose,...,to_gate_logits:pretranspose`. |
+| `LTX_MONO_INLINED=1` (stage2_harness only) | yes | none | neutral | Replaces `av_pipeline.transformer` with `mono_pipeline.InlinedAVModel`: same math, 48-block forward + AdaLN preprocess + output projection all inlined into one function with flat pretransposed weights. Latent diff vs modular: cosine sim 0.999+, BF16 rounding-order noise only. Wall clock within measurement noise. Confirms `nn.Module` dispatch is free at the MLX-graph level. See section above. |
 | `--profile-transformer-steps` | yes | low | diagnostic only | Forces eval checkpoints during selected denoise steps to locate hotspots. Do not use for final timing. |
 | `--profile-transformer-blocks` | yes | low | diagnostic only | Adds forced eval checkpoints inside selected blocks for already-profiled steps. Block profiles now split attention into setup/AdaLN, Q/K/V, Q/K norm, RoPE, SDPA, gate, output, and residual sections. |
 | FFN sub-profile | yes | low | diagnostic only | Selected block profiles also split FFN into AdaLN, `project_in`, GELU, `project_out`, and residual gate. |

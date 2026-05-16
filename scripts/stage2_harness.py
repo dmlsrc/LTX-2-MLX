@@ -546,6 +546,18 @@ def main() -> None:
         audio_decoder=audio_decoder,
         vocoder=vocoder,
     )
+
+    # LTX_MONO_INLINED=1: swap the pipeline's transformer with InlinedAVModel
+    # (mono_pipeline.transformer_step + flat pretransposed weights).  Same
+    # math as the modular path, no nn.Module dispatch in the per-step forward.
+    # Used to A/B "does collapsing the 48-block stack into one inlined
+    # function change MLX's graph and per-step time?"
+    if os.environ.get("LTX_MONO_INLINED"):
+        import mono_pipeline
+        base = av_pipeline.transformer.velocity_model
+        av_pipeline.transformer = mono_pipeline.InlinedAVModel(base)
+        print("  Transformer: InlinedAVModel [LTX_MONO_INLINED=1]")
+
     del model
 
     config = gen.OneStageCFGConfig(
