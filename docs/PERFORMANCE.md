@@ -1478,6 +1478,132 @@ Bug-hunt notes that may help if anyone resurrects the experiment:
 - Cross-modal AdaLN is conditioned on the *other* modality's sigma:
   video's cross-attn uses audio's sigma and vice versa.  Easy to swap.
 
+## 2026-05-16 Session: apples-to-apples Metal traces
+
+Continuation of the perf investigation.  Goal: stop guessing about
+"is mlx-video really faster, and if so why," and get matched Metal
+System Trace captures that cover identical work windows.
+
+### Profile hooks: pause-then-stop
+
+Two env-gated helpers added to `OneStagePipeline.generate_distilled_two_stage`
+in `LTX_2_MLX/pipelines/one_stage.py`:
+
+- `LTX_PROFILE_PAUSE_BEFORE_DENOISE=1` — blocks on stdin once, immediately
+  before stage 1's first denoise step starts.  Prints `pid=N` so you can
+  attach Instruments to the running process at a precise point, after
+  model load / prompt encoding, before any denoise work.
+- `LTX_PROFILE_STOP_AFTER_STEPS=N` — `sys.exit(0)`s cleanly after step N
+  of the current denoise loop.  `N=2` gives one warmup step + one
+  steady-state step, the minimum useful capture window for kernel-mix
+  and dispatch-distribution analysis.
+
+Both zero-cost when unset.  Mirroring hooks with identical env-var names
+were added to `mlx-video` so the same shell incantation produces directly
+comparable captures from both projects.
+
+Capture template (works on either project):
+
+```
+LTX_PROFILE_PAUSE_BEFORE_DENOISE=1 LTX_PROFILE_STOP_AFTER_STEPS=2 \
+caffeinate -di python -m <generate-entrypoint> --pipeline distilled \
+  --height 576 --width 1024 --num-frames 481 --fps 24 --audio ...
+```
+
+Wait for the `[LTX_PROFILE_PAUSE_BEFORE_DENOISE] pid=...` print, attach
+Instruments → Metal System Trace → the printed pid, hit Enter, let it
+run 2 steps, stop the recording.
+
+### 3-way apples-to-apples results (bakery 1024×576×481, distilled AV)
+
+All three traces captured with `LTX_PROFILE_PAUSE_BEFORE_DENOISE=1
+LTX_PROFILE_STOP_AFTER_STEPS=2`.  Thermal state "Nominal" throughout
+all three runs — no throttling.  Same machine (M1 Max), same prompt,
+same seed, same model weights.
+
+| Metric                          | mlx-video | LTX w/ compile | LTX no-compile |
+| ------------------------------- | --------- | -------------- | -------------- |
+| **2-step wall time**            | **98.18s**| **103.47s**    | **106.80s**    |
+| Per-step avg                    | 49.1 s    | 51.7 s         | 53.4 s         |
+| GPU busy total                  | 99.88 s   | 101.67 s       | 101.87 s       |
+| GPU utilization                 | 102 %     | 98 %           | 95 %           |
+| Total dispatches                | 12143     | 12625          | 9085           |
+| Dispatches / sec                | 124       | 122            | 85             |
+| Median dispatch dur             | 962 µs    | 994 µs         | 918 µs         |
+| **p99 dispatch dur**            | **44 ms** | **62 ms**      | **187 ms**     |
+| Max dispatch dur                | 168 ms    | ~150 ms        | 325 ms         |
+| Dispatch gaps > 20 ms           | **1**     | 38             | 50             |
+| Largest dispatch gap            | 24 ms     | 100 ms         | **2283 ms**    |
+
+The "no-compile" column was captured with `LTX_DISABLE_COMPILED_ATTN=1
+LTX_DISABLE_COMPILED_HELPERS=1 LTX_DISABLE_FUSED_ROPE=1`.
+
+### What this overturns from prior sessions
+
+**`mx.compile` is not a no-op.**  Prior bench tables marked compile-vs-no
+neutral.  In the apples-to-apples 2-step window it shaves **3.3 s
+(–3.1 %)** off total wall time, cuts the p99 tail **3×** (187 ms → 62 ms),
+and drops the largest dispatch gap from **2.28 s to 0.10 s**.  The earlier
+"neutral" reading came from longer runs where the per-step delta got
+amortized against larger absolute timings and warmup variance.  **Default
+to compile on; do not disable it for perf reasons.**
+
+**"mlx-video has more fused kernels" is backwards.**  In steady state
+mlx-video runs **124 dispatches / sec** while we run **122 dps with
+compile, 85 dps without**.  They are *less* fused than us-on-compile,
+not more.  The "8 steel_attention specializations vs our 2–3" thing
+isn't fusion — it's the opposite, finer-grained dispatch.  Compile is
+working as designed: it bundles work into bigger kernels.
+
+**GPU busy time is essentially equal across all three** (within 2 %).
+The 5.4 % wall gap to mlx-video is *not* "they run faster math."  It's
+entirely in dispatch dynamics — they have **zero meaningful warm-up**
+(step 1 ≈ step 2 in their trace because they JIT-compile eagerly during
+model load, before our pause point fires), and they have **one** 24 ms
+dispatch gap across both steps where we have 37–50 gaps > 20 ms.
+
+**Long-tail dispatches are the real bottleneck.**  p99 = mlx-video 44 ms
+→ LTX w/ compile 62 ms → LTX no-compile 187 ms.  When one of our bundled
+dispatches hits its slow case it stalls the queue for tens to hundreds
+of ms.  mlx-video's smaller dispatches give them a much tighter
+distribution.  This is the right place to spend the next batch of
+investigation cycles.
+
+### What this points to next (not done yet)
+
+1. **Pre-warm before the timed window.**  mlx-video's no-warmup signature
+   says they front-load compile during model load.  We can do the same:
+   run one or two dummy denoise iterations on shape-matched random
+   tensors right after `load_av_transformer` so the first user-visible
+   step is already at steady state.  Should reclaim ~2–3 s from step 1.
+
+2. **Hunt the > 20 ms gaps in the with-compile trace** (38 of them).  The
+   Metal Shader Compiler track in the with-compile trace shows compile
+   bursts continuing well into step 2 — MLX keeps discovering new
+   shape/dtype variants mid-run, and each new shape is a stall.
+   Normalizing shapes (canonical sizes / always-pad) is a candidate.
+
+3. **Tail-latency hunt with signposts.**  Add per-block signposts to the
+   transformer forward so the next Metal trace can attribute the 50–
+   200 ms tail dispatches to specific blocks (likely audio-VAE work,
+   cross-modal attention at large sequences, or a specific gemm shape
+   that splitk handles badly).
+
+4. **Bank the result.**  PERFORMANCE.md's benchmark matrix row for
+   `LTX_COMPILE_BLOCK_GROUPS` should be updated when the next session
+   re-tests at the steady-state window — the "neutral" reading is wrong
+   for the per-step regime we actually care about.
+
+### Why the "monolithic-inlined" negative result is consistent with this
+
+The 05-15 inlined-transformer experiment (`scripts/mono_pipeline.py`)
+found that collapsing the 48-block module dispatch into one inlined
+function moved per-step time by ~0 %.  This trace data explains why:
+the per-step gap to mlx-video isn't in Python or in module dispatch —
+it's in Metal-level dispatch dynamics that inlining can't touch.  The
+inlined reference is still useful as same-math documentation of the
+AV block, but it isn't a speed lever.
+
 ## Benchmark Matrix
 
 Use a fixed command and change only one thing at a time.
@@ -1490,11 +1616,13 @@ Use a fixed command and change only one thing at a time.
 | Skip negative prompt encoding (distilled two-stage) | yes | none | -10% AV (256x256x25) | `generate_distilled_two_stage` doesn't accept a negative encoding, so we no longer encode one. Re-enable with `LTX_ENCODE_UNUSED_NEGATIVE=1` for sidecar debugging. Matches mlx-video. |
 | Tokenize without max-length padding | yes | none | -5% AV (256x256x25) | Tokenizer was padding 2 real tokens to 1024 before the Gemma forward; trim happened after the wasted O(N^2) attention. Re-enable with `LTX_PAD_PROMPT_TO_MAX=1`. |
 | `LTX_VELOCITY_MODE=1` | yes | low | neutral | Bypasses `X0Model` and does the velocity-form Euler update inline in `_denoise_loop_simple_av`. Same math. Tested at small T and bakery; both neutral. Kept env-gated for future MLX versions. |
-| `LTX_COMPILE_BLOCK_GROUPS=N` | yes | medium | neutral at all tested scales | Eager-path `mx.compile` over N-block groups. `N=4` tested at small T (neutral), `N=48` at bakery (neutral: 18m 29s vs 18m 41s baseline). Compile-trace cost paid up front; per-step does not recover it. mlx-video uses zero compile and gets the same numbers. |
+| `LTX_COMPILE_BLOCK_GROUPS=N` | yes | medium | neutral at all tested scales (but see 2026-05-16 update) | Eager-path `mx.compile` over N-block groups. `N=4` tested at small T (neutral), `N=48` at bakery (neutral: 18m 29s vs 18m 41s baseline). Compile-trace cost paid up front; per-step does not recover it. **2026-05-16 update:** apples-to-apples Metal trace shows the default compile path (not this experimental block-group compile, but the underlying `mx.compile` wrappers on attention/RoPE/helpers) is worth ~3% wall and 3× tail-latency reduction in the 2-step capture window. `LTX_DISABLE_COMPILED_*=1` is a measurable regression, not a no-op. See "2026-05-16 Session" section. |
 | `LTX_ADALN_PRETRANSPOSE=1` | yes | low | slight regression at small T | Cache-integrated pretranspose for the 8 `AdaLayerNormSingle.linear` projections. The 8 calls per step on a tiny batch don't amortize the per-tensor dispatch overhead. Kept opt-in. |
 | `LTX_ROPE_PRECOMPUTE=1` | yes | none | neutral | mlx-video pattern: compute RoPE once per stage and pass through `Modality.positional_embeddings`. MLX's lazy graph already deduplicates per-step `precompute_freqs_cis` calls, so the savings don't show. |
 | `to_gate_logits` pretranspose (opt-in) | yes | low | slight regression | Pretranspose support for the V2 per-head gate-logits Linear. Weight (4096x32 / 2048x32) is too small for the implicit transpose to matter. Opt-in via `--video-attn-layout to_out:pretranspose,...,to_gate_logits:pretranspose`. |
 | `LTX_MONO_INLINED=1` (stage2_harness only) | yes | none | neutral | Replaces `av_pipeline.transformer` with `mono_pipeline.InlinedAVModel`: same math, 48-block forward + AdaLN preprocess + output projection all inlined into one function with flat pretransposed weights. Latent diff vs modular: cosine sim 0.999+, BF16 rounding-order noise only. Wall clock within measurement noise. Confirms `nn.Module` dispatch is free at the MLX-graph level. See section above. |
+| `LTX_PROFILE_PAUSE_BEFORE_DENOISE=1` | yes | none | diagnostic only | Blocks on stdin once, immediately before stage 1's first denoise step in `generate_distilled_two_stage`. Prints `pid=N` so you can attach Instruments / Metal System Trace to the live process at a precise point, after model load and prompt encoding. Zero cost when unset. Pair with `LTX_PROFILE_STOP_AFTER_STEPS=N` for fixed-window captures. See "2026-05-16 Session". |
+| `LTX_PROFILE_STOP_AFTER_STEPS=N` | yes | none | diagnostic only | `sys.exit(0)` after step N of the current denoise loop. `N=2` gives one warmup + one steady-state step — the minimum useful capture window for kernel-mix and dispatch-distribution analysis. Same hooks exist in mlx-video under identical env-var names so traces from the two projects are directly comparable. |
 | `--profile-transformer-steps` | yes | low | diagnostic only | Forces eval checkpoints during selected denoise steps to locate hotspots. Do not use for final timing. |
 | `--profile-transformer-blocks` | yes | low | diagnostic only | Adds forced eval checkpoints inside selected blocks for already-profiled steps. Block profiles now split attention into setup/AdaLN, Q/K/V, Q/K norm, RoPE, SDPA, gate, output, and residual sections. |
 | FFN sub-profile | yes | low | diagnostic only | Selected block profiles also split FFN into AdaLN, `project_in`, GELU, `project_out`, and residual gate. |

@@ -1052,6 +1052,28 @@ class OneStagePipeline:
             if callback:
                 callback(step_idx + 1, num_steps)
 
+            # Profiling helper: LTX_PROFILE_STOP_AFTER_STEPS=N exits cleanly
+            # after step N of the current loop.  Combine with
+            # LTX_PROFILE_PAUSE_BEFORE_DENOISE=1 to capture a precise window
+            # — e.g. N=2 gives one warmup step + one stable step.
+            _stop_n_str = os.environ.get("LTX_PROFILE_STOP_AFTER_STEPS")
+            if _stop_n_str:
+                try:
+                    _stop_n = int(_stop_n_str)
+                except ValueError:
+                    _stop_n = 0
+                if _stop_n > 0 and (step_idx + 1) >= _stop_n:
+                    # Make sure the last step's GPU work is materialized
+                    # before we exit (mx.eval was called inside the loop,
+                    # but be defensive).
+                    import sys as _sys
+                    print(
+                        f"\n  [LTX_PROFILE_STOP_AFTER_STEPS={_stop_n}] "
+                        f"completed step {step_idx + 1}/{num_steps}, exiting.",
+                        flush=True,
+                    )
+                    _sys.exit(0)
+
         return video_state, audio_state
 
     def generate_distilled_two_stage(
@@ -1161,6 +1183,21 @@ class OneStagePipeline:
             f"  Distilled stage 1: {len(stage_1_sigmas) - 1} steps at "
             f"{stage_1_height}x{stage_1_width}"
         )
+        # Profiling helper: LTX_PROFILE_PAUSE_BEFORE_DENOISE=1 blocks on
+        # stdin before stage-1 starts.  Use this to attach Instruments to
+        # the running process at a precise point (after model load / prompt
+        # encoding, just before the first denoise step).
+        if os.environ.get("LTX_PROFILE_PAUSE_BEFORE_DENOISE"):
+            try:
+                import sys as _sys
+                print(
+                    f"\n  [LTX_PROFILE_PAUSE_BEFORE_DENOISE] pid={os.getpid()}  "
+                    "attach Instruments now, then press Enter to start stage 1.",
+                    flush=True,
+                )
+                input()
+            except EOFError:
+                pass
         if stage_callback:
             stage_callback("stage_1", 0, len(stage_1_sigmas) - 1)
 
