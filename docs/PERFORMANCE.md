@@ -1925,7 +1925,7 @@ pre-fix `.npz`.  Expect ~0.999 with BF16-rounding-noise scale of
 ### What's left in the gap to mlx-video
 
 Down from +16.4 s to +5.3 s over 2 sync-mode stage-1 steps.
-Residual:
+Residual per-phase:
 
 - video_self_attn: +1.76 s — modest, likely structural per-call cost.
 - video_text_ca: +1.58 s — the `_apply_text_cross_attention` path
@@ -1937,8 +1937,75 @@ Residual:
   (~5 s total), so further chasing has limited payoff ceiling.
 - video_ff: **−1.60 s** — we now win this phase outright.
 
+**Extrapolated to full bakery.** The +5.3 s/2-steps measured at
+288×512 implies a per-step delta of ~2.65 s.  Stage 1 is 8 steps and
+stage 2 is 3 steps at ~4× the tokens.  Naïve linear extrapolation
+puts us within **~1–3 minutes** of mlx-video's wall time on the full
+bakery 1024×576×481 workload — a small enough gap that this is no
+longer a "lose to mlx-video" situation, it's a polish target.
+
+**Ranked next steps (carries over the 05-16 hunt list, now prioritized
+post-AdaLN-fix):**
+
+1. **video_self_attn 180 ms outliers.** This was the top item at 05-16
+   (lines 1747-1755) and remains the largest single residual.  The
+   05-16 trace showed 30 of 30 longest dispatches in our project were
+   `video_self_attn`, max 180 ms vs mlx-video's max 133 ms.  Likely a
+   specific SDPA gemm-shape hitting a worse kernel selection at our
+   full token grid.  Re-trace post-AdaLN-fix to confirm the 180 ms
+   tail is still there or whether the BF16 path picked a better
+   kernel.  Try `MLX_SDPA_BLOCKS` and tile/sub-tile env overrides.
+2. **video_text_ca dispatch fragmentation.** 303 vs 40 dispatches in
+   the per-phase bucket is real and could be flattened by inlining
+   `_apply_text_cross_attention`.  Worth ~1.5 s/2-steps so secondary
+   to (1).
+3. **Leave audio alone.** ~5 s total budget across all audio phases;
+   even a 2× win is ~2.4 s, smaller than the easier wins above and
+   risks audio-quality regressions.
+4. **`video_ff` quant is now a quality trade-off, not a speed-gap
+   closer.** Past `--video-ff-quantize project_out:mxfp8` layers 32-47
+   at 352×192 ran ~10 % faster than BF16 with slight visual
+   differences (line 2007).  That speed lever still exists.  But
+   pre-AdaLN-fix the framing was "trade quality for speed to catch
+   mlx-video"; post-fix we already beat mlx-video at this phase by
+   −1.60 s in BF16.  So mxfp8 here now means "draft-quality mode that
+   gets even faster," not "way to close a gap."  Two real caveats to
+   re-test before deploying: (a) the plain quant path loses the
+   pretranspose layout win unless you use `mxfp8-blocks-pretranspose`
+   (line 2009), and (b) partial-layer streaming quant disables
+   resident-group compile (line 2007) — both can flip the speed sign.
+
 The probe tool (`/tmp/trace_analysis/sdpa_dtype_probe.py`) is reusable
 for any future "what dtype is actually reaching kernel X" question.
+
+### Scaling validation: 30-second 1024×576 (721 frames)
+
+Same fix applied, different prompt + seed, longer duration to confirm
+the win holds at higher token counts:
+
+| Stage                          | Bakery (481 frames) | Kitten (721 frames) | Ratio |
+| ------------------------------ | ------------------- | ------------------- | ----- |
+| Frames                         | 481                 | 721                 | 1.50× |
+| Latent shape                   | 61×18×32            | 91×18×32            | 1.49× tokens |
+| Stage 1 s/it (288×512)         | 45.3 s              | 75.9 s              | 1.68× |
+| Stage 2 s/it (576×1024)        | 313.5 s             | 602.1 s             | 1.92× |
+| Total wall                     | 24m 40s             | 44m 41s             | 1.81× |
+| Per-token-step cost (stage 2)  | ~8.9 ms             | ~11.5 ms            | 1.29× |
+
+Stage 2 scales 1.92× for 1.49× tokens — expected attention quadratic
+dilution.  Going from 35,136 → 52,416 tokens means each token does
+~49 % more SDPA work; in stage 2 attention is a big fraction of total
+time, so per-token-step cost rises 29 %.  Pre-fix this run would have
+been ~53–55 minutes by the same −16.8 % ratio; post-fix is 44m 41s
+(saved ~9 minutes on a 30-second video).
+
+Memory: **43 GB peak process RAM** during stage 2 (Activity Monitor).
+No memory pressure on a 64 GB M1 Max with nothing else running.  Fast
+mode + AdaLN fix lets the lazy graph fit comfortably even at 91-frame
+latents (1.49× the bakery token count).
+
+Visual / audio sync: confirmed good on the first seed.  Cross-seed
+quality check still TODO.
 
 ## Benchmark Matrix
 

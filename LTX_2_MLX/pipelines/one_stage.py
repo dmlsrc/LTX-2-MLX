@@ -1683,8 +1683,8 @@ class OneStagePipeline:
     def __call__(
         self,
         positive_encoding: mx.array,
-        negative_encoding: mx.array,
-        config: OneStageCFGConfig,
+        negative_encoding: Optional[mx.array] = None,
+        config: OneStageCFGConfig = None,
         images: Optional[List[ImageCondition]] = None,
         callback: Optional[Callable[[int, int], None]] = None,
         positive_audio_encoding: Optional[mx.array] = None,
@@ -1727,13 +1727,31 @@ class OneStagePipeline:
 
         internal_audio_active = self.is_av_model and (config.use_internal_audio_branch or config.audio_enabled)
 
+        # Detect no-CFG fast path: when both video and audio CFG scales are 1.0,
+        # the negative encoding is mathematically a no-op (out = neg + 1·(pos-neg)
+        # = pos).  Skip negative encoding altogether and route through the
+        # simple no-CFG loop, saving one full transformer pass per step.
+        # This is the default for the distilled model (cfg_scale = 1.0).
+        skip_cfg = (
+            config.cfg_scale == 1.0
+            and config.audio_cfg_scale == 1.0
+            and config.rescale_scale == 0.0  # rescale needs both passes
+        )
+
         # AV checkpoints can use audio context internally even for silent video output.
         if config.audio_enabled or internal_audio_active:
-            if positive_audio_encoding is None or negative_audio_encoding is None:
+            if positive_audio_encoding is None:
                 raise ValueError(
-                    "Audio encoding required for AudioVideo generation. "
-                    "Provide positive_audio_encoding and negative_audio_encoding."
+                    "Positive audio encoding required for AudioVideo generation."
                 )
+            if not skip_cfg and negative_audio_encoding is None:
+                raise ValueError(
+                    "Negative audio encoding required when audio_cfg_scale != 1.0."
+                )
+        if not skip_cfg and negative_encoding is None:
+            raise ValueError(
+                "Negative video encoding required when cfg_scale != 1.0."
+            )
         if config.audio_enabled:
             if self.audio_decoder is None or self.vocoder is None:
                 raise ValueError(
@@ -1845,7 +1863,22 @@ class OneStagePipeline:
                 cutoff_pct = int(stg_cutoff * 100)
                 print(f"  STG guidance: scale={stg_scale}, blocks={stg_blocks or 'all'}, cutoff={cutoff_pct}%")
 
-            if sampler == "heun":
+            if skip_cfg and sampler != "heun" and _stg_guider is None:
+                # Fast path: no CFG, no STG, no Heun — just the positive-only
+                # transformer pass per step.  Saves one full transformer forward
+                # per step vs the CFG loop.
+                video_state, audio_state = self._denoise_loop_simple_av(
+                    video_state=video_state,
+                    audio_state=audio_state,
+                    sigmas=sigmas,
+                    video_context=positive_encoding,
+                    audio_context=positive_audio_encoding,
+                    stepper=stepper,
+                    callback=callback,
+                    profile_steps=tuple(sorted(profile_steps)),
+                    profile_blocks=profile_blocks,
+                )
+            elif sampler == "heun":
                 heun_stepper = HeunDiffusionStep()
                 print(f"  Using Heun sampler (2x model evals per step)")
                 video_state, audio_state = self._denoise_loop_heun_av(

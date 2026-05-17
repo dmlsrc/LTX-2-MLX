@@ -730,28 +730,36 @@ def mlx_array_to_numpy(array: mx.array) -> np.ndarray:
 def save_text_conditioning_sidecar(
     path: str,
     positive_video_encoding: mx.array,
-    negative_video_encoding: mx.array,
+    negative_video_encoding: mx.array | None,
     positive_mask: mx.array,
-    negative_mask: mx.array,
+    negative_mask: mx.array | None,
     positive_audio_encoding: mx.array | None = None,
     negative_audio_encoding: mx.array | None = None,
     prompt: str | None = None,
     negative_prompt: str | None = None,
 ) -> None:
-    """Save text/video/audio conditioning tensors for later A/B diagnostics."""
+    """Save text/video/audio conditioning tensors for later A/B diagnostics.
+
+    Negative fields are optional: when cfg_scale=1.0 distilled modes skip
+    negative encoding entirely, so the sidecar contains only positive
+    conditioning.  The loader and replay paths fall back to zeros when
+    negative fields are absent.
+    """
     arrays = {
         "schema_version": np.array(1, dtype=np.int32),
         "prompt": np.array(prompt or ""),
         "negative_prompt": np.array(negative_prompt or ""),
         "positive_video_encoding": mlx_array_to_numpy(positive_video_encoding),
         "positive_video_encoding_mlx_dtype": str(positive_video_encoding.dtype),
-        "negative_video_encoding": mlx_array_to_numpy(negative_video_encoding),
-        "negative_video_encoding_mlx_dtype": str(negative_video_encoding.dtype),
         "positive_attention_mask": mlx_array_to_numpy(positive_mask),
         "positive_attention_mask_mlx_dtype": str(positive_mask.dtype),
-        "negative_attention_mask": mlx_array_to_numpy(negative_mask),
-        "negative_attention_mask_mlx_dtype": str(negative_mask.dtype),
     }
+    if negative_video_encoding is not None:
+        arrays["negative_video_encoding"] = mlx_array_to_numpy(negative_video_encoding)
+        arrays["negative_video_encoding_mlx_dtype"] = str(negative_video_encoding.dtype)
+    if negative_mask is not None:
+        arrays["negative_attention_mask"] = mlx_array_to_numpy(negative_mask)
+        arrays["negative_attention_mask_mlx_dtype"] = str(negative_mask.dtype)
     if positive_audio_encoding is not None:
         arrays["positive_audio_encoding"] = mlx_array_to_numpy(positive_audio_encoding)
         arrays["positive_audio_encoding_mlx_dtype"] = str(positive_audio_encoding.dtype)
@@ -3048,14 +3056,20 @@ def generate_video(
             # Encode both prompt AND negative prompt in one Gemma load, then
             # free Gemma before loading the AV connector to reduce peak memory.
             #
-            # Skip the negative encoding entirely for distilled two-stage
-            # (which doesn't pass negative_encoding through the pipeline) when
-            # no text-embedding sidecar is requested.  Saves ~5-7s/run by
-            # avoiding one Gemma + one AV-connector forward pass.
+            # Skip the negative encoding entirely for any distilled mode
+            # (cfg_scale=1.0 means negative is mathematically a no-op).
+            # Two-stage doesn't accept a negative at all.  One-stage now
+            # short-circuits the CFG branch in OneStagePipeline.__call__
+            # when both cfg scales are 1.0, so the negative isn't needed
+            # there either.  Saves ~5-7s/run by avoiding one Gemma + one
+            # AV-connector forward pass.
+            #
+            # We still write the text-conditioning sidecar when requested,
+            # just without the negative fields (the loader and replay path
+            # both tolerate missing negative — they fall back to zeros).
             # Re-enable with LTX_ENCODE_UNUSED_NEGATIVE=1 for debugging.
             skip_negative = (
-                distilled_two_stage_requested
-                and not save_text_embeddings
+                (distilled_two_stage_requested or distilled_one_stage_requested)
                 and not os.environ.get("LTX_ENCODE_UNUSED_NEGATIVE")
             )
             if skip_negative:
@@ -3069,10 +3083,12 @@ def generate_video(
                     print("  ERROR: Failed to encode prompt with AV encoder")
                     return
                 text_encoding, text_audio_encoding, text_mask = results[0]
-                # Negative not used by distilled two-stage; leave as None.
+                # Negative not used: two-stage doesn't pass it; one-stage
+                # short-circuits CFG when cfg_scale == 1.0.
                 null_encoding, null_audio_encoding, null_mask = None, None, None
-                print("  Encoded positive prompt only with Gemma 3 "
-                      "(distilled two-stage doesn't use negative)")
+                mode_label = "two-stage" if distilled_two_stage_requested else "one-stage (cfg=1.0)"
+                print(f"  Encoded positive prompt only with Gemma 3 "
+                      f"(distilled {mode_label} doesn't use negative)")
             else:
                 neg_prompt = negative_prompt if negative_prompt else ""
                 results = encode_av_gemma_batch(
@@ -3131,9 +3147,12 @@ def generate_video(
     timings.mark("prompt encoding")
 
     if save_text_embeddings:
-        if text_encoding is None or null_encoding is None or text_mask is None or null_mask is None:
-            print("  WARNING: Text conditioning sidecar requested, but text encodings are unavailable")
+        if text_encoding is None or text_mask is None:
+            print("  WARNING: Text conditioning sidecar requested, but positive text encoding is unavailable")
         else:
+            # null_encoding/null_mask are None when distilled cfg=1.0
+            # skipped the negative encoding — sidecar writer handles
+            # that by omitting the negative fields.
             save_text_conditioning_sidecar(
                 text_sidecar_path(output_path),
                 positive_video_encoding=text_encoding,
