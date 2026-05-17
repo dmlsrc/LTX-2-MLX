@@ -12,6 +12,7 @@ from .attention import Attention, rms_norm
 from .feed_forward import FeedForward
 from .rope import LTXRopeType
 from ...components.perturbations import BatchedPerturbationConfig, PerturbationType
+from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_barrier
 
 
 def _adaln_inline(
@@ -545,36 +546,40 @@ class BasicAVTransformerBlock(nn.Module):
             # Video self-attention with compiled AdaLN and residual gate
             # Skip self-attention if perturbation is enabled for all samples in batch
             if not skip_video_self:
-                norm_vx = _compiled_adaln_forward(vx, scale_msa, shift_msa, self.norm_eps)
-                if profile_events is not None:
-                    mark_profile("video self-attn adaln", norm_vx)
-                    attn_out = self.attn1.profile(
-                        norm_vx,
-                        "video self-attn",
-                        mark_profile,
-                        pe=video.positional_embeddings,
-                    )
-                else:
-                    attn_out = self.attn1(norm_vx, pe=video.positional_embeddings)
-                vx = _compiled_residual_gate(vx, attn_out, gate_msa)
-                mark_profile("video self-attn residual", vx)
+                with _signpost("video_self_attn"):
+                    norm_vx = _compiled_adaln_forward(vx, scale_msa, shift_msa, self.norm_eps)
+                    if profile_events is not None:
+                        mark_profile("video self-attn adaln", norm_vx)
+                        attn_out = self.attn1.profile(
+                            norm_vx,
+                            "video self-attn",
+                            mark_profile,
+                            pe=video.positional_embeddings,
+                        )
+                    else:
+                        attn_out = self.attn1(norm_vx, pe=video.positional_embeddings)
+                    vx = _compiled_residual_gate(vx, attn_out, gate_msa)
+                    mark_profile("video self-attn residual", vx)
+                    _sp_barrier(vx)
 
             # Video cross-attention to text
-            cross_out = self._apply_text_cross_attention(
-                vx, video.context, self.attn2,
-                self.scale_shift_table,
-                getattr(self, "prompt_scale_shift_table", None),
-                video.timesteps, video.prompt_timestep,
-                video.context_mask,
-                profile_name="video text-attn" if profile_events is not None else None,
-                mark_profile=mark_profile if profile_events is not None else None,
-            )
-            # Optional per-block cross-attention scaling (set externally)
-            ca_scale = getattr(self, '_cross_attn_scale', None)
-            if ca_scale is not None:
-                cross_out = cross_out * ca_scale
-            vx = vx + cross_out
-            mark_profile("video text-attn residual", vx)
+            with _signpost("video_text_ca"):
+                cross_out = self._apply_text_cross_attention(
+                    vx, video.context, self.attn2,
+                    self.scale_shift_table,
+                    getattr(self, "prompt_scale_shift_table", None),
+                    video.timesteps, video.prompt_timestep,
+                    video.context_mask,
+                    profile_name="video text-attn" if profile_events is not None else None,
+                    mark_profile=mark_profile if profile_events is not None else None,
+                )
+                # Optional per-block cross-attention scaling (set externally)
+                ca_scale = getattr(self, '_cross_attn_scale', None)
+                if ca_scale is not None:
+                    cross_out = cross_out * ca_scale
+                vx = vx + cross_out
+                mark_profile("video text-attn residual", vx)
+                _sp_barrier(vx)
 
         # Audio self-attention + cross-attention to text
         if run_ax:
@@ -586,32 +591,36 @@ class BasicAVTransformerBlock(nn.Module):
             # Audio self-attention with compiled AdaLN and residual gate (matching video path)
             # Skip self-attention if perturbation is enabled for all samples in batch
             if not skip_audio_self:
-                norm_ax = _compiled_adaln_forward(ax, ascale_msa, ashift_msa, self.norm_eps)
-                if profile_events is not None:
-                    mark_profile("audio self-attn adaln", norm_ax)
-                    attn_out = self.audio_attn1.profile(
-                        norm_ax,
-                        "audio self-attn",
-                        mark_profile,
-                        pe=audio.positional_embeddings,
-                    )
-                else:
-                    attn_out = self.audio_attn1(norm_ax, pe=audio.positional_embeddings)
-                ax = _compiled_residual_gate(ax, attn_out, agate_msa)
-                mark_profile("audio self-attn residual", ax)
+                with _signpost("audio_self_attn"):
+                    norm_ax = _compiled_adaln_forward(ax, ascale_msa, ashift_msa, self.norm_eps)
+                    if profile_events is not None:
+                        mark_profile("audio self-attn adaln", norm_ax)
+                        attn_out = self.audio_attn1.profile(
+                            norm_ax,
+                            "audio self-attn",
+                            mark_profile,
+                            pe=audio.positional_embeddings,
+                        )
+                    else:
+                        attn_out = self.audio_attn1(norm_ax, pe=audio.positional_embeddings)
+                    ax = _compiled_residual_gate(ax, attn_out, agate_msa)
+                    mark_profile("audio self-attn residual", ax)
+                    _sp_barrier(ax)
 
             # Audio cross-attention to text
-            cross_out = self._apply_text_cross_attention(
-                ax, audio.context, self.audio_attn2,
-                self.audio_scale_shift_table,
-                getattr(self, "audio_prompt_scale_shift_table", None),
-                audio.timesteps, audio.prompt_timestep,
-                audio.context_mask,
-                profile_name="audio text-attn" if profile_events is not None else None,
-                mark_profile=mark_profile if profile_events is not None else None,
-            )
-            ax = ax + cross_out
-            mark_profile("audio text-attn residual", ax)
+            with _signpost("audio_text_ca"):
+                cross_out = self._apply_text_cross_attention(
+                    ax, audio.context, self.audio_attn2,
+                    self.audio_scale_shift_table,
+                    getattr(self, "audio_prompt_scale_shift_table", None),
+                    audio.timesteps, audio.prompt_timestep,
+                    audio.context_mask,
+                    profile_name="audio text-attn" if profile_events is not None else None,
+                    mark_profile=mark_profile if profile_events is not None else None,
+                )
+                ax = ax + cross_out
+                mark_profile("audio text-attn residual", ax)
+                _sp_barrier(ax)
 
         # Audio-Video cross-modal attention
         if run_a2v or run_v2a:
@@ -660,52 +669,56 @@ class BasicAVTransformerBlock(nn.Module):
             # Audio to Video attention (audio features inform video)
             # Skip if perturbation is enabled for all samples in batch
             if run_a2v and not skip_a2v:
-                vx_scaled = vx_norm3 * (1 + scale_ca_video_a2v) + shift_ca_video_a2v
-                ax_scaled = ax_norm3 * (1 + scale_ca_audio_a2v) + shift_ca_audio_a2v
-                if profile_events is not None:
-                    mark_profile("audio->video setup", vx_scaled, ax_scaled)
-                    attn_out = self.audio_to_video_attn.profile(
-                        vx_scaled,
-                        "audio->video attn",
-                        mark_profile,
-                        context=ax_scaled,
-                        pe=video.cross_positional_embeddings,
-                        k_pe=audio.cross_positional_embeddings,
-                    )
-                else:
-                    attn_out = self.audio_to_video_attn(
-                        vx_scaled,
-                        context=ax_scaled,
-                        pe=video.cross_positional_embeddings,
-                        k_pe=audio.cross_positional_embeddings,
-                    )
-                vx = vx + (attn_out * gate_out_a2v)
-                mark_profile("audio->video residual", vx)
+                with _signpost("a2v_cross"):
+                    vx_scaled = vx_norm3 * (1 + scale_ca_video_a2v) + shift_ca_video_a2v
+                    ax_scaled = ax_norm3 * (1 + scale_ca_audio_a2v) + shift_ca_audio_a2v
+                    if profile_events is not None:
+                        mark_profile("audio->video setup", vx_scaled, ax_scaled)
+                        attn_out = self.audio_to_video_attn.profile(
+                            vx_scaled,
+                            "audio->video attn",
+                            mark_profile,
+                            context=ax_scaled,
+                            pe=video.cross_positional_embeddings,
+                            k_pe=audio.cross_positional_embeddings,
+                        )
+                    else:
+                        attn_out = self.audio_to_video_attn(
+                            vx_scaled,
+                            context=ax_scaled,
+                            pe=video.cross_positional_embeddings,
+                            k_pe=audio.cross_positional_embeddings,
+                        )
+                    vx = vx + (attn_out * gate_out_a2v)
+                    mark_profile("audio->video residual", vx)
+                    _sp_barrier(vx)
 
             # Video to Audio attention (video features inform audio)
             # Skip if perturbation is enabled for all samples in batch
             if run_v2a and not skip_v2a:
-                ax_scaled = ax_norm3 * (1 + scale_ca_audio_v2a) + shift_ca_audio_v2a
-                vx_scaled = vx_norm3 * (1 + scale_ca_video_v2a) + shift_ca_video_v2a
-                if profile_events is not None:
-                    mark_profile("video->audio setup", ax_scaled, vx_scaled)
-                    attn_out = self.video_to_audio_attn.profile(
-                        ax_scaled,
-                        "video->audio attn",
-                        mark_profile,
-                        context=vx_scaled,
-                        pe=audio.cross_positional_embeddings,
-                        k_pe=video.cross_positional_embeddings,
-                    )
-                else:
-                    attn_out = self.video_to_audio_attn(
-                        ax_scaled,
-                        context=vx_scaled,
-                        pe=audio.cross_positional_embeddings,
-                        k_pe=video.cross_positional_embeddings,
-                    )
-                ax = ax + (attn_out * gate_out_v2a)
-                mark_profile("video->audio residual", ax)
+                with _signpost("v2a_cross"):
+                    ax_scaled = ax_norm3 * (1 + scale_ca_audio_v2a) + shift_ca_audio_v2a
+                    vx_scaled = vx_norm3 * (1 + scale_ca_video_v2a) + shift_ca_video_v2a
+                    if profile_events is not None:
+                        mark_profile("video->audio setup", ax_scaled, vx_scaled)
+                        attn_out = self.video_to_audio_attn.profile(
+                            ax_scaled,
+                            "video->audio attn",
+                            mark_profile,
+                            context=vx_scaled,
+                            pe=audio.cross_positional_embeddings,
+                            k_pe=video.cross_positional_embeddings,
+                        )
+                    else:
+                        attn_out = self.video_to_audio_attn(
+                            ax_scaled,
+                            context=vx_scaled,
+                            pe=audio.cross_positional_embeddings,
+                            k_pe=video.cross_positional_embeddings,
+                        )
+                    ax = ax + (attn_out * gate_out_v2a)
+                    mark_profile("video->audio residual", ax)
+                    _sp_barrier(ax)
 
         # Video feed-forward
         if run_vx:
@@ -713,16 +726,18 @@ class BasicAVTransformerBlock(nn.Module):
             shift_mlp, scale_mlp, gate_mlp = self.get_ada_values(
                 self.scale_shift_table, vx.shape[0], video.timesteps, 3, 6
             )
-            if profile_events is not None:
-                vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
-                mark_profile("video ff adaln", vx_scaled)
-                ff_out = self.ff.profile(vx_scaled, "video ff", mark_profile)
-                vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
-            else:
-                vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
-                ff_out = self.ff(vx_scaled)
-                vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
-            mark_profile("video ff residual", vx)
+            with _signpost("video_ff"):
+                if profile_events is not None:
+                    vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
+                    mark_profile("video ff adaln", vx_scaled)
+                    ff_out = self.ff.profile(vx_scaled, "video ff", mark_profile)
+                    vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
+                else:
+                    vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
+                    ff_out = self.ff(vx_scaled)
+                    vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
+                mark_profile("video ff residual", vx)
+                _sp_barrier(vx)
 
         # Audio feed-forward
         if run_ax:
@@ -730,15 +745,17 @@ class BasicAVTransformerBlock(nn.Module):
             ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
                 self.audio_scale_shift_table, ax.shape[0], audio.timesteps, 3, 6
             )
-            # Use compiled helpers (matching video path)
-            ax_scaled = _compiled_adaln_forward(ax, ascale_mlp, ashift_mlp, self.norm_eps)
-            if profile_events is not None:
-                mark_profile("audio ff adaln", ax_scaled)
-                ff_out = self.audio_ff.profile(ax_scaled, "audio ff", mark_profile)
-            else:
-                ff_out = self.audio_ff(ax_scaled)
-            ax = _compiled_residual_gate(ax, ff_out, agate_mlp)
-            mark_profile("audio ff residual", ax)
+            with _signpost("audio_ff"):
+                # Use compiled helpers (matching video path)
+                ax_scaled = _compiled_adaln_forward(ax, ascale_mlp, ashift_mlp, self.norm_eps)
+                if profile_events is not None:
+                    mark_profile("audio ff adaln", ax_scaled)
+                    ff_out = self.audio_ff.profile(ax_scaled, "audio ff", mark_profile)
+                else:
+                    ff_out = self.audio_ff(ax_scaled)
+                ax = _compiled_residual_gate(ax, ff_out, agate_mlp)
+                mark_profile("audio ff residual", ax)
+                _sp_barrier(ax)
 
         # Return updated args
         video_out = video.replace(x=vx) if video is not None else None

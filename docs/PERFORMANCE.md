@@ -1425,6 +1425,19 @@ is on a different thread. Block-level `--profile-transformer-steps` +
 `--profile-transformer-blocks` instrumentation is a better tool for
 attributing time to specific phases inside one step.
 
+`scripts/bench-process-watch.sh` is a tiny loop that pkill's
+`mediaanalysisd`, `mediaanalysisd-access`, and `photoanalysisd` every
+N seconds (default 2 s).  Those macOS background agents periodically
+hammer the GPU with image-similarity / OCR work — visible in Metal
+System Trace as random WindowServer-adjacent compute dispatches that
+contend with our denoise steps.  Killing them in a loop (they'll be
+relaunched by launchd, but the loop kills the relaunches too) gives
+both cleaner traces and meaningfully more stable per-step timing on
+the bench.  Use during any perf measurement or trace capture; stop
+when done so the agents can do their normal background work.
+Replaces an earlier `bench-quiet.sh` that tried to disable the
+launchd jobs themselves (more invasive and didn't actually stick).
+
 ### Monolithic-inlined transformer experiment (negative result)
 
 After ruling out every cheap structural change to the per-block forward
@@ -1490,9 +1503,10 @@ Two env-gated helpers added to `OneStagePipeline.generate_distilled_two_stage`
 in `LTX_2_MLX/pipelines/one_stage.py`:
 
 - `LTX_PROFILE_PAUSE_BEFORE_DENOISE=1` — blocks on stdin once, immediately
-  before stage 1's first denoise step starts.  Prints `pid=N` so you can
-  attach Instruments to the running process at a precise point, after
-  model load / prompt encoding, before any denoise work.
+  before stage 1's first denoise step starts.  Prints `pid=N` so a
+  second-terminal `xcrun xctrace record --attach <PID>` can connect at
+  a precise point, after model load / prompt encoding, before any
+  denoise work.
 - `LTX_PROFILE_STOP_AFTER_STEPS=N` — `sys.exit(0)`s cleanly after step N
   of the current denoise loop.  `N=2` gives one warmup step + one
   steady-state step, the minimum useful capture window for kernel-mix
@@ -1510,9 +1524,16 @@ caffeinate -di python -m <generate-entrypoint> --pipeline distilled \
   --height 576 --width 1024 --num-frames 481 --fps 24 --audio ...
 ```
 
-Wait for the `[LTX_PROFILE_PAUSE_BEFORE_DENOISE] pid=...` print, attach
-Instruments → Metal System Trace → the printed pid, hit Enter, let it
-run 2 steps, stop the recording.
+Wait for the `[LTX_PROFILE_PAUSE_BEFORE_DENOISE] pid=N` print, then
+in a second terminal:
+
+```
+xcrun xctrace record --template "Metal System Trace" \
+  --attach <PID> --output my.trace --no-prompt
+```
+
+Then hit Enter in the original terminal.  Recording stops when the
+process exits via `LTX_PROFILE_STOP_AFTER_STEPS`.
 
 ### 3-way apples-to-apples results (bakery 1024×576×481, distilled AV)
 
@@ -1569,30 +1590,182 @@ of ms.  mlx-video's smaller dispatches give them a much tighter
 distribution.  This is the right place to spend the next batch of
 investigation cycles.
 
+### Signposts: attribute the long-tail dispatches
+
+Three env vars added for per-phase trace attribution.  All zero-cost
+when unset, all eager-init at module import (so the init prints don't
+clobber the denoise progress bar):
+
+- `LTX_PROFILE_SIGNPOSTS=1` — wraps the 8 sub-ops in
+  `BasicAVTransformerBlock.__call__` (`video_self_attn`,
+  `video_text_ca`, `audio_self_attn`, `audio_text_ca`, `a2v_cross`,
+  `v2a_cross`, `video_ff`, `audio_ff`) with `os_signpost` intervals
+  in subsystem `ltx`, category `OS_LOG_CATEGORY_POINTS_OF_INTEREST`.
+- `LTX_PROFILE_SIGNPOSTS_SYNC=1` — also forces `mx.eval()` on each
+  phase's output at the signpost end via a `signpost_barrier()` call.
+  Required for **time-based attribution** to work — without this,
+  MLX's lazy graph queues phase N+1's ops microseconds after phase N
+  on the Python side while the GPU dispatches lag by seconds, so
+  signpost intervals don't bracket the actual dispatches they
+  produced.  `mx.synchronize()` alone is NOT enough: it only waits
+  for already-dispatched GPU work, not for lazy ops still pending.
+  Adds ~10 % wall-clock overhead at sync points.
+- `LTX_PROFILE_SIGNPOST_LOG=/path` — writes a sidecar log with one
+  line per begin/end event (`<monotonic_ns> <begin|end> <phase>`).
+  Reliable belt-and-suspenders source if the trace's `os-signpost`
+  table loses events under buffer pressure.
+
+Implementation: `LTX_2_MLX/utils/signpost.py` ctypes-loads a tiny
+C shim (`LTX_2_MLX/utils/_signpost.c`, auto-built on first import via
+clang) that exposes the per-phase `begin`/`end` symbols.  The shim is
+needed because `os_signpost`'s macro-based API embeds the calling
+image's `__dso_handle`, which can't be passed from ctypes.
+
+Disabled overhead: ~0.6 µs per context-manager enter (~5 ms total for a
+2-step capture).  Enabled overhead: ~3 µs per enter (~17 ms total).
+Both negligible vs ~50 s/step.
+
+Capture recipe (apples-to-apples with mlx-video):
+
+```
+LTX_PROFILE_PAUSE_BEFORE_DENOISE=1 \
+LTX_PROFILE_STOP_AFTER_STEPS=2 \
+LTX_PROFILE_SIGNPOSTS=1 \
+LTX_PROFILE_SIGNPOSTS_SYNC=1 \
+LTX_PROFILE_SIGNPOST_LOG=/tmp/ltx_signposts.log \
+caffeinate -di python scripts/generate.py "..." --pipeline distilled \
+  --height 576 --width 1024 --frames 481 --fps 24 --generate-audio \
+  --output /path/to/out.mp4
+```
+
+**Capture via the `xctrace record` CLI.**  After the process prints
+`[LTX_PROFILE_PAUSE_BEFORE_DENOISE] pid=<N>` and before hitting
+Enter, run in a second terminal:
+
+```
+xcrun xctrace record \
+  --template "Metal System Trace" \
+  --instrument "Points of Interest" \
+  --attach <PID> \
+  --output /Users/Shared/huggingface/temp/my.trace \
+  --no-prompt
+```
+
+This writes straight to the trace file as events come in and
+captures every signpost.  Hit Enter in the original terminal to
+start denoise; the recording stops when the process exits (which
+happens automatically via `LTX_PROFILE_STOP_AFTER_STEPS=N`).
+
+Don't use the Instruments GUI for this.  Its Deferred recording
+mode drops signposts under buffer pressure (our app-level signposts
+compete with ~40k Metal Shader Compiler signposts/run from
+WindowServer + other Metal-using apps) and even Immediate mode is
+lossy and slower to set up.  The CLI is strictly better.
+
+After capture, export signposts + GPU intervals:
+
+```
+xcrun xctrace export --input my.trace \
+  --xpath '//trace-toc/run/data/table[@schema="os-signpost"]' \
+  --output signposts.xml
+xcrun xctrace export --input my.trace \
+  --xpath '//trace-toc/run/data/table[@schema="metal-gpu-intervals"]' \
+  --output gpu_intervals.xml
+```
+
+Time-based attribution: each GPU dispatch is assigned to whichever
+phase's `Begin` interval most recently preceded it.  With
+`SYNC=1` the begin/end timestamps tightly bracket the actual GPU
+work for that phase, so attribution is order-preserving.
+
+If the trace's `os-signpost` table is short on events (drops under
+buffer pressure), fall back to the sidecar log — it captures every
+event regardless of OS buffer state.  Anchor by setting trace_t for
+sidecar's last event = trace total duration.
+
+### What we learned about signpost capture
+
+Tried os_signpost-based phase attribution via the Instruments GUI
+first.  Captures missed ~600 of our 1536 events per 2-step run, all
+concentrated at the start of denoise.  Root cause: Metal Shader
+Compiler emits ~40k `FunctionCompiled` signposts during a typical
+capture from system-wide Metal use (WindowServer, Messages,
+Instruments itself, AppKit XPC services), which crowds our
+per-process signposts out of whichever shared buffer the GUI
+processes them through.
+
+Two false-start fixes that didn't help (and were reverted):
+
+- **Pre-warming the transformer before the pause hook** to move our
+  cold-start Metal compile outside the traced window.  Saved 1-2 s
+  on step 1 but didn't help the trace gap because the source of
+  buffer pressure isn't our compile, it's everyone else's.
+- **Suppressing signposts during prewarm** to avoid pre-pause buffer
+  pollution.  Same outcome.
+
+Real fix: capture via the `xctrace record` CLI (documented above).
+Captures every signpost reliably; the GUI is not worth bothering
+with for this workflow.
+
+### Per-phase attribution results (stage 1, 288×512, 2-step sync capture)
+
+With sidecar-anchored attribution (every emitted signpost accounted for):
+
+| Phase            | LTX %GPU | LTX p99 | LTX max | mlxv %GPU | mlxv p99 | mlxv max |
+| ---------------- | -------- | ------- | ------- | --------- | -------- | -------- |
+| video_self_attn  | 37.8 %   | 74 ms   | **180** | 42.3 %    | 43 ms    | 133 ms   |
+| video_ff         | 37.7 %   | 42 ms   | 74 ms   | 32.9 %    | 50 ms    | **147**  |
+| video_text_ca    | 11.8 %   | 65 ms   | 112 ms  | 10.1 %    | 38 ms    | 41 ms    |
+| a2v_cross        | 4.5 %    | 39 ms   | 58 ms   | 8.6 %     | **147**  | **149**  |
+| v2a_cross        | 2.5 %    | 39 ms   | 39 ms   | 3.4 %     | 108 ms   | 149 ms   |
+| audio_ff         | 3.2 %    | 37 ms   | 38 ms   | 1.4 %     | 67 ms    | 68 ms    |
+| audio_self_attn  | 1.6 %    | 38 ms   | 38 ms   | 0.8 %     | 21 ms    | 25 ms    |
+| audio_text_ca    | 1.0 %    | 37 ms   | 62 ms   | 0.6 %     | 24 ms    | 24 ms    |
+| **total**        | 101.6 s  |         |         | 99.8 s    |          |          |
+
+Top 30 longest dispatches per project:
+- **LTX-2-MLX:** 30/30 are `video_self_attn`, max 180 ms.
+- **mlx-video:** 18/30 `a2v_cross`, 7/30 `video_ff`, 3/30 `v2a_cross`, 1/30
+  `video_self_attn`, max 149 ms.
+
+The two projects have **different tail shapes**, not the same shape at
+different magnitudes:
+
+- LTX-2-MLX's bottleneck is `video_self_attn` — a single phase that
+  owns the entire long tail.  Likely a specific SDPA gemm shape
+  combination at our token count that hits a worst-case kernel
+  selection.
+- mlx-video's bottleneck is spread across cross-modal attention
+  (`a2v_cross` / `v2a_cross`) and `video_ff`.  Their cross-modal
+  attention dispatches have noticeably worse tail behavior than ours
+  (147 ms p99 vs our 39 ms).
+- Audio is < 6 % of GPU time in both projects — not a useful target.
+- `video_ff` is comparable in total time and **our tail is actually
+  cleaner** (74 ms max vs theirs at 147 ms), so quantizing `video_ff`
+  won't close the gap.
+
 ### What this points to next (not done yet)
 
-1. **Pre-warm before the timed window.**  mlx-video's no-warmup signature
-   says they front-load compile during model load.  We can do the same:
-   run one or two dummy denoise iterations on shape-matched random
-   tensors right after `load_av_transformer` so the first user-visible
-   step is already at steady state.  Should reclaim ~2–3 s from step 1.
+1. **Hunt the `video_self_attn` 180 ms outliers** in LTX-2-MLX.  30
+   of them per 2-step capture — roughly 15/step, suggestive of one
+   per block.  These are likely the SDPA call at the full token grid.
+   Worth trying alternative `mx.fast.scaled_dot_product_attention`
+   tile/sub-tile parameters or `MLX_SDPA_BLOCKS` if relevant at our
+   T (currently controls 2-pass vector path only — see matrix).
 
-2. **Hunt the > 20 ms gaps in the with-compile trace** (38 of them).  The
-   Metal Shader Compiler track in the with-compile trace shows compile
-   bursts continuing well into step 2 — MLX keeps discovering new
-   shape/dtype variants mid-run, and each new shape is a stall.
-   Normalizing shapes (canonical sizes / always-pad) is a candidate.
+2. **Investigate mlx-video's a2v_cross tail** (147 ms p99 vs our
+   39 ms).  If we can understand why they're slower at this specific
+   op while we're slower at video_self_attn, we may converge by
+   borrowing tactics in both directions.
 
-3. **Tail-latency hunt with signposts.**  Add per-block signposts to the
-   transformer forward so the next Metal trace can attribute the 50–
-   200 ms tail dispatches to specific blocks (likely audio-VAE work,
-   cross-modal attention at large sequences, or a specific gemm shape
-   that splitk handles badly).
+3. **Hunt the > 20 ms inter-phase gaps** if any remain in non-sync
+   runs.  Sync-mode captures show no gaps because we drain the queue
+   per phase, so this analysis needs a different capture mode.
 
-4. **Bank the result.**  PERFORMANCE.md's benchmark matrix row for
-   `LTX_COMPILE_BLOCK_GROUPS` should be updated when the next session
-   re-tests at the steady-state window — the "neutral" reading is wrong
-   for the per-step regime we actually care about.
+4. **Update the `LTX_COMPILE_BLOCK_GROUPS` matrix row** when the next
+   session retests at the steady-state window — the "neutral" reading
+   from earlier sessions doesn't match the apples-to-apples 3 % win
+   from this session.
 
 ### Why the "monolithic-inlined" negative result is consistent with this
 
@@ -1621,8 +1794,11 @@ Use a fixed command and change only one thing at a time.
 | `LTX_ROPE_PRECOMPUTE=1` | yes | none | neutral | mlx-video pattern: compute RoPE once per stage and pass through `Modality.positional_embeddings`. MLX's lazy graph already deduplicates per-step `precompute_freqs_cis` calls, so the savings don't show. |
 | `to_gate_logits` pretranspose (opt-in) | yes | low | slight regression | Pretranspose support for the V2 per-head gate-logits Linear. Weight (4096x32 / 2048x32) is too small for the implicit transpose to matter. Opt-in via `--video-attn-layout to_out:pretranspose,...,to_gate_logits:pretranspose`. |
 | `LTX_MONO_INLINED=1` (stage2_harness only) | yes | none | neutral | Replaces `av_pipeline.transformer` with `mono_pipeline.InlinedAVModel`: same math, 48-block forward + AdaLN preprocess + output projection all inlined into one function with flat pretransposed weights. Latent diff vs modular: cosine sim 0.999+, BF16 rounding-order noise only. Wall clock within measurement noise. Confirms `nn.Module` dispatch is free at the MLX-graph level. See section above. |
-| `LTX_PROFILE_PAUSE_BEFORE_DENOISE=1` | yes | none | diagnostic only | Blocks on stdin once, immediately before stage 1's first denoise step in `generate_distilled_two_stage`. Prints `pid=N` so you can attach Instruments / Metal System Trace to the live process at a precise point, after model load and prompt encoding. Zero cost when unset. Pair with `LTX_PROFILE_STOP_AFTER_STEPS=N` for fixed-window captures. See "2026-05-16 Session". |
+| `LTX_PROFILE_PAUSE_BEFORE_DENOISE=1` | yes | none | diagnostic only | Blocks on stdin once, immediately before stage 1's first denoise step in `generate_distilled_two_stage`. Prints `pid=N` so a second-terminal `xcrun xctrace record --attach <PID>` can connect at a precise point after model load and prompt encoding. Zero cost when unset. Pair with `LTX_PROFILE_STOP_AFTER_STEPS=N` for fixed-window captures. See "2026-05-16 Session". |
 | `LTX_PROFILE_STOP_AFTER_STEPS=N` | yes | none | diagnostic only | `sys.exit(0)` after step N of the current denoise loop. `N=2` gives one warmup + one steady-state step — the minimum useful capture window for kernel-mix and dispatch-distribution analysis. Same hooks exist in mlx-video under identical env-var names so traces from the two projects are directly comparable. |
+| `LTX_PROFILE_SIGNPOSTS=1` | yes | none | diagnostic only | Wraps the 8 sub-ops in `BasicAVTransformerBlock.__call__` (`video_self_attn`, `video_text_ca`, `audio_self_attn`, `audio_text_ca`, `a2v_cross`, `v2a_cross`, `video_ff`, `audio_ff`) with `os_signpost` intervals in subsystem `ltx`, category Points of Interest. Auto-builds a tiny ctypes-loaded C shim on first import (`LTX_2_MLX/utils/_signpost.{c,py}`). Disabled overhead ~5 ms/run, enabled ~17 ms/run. Capture via `xcrun xctrace record --template "Metal System Trace" --instrument "Points of Interest" --attach <PID>` — see "2026-05-16 Session". |
+| `LTX_PROFILE_SIGNPOSTS_SYNC=1` | yes | medium | diagnostic only | Forces `mx.eval()` on each phase's output at signpost end so begin/end intervals tightly bracket the actual GPU dispatches.  Required for time-based attribution — without it, lazy MLX queues phases microseconds apart while GPU lags by seconds and signpost intervals don't correspond to dispatches.  Adds ~10 % wall-clock overhead.  Pair with `LTX_PROFILE_SIGNPOSTS=1`. |
+| `LTX_PROFILE_SIGNPOST_LOG=/path` | yes | none | diagnostic only | Writes a sidecar log (`<monotonic_ns> <begin\|end> <phase>` per line) alongside the os_signpost emission.  Ground-truth source for attribution when the trace's `os-signpost` table is short on events; anchor by aligning sidecar's last event with trace's total duration. |
 | `--profile-transformer-steps` | yes | low | diagnostic only | Forces eval checkpoints during selected denoise steps to locate hotspots. Do not use for final timing. |
 | `--profile-transformer-blocks` | yes | low | diagnostic only | Adds forced eval checkpoints inside selected blocks for already-profiled steps. Block profiles now split attention into setup/AdaLN, Q/K/V, Q/K norm, RoPE, SDPA, gate, output, and residual sections. |
 | FFN sub-profile | yes | low | diagnostic only | Selected block profiles also split FFN into AdaLN, `project_in`, GELU, `project_out`, and residual gate. |
