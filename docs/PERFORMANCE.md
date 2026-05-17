@@ -1777,6 +1777,169 @@ it's in Metal-level dispatch dynamics that inlining can't touch.  The
 inlined reference is still useful as same-math documentation of the
 AV block, but it isn't a speed lever.
 
+## 2026-05-17 Session: AdaLN/RoPE dtype-promotion fix (-16.8 % bakery total)
+
+The actual cause of the per-step gap to mlx-video turned out to be a
+silent BF16 → FP32 dtype promotion through the AdaLN modulation path,
+which forced SDPA to compile and dispatch pure
+`steel_attention_float32_*_maskfloat32_*` kernels — roughly 2× the
+data movement and compute of the BF16 equivalents.
+
+### The dispute that led here
+
+The 05-16 traces had two competing analyses:
+
+- Mine: "video_text_ca is 5.2× more expensive in LTX, the
+  `_apply_text_cross_attention` helper is fragmenting dispatch."
+- Codex's correction: my "GPU time per phase" wasn't elapsed wall
+  time (it summed dispatch durations across parallel GPU channels and
+  exceeded the phase wall span).  Sidecar interval math is the
+  honest primary metric.
+
+After accepting the correction, the real story was: LTX is slower on
+every phase, not just one — distributed overhead, not a single
+hotspot.  Three env-toggle experiments confirmed:
+
+- `LTX_DISABLE_COMPILED_ATTN=1`: neutral (+1.5 s)
+- `LTX_DISABLE_COMPILED_HELPERS=1`: neutral (–0.6 s)
+- `--video-attn-layout off`: regression (+3.1 s — pretranspose IS a win)
+
+That ruled out three obvious causes.  Then Codex spotted the actual
+signal in the trace's shader **inventory** (the
+`metal-shader-profiler-shader-list` table, not the empty
+`metal-shader-profiler-intervals` table):
+
+- LTX inventory: 30+ pure `float32` steel kernels, including 6
+  `steel_attention_float32_*_maskfloat32_*` variants.
+- mlx-video inventory: zero pure `float32` steel kernels — only BF16
+  or `bfloat16_float32`-accumulator variants.
+
+Codex's first hypothesis was that split-RoPE was promoting BF16
+activations to FP32 by multiplying against FP32 cos/sin tables and
+not casting back.  We fixed that.  Result: same FP32 kernels still in
+the inventory, wall time unchanged.
+
+### Probe: prove what dtype actually reaches SDPA
+
+Instead of guessing, monkey-patch
+`mx.fast.scaled_dot_product_attention` BEFORE importing any
+LTX-2-MLX modules, log every call's `(q.dtype, k.dtype, v.dtype,
+mask.dtype, shapes)`, then run one denoise step:
+
+```python
+# /tmp/trace_analysis/sdpa_dtype_probe.py — runs scripts/generate.py
+# under a monkey-patched SDPA that records every call's dtype.
+```
+
+First run (RoPE fix only) revealed: **every per-block SDPA call had
+q/k/v dtype `float32`**, including the V tensor — which never goes
+through RoPE.  So RoPE wasn't the source; promotion happened
+*upstream* of attention.
+
+### Root cause: AdaLN scale/shift/gate are FP32 tables
+
+The 6 `scale_shift_table` tensors in `BasicTransformerBlock` /
+`BasicAVTransformerBlock` are explicitly typed
+`mx.zeros((..., dim), dtype=mx.float32)` (kept FP32 for sincos /
+timestep-embedding numerical stability).  Then the inline math:
+
+```python
+normed * (1 + scale) + shift   # AdaLN
+x + residual * gate            # residual gate
+```
+
+promotes BF16 activations to FP32 by broadcasting against the FP32
+scale/shift/gate.  The FP32 result propagates through `to_q/to_k/to_v`
+into SDPA, which compiles pure `steel_attention_float32_*` kernels.
+
+mlx-video's `rope.py` and equivalent paths have always cast back to
+the input dtype (`output.astype(input_dtype)`).  LTX-2-MLX was missing
+this cast at five call sites:
+
+1. `_adaln_inline` (transformer.py)
+2. `_residual_gate_inline` (transformer.py)
+3. `_apply_text_cross_attention` V2 modulation (transformer.py:466-479)
+4. Cross-modal A2V/V2A inline scale-shift (transformer.py:685-690, 716-717)
+5. Cross-modal A2V/V2A residual gates (transformer.py:704, 737)
+
+Plus `apply_split_rotary_emb` and `apply_interleaved_rotary_emb`
+fallback in rope.py (kept the RoPE fix even though it wasn't the
+bottleneck — same pattern, correct hygiene).
+
+### Verification (post-fix probe)
+
+Re-running the SDPA dtype probe with the AdaLN fix: **all 9 unique
+SDPA signatures are now bfloat16 q/k/v** — connector, every
+per-block phase, video and audio.  No more pure FP32 paths.
+
+### Numbers
+
+**2-step sync-mode capture (288×512 stage 1, signposts on, mx.eval
+barriers — same protocol as the 05-16 captures):**
+
+| Phase            | baseline | +rope-only | +adaln (fix) | Δ baseline | mlxv r2 | vs mlxv |
+| ---------------- | -------- | ---------- | ------------ | ---------- | ------- | ------- |
+| video_self_attn  | 46.01 s  | 46.12 s    | **40.80 s**  | **−5.21**  | 39.04 s | +1.76   |
+| video_ff         | 38.19 s  | 38.71 s    | **33.98 s**  | **−4.21**  | 35.58 s | **−1.60** |
+| video_text_ca    | 14.46 s  | 14.79 s    | **12.98 s**  | **−1.48**  | 11.40 s | +1.58   |
+| audio_self_attn  |  1.40 s  |  1.52 s    |   1.24 s     |  −0.16     |  0.65 s | +0.59   |
+| audio_text_ca    |  1.04 s  |  1.18 s    |   1.19 s     |  +0.14     |  0.67 s | +0.52   |
+| a2v_cross        |  5.82 s  |  5.88 s    |   5.76 s     |  −0.06     |  5.07 s | +0.69   |
+| v2a_cross        |  5.24 s  |  5.33 s    |   5.39 s     |  +0.15     |  4.87 s | +0.52   |
+| audio_ff         |  2.52 s  |  2.86 s    |   2.23 s     |  −0.28     |  0.97 s | +1.27   |
+| **TOTAL**        | **114.69** | 116.37   | **103.58 s** | **−11.11** | 98.26 s | **+5.32** |
+
+Shader inventory: pure-FP32 steel kernels **20 → 0**, pure FP32
+attention kernels **6 → 0**.
+
+**Full bakery 1024×576×481 distilled (fast mode, end-to-end,
+non-sync — the user-visible workload):**
+
+|                          | baseline (per prior PERFORMANCE.md) | post-fix | Δ      |
+| ------------------------ | ----------------------------------- | -------- | ------ |
+| Stage 1 (8 steps, 288×512) | n/a (was ~10 s/it pre-fast-mode notes) | 45.3 s/it = 6m 02s | |
+| Stage 2 (3 steps, 576×1024) | ~50 s/it baseline → ~26 m total stage 2 | 313.5 s/it = **15m 40s** | |
+| VAE decode (tiled)       |                                       | 2m 10s   |        |
+| **Total**                | **29m 38s**                           | **24m 40.6s** | **−4m 58s, −16.8 %** |
+
+The win scales *better* at full bakery than the sync-mode-stage-1
+measurement predicted (9.7 % → 16.8 %) because stage-2 token counts
+(~280 k tokens) make the per-op FP32-vs-BF16 difference matter more,
+and because fast mode + smaller BF16 intermediates lets MLX's lazy
+graph fuse more without OOM risk.
+
+### Quality
+
+Visual inspection on the bakery output: indistinguishable from prior
+runs.  Pixel-level diffs are real (the prior path held FP32
+intermediates inside AdaLN before settling back to BF16 at layer
+boundaries; the new path is BF16 end-to-end), but content and
+structure are unchanged.  Matches mlx-video's reference precedent —
+they've always done it this way.
+
+If a stricter quality check is needed: `--save-latents` writes the
+stage-1 and stage-2 latents; compare cosine sim against a known-good
+pre-fix `.npz`.  Expect ~0.999 with BF16-rounding-noise scale of
+1e-3 in p99 abs diff.
+
+### What's left in the gap to mlx-video
+
+Down from +16.4 s to +5.3 s over 2 sync-mode stage-1 steps.
+Residual:
+
+- video_self_attn: +1.76 s — modest, likely structural per-call cost.
+- video_text_ca: +1.58 s — the `_apply_text_cross_attention` path
+  emits ~7.6× more GPU dispatches than mlx-video's inline equivalent
+  (303 vs 40 in the per-phase dispatch bucket).  Still a real
+  fragmentation signal worth investigating, but lower priority now
+  that the FP32 promotion is gone.
+- audio phases combined: +2.4 s.  Audio is small in absolute terms
+  (~5 s total), so further chasing has limited payoff ceiling.
+- video_ff: **−1.60 s** — we now win this phase outright.
+
+The probe tool (`/tmp/trace_analysis/sdpa_dtype_probe.py`) is reusable
+for any future "what dtype is actually reaching kernel X" question.
+
 ## Benchmark Matrix
 
 Use a fixed command and change only one thing at a time.
@@ -1786,6 +1949,7 @@ Use a fixed command and change only one thing at a time.
 | `--internal-audio auto` (default) | yes | none | -35% wall on video-only (256x256x25) | New CLI flag. Default `auto` resolves to `on` iff `--generate-audio`. Off otherwise. Replaces the silently-overridden `LTX_DISABLE_INTERNAL_AUDIO=1` legacy env. Matches mlx-video's distilled path. |
 | Audio module pretranspose (default) | yes | medium | -11% AV (256x256x25) | `audio_attn1/2.to_*`, `video_to_audio_attn.to_*`, `audio_ff.project_*` now go through the same `mx.contiguous(weight.T)` cache path the video modules use. Cache hash bumps; old caches stay valid. Opt out with `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`. |
 | QKV pretranspose (default) | yes | medium | -4% additional AV | `to_q/to_k/to_v` added to the default attention layout spec. 18 more matmuls per AV block per step with the implicit transpose eliminated. Cache hash bumps. |
+| AdaLN/RoPE dtype cast-back (default) | yes | none | **-16.8% bakery total** | `scale_shift_table` tensors are FP32 (kept for sincos precision).  The inline math `normed * (1 + scale) + shift` and `x + residual * gate` silently promoted BF16 activations to FP32, forcing SDPA to compile pure `steel_attention_float32_*_maskfloat32_*` kernels (~2× the data movement of BF16).  Fixed at five call sites in `transformer.py` plus `rope.py` — cast back to input dtype after each modulation, matching mlx-video's pattern.  Verified via monkey-patched `mx.fast.scaled_dot_product_attention` probe: every per-block SDPA call dropped from float32 to bfloat16 q/k/v.  Full bakery 1024x576x481 distilled with fast-mode: 29m 38s → 24m 40.6s.  See "2026-05-17 Session". |
 | Skip negative prompt encoding (distilled two-stage) | yes | none | -10% AV (256x256x25) | `generate_distilled_two_stage` doesn't accept a negative encoding, so we no longer encode one. Re-enable with `LTX_ENCODE_UNUSED_NEGATIVE=1` for sidecar debugging. Matches mlx-video. |
 | Tokenize without max-length padding | yes | none | -5% AV (256x256x25) | Tokenizer was padding 2 real tokens to 1024 before the Gemma forward; trim happened after the wasted O(N^2) attention. Re-enable with `LTX_PAD_PROMPT_TO_MAX=1`. |
 | `LTX_VELOCITY_MODE=1` | yes | low | neutral | Bypasses `X0Model` and does the velocity-form Euler update inline in `_denoise_loop_simple_av`. Same math. Tested at small T and bakery; both neutral. Kept env-gated for future MLX versions. |

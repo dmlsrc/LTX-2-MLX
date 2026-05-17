@@ -80,6 +80,7 @@ def apply_interleaved_rotary_emb(
         return _fused_interleaved_rope(input_tensor, cos_freqs, sin_freqs)
 
     # Fallback to naive implementation
+    input_dtype = input_tensor.dtype  # cos/sin are FP32 — cast result back
     shape = input_tensor.shape
     t_dup = input_tensor.reshape(*shape[:-1], shape[-1] // 2, 2)
 
@@ -91,8 +92,8 @@ def apply_interleaved_rotary_emb(
     t_rot = mx.stack([-t2, t1], axis=-1)
     input_tensor_rot = t_rot.reshape(shape)
 
-    # Apply rotation: x * cos + x_rot * sin
-    return input_tensor * cos_freqs + input_tensor_rot * sin_freqs
+    # Apply rotation: x * cos + x_rot * sin (promoted to FP32 by cos/sin dtype)
+    return (input_tensor * cos_freqs + input_tensor_rot * sin_freqs).astype(input_dtype)
 
 
 @mx.compile
@@ -127,8 +128,15 @@ def apply_split_rotary_emb(
         sin_freqs: Sine frequencies of shape (B, H, T, D//2).
 
     Returns:
-        Tensor with rotary embeddings applied, same shape as input_tensor.
+        Tensor with rotary embeddings applied, same shape and dtype as input_tensor.
     """
+    # Capture input dtype.  cos/sin are FP32 by default (for precision in the
+    # sincos compute), but propagating FP32 downstream causes SDPA / GEMM to
+    # compile pure float32 steel kernels.  At BF16 inputs that's a ~2x perf
+    # regression in attention.  Match mlx-video's pattern: cast back to input
+    # dtype on the way out.
+    input_dtype = input_tensor.dtype
+
     needs_reshape = input_tensor.ndim != 4 and cos_freqs.ndim == 4
     if needs_reshape:
         b, h, t, _ = cos_freqs.shape
@@ -140,7 +148,7 @@ def apply_split_rotary_emb(
         b, h, t, d = output.shape
         output = output.transpose(0, 2, 1, 3).reshape(b, t, h * d)
 
-    return output
+    return output.astype(input_dtype)
 
 
 @lru_cache(maxsize=5)

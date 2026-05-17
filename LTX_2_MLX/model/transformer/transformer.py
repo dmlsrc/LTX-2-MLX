@@ -21,9 +21,17 @@ def _adaln_inline(
     shift: mx.array,
     eps: float = 1e-6,
 ) -> mx.array:
-    """Inline AdaLN: RMSNorm + scale + shift, no compile boundary."""
+    """Inline AdaLN: RMSNorm + scale + shift, no compile boundary.
+
+    scale/shift come from FP32 scale_shift_tables (kept FP32 for the AdaLN
+    sincos compute precision).  Without the cast-back, ``normed * (1 + scale)``
+    promotes a BF16 input to FP32, which then propagates through to_q/to_k/to_v
+    and forces SDPA to compile pure ``steel_attention_float32_*`` kernels —
+    a ~2x perf regression vs the BF16 path.  Match mlx-video and cast back
+    to the input dtype on the way out.
+    """
     normed = mx.fast.rms_norm(x, None, eps)
-    return normed * (1 + scale) + shift
+    return (normed * (1 + scale) + shift).astype(x.dtype)
 
 
 def _residual_gate_inline(
@@ -31,8 +39,12 @@ def _residual_gate_inline(
     residual: mx.array,
     gate: mx.array,
 ) -> mx.array:
-    """Inline residual + gate, no compile boundary."""
-    return x + residual * gate
+    """Inline residual + gate, no compile boundary.
+
+    gate comes from the FP32 scale_shift_table path; cast result back to x's
+    dtype so downstream ops stay in BF16.
+    """
+    return (x + residual * gate).astype(x.dtype)
 
 
 # Set LTX_DISABLE_COMPILED_HELPERS=1 to bypass the @mx.compile wrappers around
@@ -451,8 +463,12 @@ class BasicAVTransformerBlock(nn.Module):
             )
             shift_kv = kv_modulation[:, :, 0, :]
             scale_kv = kv_modulation[:, :, 1, :]
-            attn_input = rms_norm(x, eps=self.norm_eps) * (1 + scale_q) + shift_q
-            encoder_hidden_states = context * (1 + scale_kv) + shift_kv
+            # Cast back to activation dtype: scale_q/shift_q/gate/scale_kv/shift_kv
+            # come from FP32 scale_shift tables and would otherwise promote
+            # attn_input/encoder_hidden_states to FP32, forcing SDPA to use
+            # pure float32 steel kernels (~2x slower than BF16).
+            attn_input = (rms_norm(x, eps=self.norm_eps) * (1 + scale_q) + shift_q).astype(x.dtype)
+            encoder_hidden_states = (context * (1 + scale_kv) + shift_kv).astype(context.dtype)
             if profile_attention:
                 mark_profile(f"{profile_name} setup", attn_input, encoder_hidden_states, gate)
                 attn_out = attn.profile(
@@ -464,7 +480,7 @@ class BasicAVTransformerBlock(nn.Module):
                 )
             else:
                 attn_out = attn(attn_input, context=encoder_hidden_states, mask=context_mask)
-            return attn_out * gate
+            return (attn_out * gate).astype(attn_out.dtype)
         # V1: simple RMSNorm on Q, no modulation
         attn_input = rms_norm(x, eps=self.norm_eps)
         if profile_attention:
@@ -670,8 +686,10 @@ class BasicAVTransformerBlock(nn.Module):
             # Skip if perturbation is enabled for all samples in batch
             if run_a2v and not skip_a2v:
                 with _signpost("a2v_cross"):
-                    vx_scaled = vx_norm3 * (1 + scale_ca_video_a2v) + shift_ca_video_a2v
-                    ax_scaled = ax_norm3 * (1 + scale_ca_audio_a2v) + shift_ca_audio_a2v
+                    # Cast back to activation dtype — scale/shift come from FP32
+                    # tables and would otherwise force SDPA into float32 kernels.
+                    vx_scaled = (vx_norm3 * (1 + scale_ca_video_a2v) + shift_ca_video_a2v).astype(vx_norm3.dtype)
+                    ax_scaled = (ax_norm3 * (1 + scale_ca_audio_a2v) + shift_ca_audio_a2v).astype(ax_norm3.dtype)
                     if profile_events is not None:
                         mark_profile("audio->video setup", vx_scaled, ax_scaled)
                         attn_out = self.audio_to_video_attn.profile(
@@ -689,7 +707,7 @@ class BasicAVTransformerBlock(nn.Module):
                             pe=video.cross_positional_embeddings,
                             k_pe=audio.cross_positional_embeddings,
                         )
-                    vx = vx + (attn_out * gate_out_a2v)
+                    vx = (vx + attn_out * gate_out_a2v).astype(vx.dtype)
                     mark_profile("audio->video residual", vx)
                     _sp_barrier(vx)
 
@@ -697,8 +715,8 @@ class BasicAVTransformerBlock(nn.Module):
             # Skip if perturbation is enabled for all samples in batch
             if run_v2a and not skip_v2a:
                 with _signpost("v2a_cross"):
-                    ax_scaled = ax_norm3 * (1 + scale_ca_audio_v2a) + shift_ca_audio_v2a
-                    vx_scaled = vx_norm3 * (1 + scale_ca_video_v2a) + shift_ca_video_v2a
+                    ax_scaled = (ax_norm3 * (1 + scale_ca_audio_v2a) + shift_ca_audio_v2a).astype(ax_norm3.dtype)
+                    vx_scaled = (vx_norm3 * (1 + scale_ca_video_v2a) + shift_ca_video_v2a).astype(vx_norm3.dtype)
                     if profile_events is not None:
                         mark_profile("video->audio setup", ax_scaled, vx_scaled)
                         attn_out = self.video_to_audio_attn.profile(
@@ -716,7 +734,7 @@ class BasicAVTransformerBlock(nn.Module):
                             pe=audio.cross_positional_embeddings,
                             k_pe=video.cross_positional_embeddings,
                         )
-                    ax = ax + (attn_out * gate_out_v2a)
+                    ax = (ax + attn_out * gate_out_v2a).astype(ax.dtype)
                     mark_profile("video->audio residual", ax)
                     _sp_barrier(ax)
 
