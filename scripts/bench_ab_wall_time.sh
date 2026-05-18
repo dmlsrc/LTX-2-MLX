@@ -25,7 +25,9 @@
 #   STEPS             Stage-1 step count (default 4 -> ~10 min total).
 #                     STEPS=2 for quick smoke (~6 min, step-1 warmup heavy).
 #                     STEPS=8 for full stage-1 (~16 min).
-#   AB_OUTDIR         Output dir for logs (default ${TMPDIR:-/tmp}/ab_<ts>).
+#   AB_OUTDIR         Output dir for logs.  Default:
+#                     $SHARED_TEMP_DIR/trace_analysis/ab_<ts> if set,
+#                     else ${TMPDIR:-/tmp}/ab_<ts>.
 #   SEED              Seed for both runs (default 124).
 #   HEIGHT, WIDTH     Output res (default 576, 1024 — distilled stage 1
 #                     runs at half = 288x512 latent).
@@ -64,7 +66,15 @@ SEED="${SEED:-124}"
 HEIGHT="${HEIGHT:-576}"
 WIDTH="${WIDTH:-1024}"
 NUM_FRAMES="${NUM_FRAMES:-481}"
-AB_OUTDIR="${AB_OUTDIR:-${TMPDIR:-/tmp}/ab_$(date +%Y%m%d_%H%M%S)}"
+# Default output dir: prefer $SHARED_TEMP_DIR/trace_analysis/ab_<ts>
+# (shared, persistent), fall back to ${TMPDIR:-/tmp}/ab_<ts>.
+if [ -z "${AB_OUTDIR:-}" ]; then
+    if [ -n "${SHARED_TEMP_DIR:-}" ]; then
+        AB_OUTDIR="${SHARED_TEMP_DIR}/trace_analysis/ab_$(date +%Y%m%d_%H%M%S)"
+    else
+        AB_OUTDIR="${TMPDIR:-/tmp}/ab_$(date +%Y%m%d_%H%M%S)"
+    fi
+fi
 LTX_VENV_BIN="${LTX_VENV_BIN:-}"
 MLXV_VENV_BIN="${MLXV_VENV_BIN:-}"
 

@@ -35,10 +35,12 @@ Environment variables:
                             to sys.path automatically.
 
 Recommended invocation for the video_self_attn outlier hunt (assumes you've
-sourced docs/TEST_PROMPTS.md to get $BAKERY):
+sourced docs/TEST_PROMPTS.md to get $BAKERY).  Log output goes to
+$SHARED_TEMP_DIR/trace_analysis/ when set (preferred — shared between
+accounts, survives reboots), otherwise falls back to ${TMPDIR:-/tmp}.
 
     LTX_PROBE_TIME_SDPA=1 \\
-    LTX_PROBE_TIME_LOG="${TMPDIR:-/tmp}/sdpa_per_call.jsonl" \\
+    LTX_PROBE_TIME_LOG="${SHARED_TEMP_DIR:-${TMPDIR:-/tmp}}/trace_analysis/sdpa_per_call.jsonl" \\
     LTX_PROFILE_STOP_AFTER_STEPS=2 \\
     LTX_DISABLE_COMPILED_ATTN=1 LTX_DISABLE_COMPILED_HELPERS=1 \\
     python scripts/sdpa_dtype_probe.py "$BAKERY" \\
