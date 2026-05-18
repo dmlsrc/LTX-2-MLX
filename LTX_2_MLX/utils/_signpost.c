@@ -60,6 +60,18 @@ LTX_PHASE(v2a_cross)
 LTX_PHASE(video_ff)
 LTX_PHASE(audio_ff)
 
+// Sub-phase breakdowns (added 2026-05-17 brutal-efficiency hunt).
+// These nest INSIDE the parent phase signposts above.  They aggregate
+// across all attention call sites (video_self_attn, video_text_ca,
+// audio_*, a2v_cross, v2a_cross) — the dominant contributor is
+// video_self_attn so the aggregate is meaningful, and per-call-site
+// breakdown is already available via sdpa_dtype_probe.py.
+LTX_PHASE(attn_qkv)       // V + Q + K + gate_logits projections + q_norm/k_norm + RoPE
+LTX_PHASE(attn_sdpa)      // mx.fast.scaled_dot_product_attention call only
+LTX_PHASE(attn_out)       // gate apply (V2) + output projection
+LTX_PHASE(v_ff_adaln)     // AdaLN modulation inside video_ff
+LTX_PHASE(v_ff_inner)     // self.ff(...) call: project_in + GELU + project_out
+
 // Generic event for top-level step / block markers.
 void ltx_signpost_event_step_begin(uint64_t sid, uint64_t step_idx) {
     _ltx_init();

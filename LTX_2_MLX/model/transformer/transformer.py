@@ -745,15 +745,19 @@ class BasicAVTransformerBlock(nn.Module):
                 self.scale_shift_table, vx.shape[0], video.timesteps, 3, 6
             )
             with _signpost("video_ff"):
-                if profile_events is not None:
+                # Sub-phase: AdaLN modulation
+                with _signpost("v_ff_adaln"):
                     vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
-                    mark_profile("video ff adaln", vx_scaled)
-                    ff_out = self.ff.profile(vx_scaled, "video ff", mark_profile)
-                    vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
-                else:
-                    vx_scaled = _compiled_adaln_forward(vx, scale_mlp, shift_mlp, self.norm_eps)
-                    ff_out = self.ff(vx_scaled)
-                    vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
+                    _sp_barrier(vx_scaled)
+                # Sub-phase: the FF call itself (project_in + GELU + project_out)
+                with _signpost("v_ff_inner"):
+                    if profile_events is not None:
+                        mark_profile("video ff adaln", vx_scaled)
+                        ff_out = self.ff.profile(vx_scaled, "video ff", mark_profile)
+                    else:
+                        ff_out = self.ff(vx_scaled)
+                    _sp_barrier(ff_out)
+                vx = _compiled_residual_gate(vx, ff_out, gate_mlp)
                 mark_profile("video ff residual", vx)
                 _sp_barrier(vx)
 

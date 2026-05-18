@@ -67,6 +67,7 @@ from typing import Iterator, Optional, TextIO
 # The 8 transformer sub-ops we instrument, plus event-only markers.
 # Must match the LTX_PHASE() invocations in _signpost.c.
 _PHASES = (
+    # Block-level phase signposts (the 8 sub-ops of BasicAVTransformerBlock).
     "video_self_attn",
     "video_text_ca",
     "audio_self_attn",
@@ -75,6 +76,16 @@ _PHASES = (
     "v2a_cross",
     "video_ff",
     "audio_ff",
+    # Sub-phase signposts (nest inside the parent phase signposts).
+    # Added 2026-05-17 for brutal-efficiency hunt: attribute the
+    # ~9 s/step "non-SDPA in video_self_attn phase" + 17 s/step
+    # video_ff buckets to specific sub-ops.  Aggregate across all
+    # attention call sites; the dominant contributor is video_self_attn.
+    "attn_qkv",       # V + Q + K + gate_logits projections + q_norm/k_norm + RoPE
+    "attn_sdpa",      # mx.fast.scaled_dot_product_attention call only
+    "attn_out",       # gate apply (V2) + output projection
+    "v_ff_adaln",     # AdaLN modulation inside video_ff
+    "v_ff_inner",     # self.ff(...) call: project_in + GELU + project_out
 )
 
 _THIS_DIR = Path(__file__).resolve().parent

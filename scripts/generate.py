@@ -141,7 +141,6 @@ def _hf_hub_cache_candidates() -> list[Path]:
     hf_home = os.environ.get("HF_HOME")
     if hf_home:
         add(Path(hf_home) / "hub")
-    add("/Users/Shared/huggingface/hub")
     add(Path.home() / ".cache" / "huggingface" / "hub")
     return candidates
 
@@ -4707,9 +4706,9 @@ def main():
         default=None,
         help=(
             "Directory for --weights-cache artifacts. Defaults to "
-            "$LTX_MLX_WEIGHTS_CACHE_DIR, then /Users/Shared/huggingface/mlx/"
-            "LTX-2-MLX-cache when available. The older "
-            "$LTX_MLX_TRANSFORMER_CACHE_DIR is still honored."
+            "$LTX_MLX_WEIGHTS_CACHE_DIR, then "
+            "$LTX_MLX_TRANSFORMER_CACHE_DIR (legacy alias), then "
+            "~/.cache/ltx-2-mlx/weights-cache."
         ),
     )
     parser.add_argument(

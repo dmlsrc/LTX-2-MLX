@@ -56,9 +56,9 @@ uv run scripts/download_weights.py --weights all
 ```
 
 At runtime, `scripts/generate.py` resolves cached LTX-2.3 and Gemma weights from
-`HF_HUB_CACHE`, `$HF_HOME/hub`, `/Users/Shared/huggingface/hub`, then the normal
-user cache. Use `--weights` or `--gemma-path` only when you want to override that
-cache lookup.
+`HF_HUB_CACHE`, `$HF_HOME/hub`, then the normal user cache
+(`~/.cache/huggingface/hub`). Use `--weights` or `--gemma-path` only when you
+want to override that cache lookup.
 
 `--weights` is treated as a full bundle for the normal path. Advanced runs can
 override individual subsystems without changing the rest of the bundle:
@@ -337,7 +337,7 @@ python scripts/generate.py "Your prompt"
 
 # Custom output directory and filename prefix
 python scripts/generate.py "Your prompt" \
-    --output-dir /Users/Shared/huggingface/output \
+    --output-dir /path/to/outputs \
     --output-prefix ltx_bakery_r16
 
 # Exact output path override

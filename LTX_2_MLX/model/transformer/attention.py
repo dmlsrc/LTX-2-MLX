@@ -8,6 +8,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from .rope import LTXRopeType, apply_rotary_emb
+from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_barrier
 
 
 # Set LTX_DISABLE_COMPILED_ATTN=1 to bypass the @mx.compile wrappers around the
@@ -348,43 +349,55 @@ class Attention(nn.Module):
         serializing gate after SDPA.  At small T this measurably reduces
         per-step time; at large T the effect is in the noise but still neutral.
         """
-        # 1) Gate logits first — independent of V/Q/K, lets MLX schedule it
-        #    in parallel with the projections below.
-        gate = None
-        if self.to_gate_logits is not None:
-            # 2 * sigmoid so zero-init weight gives identity (2 * 0.5 = 1.0)
-            gate_logits = self._projection_call(
-                self.to_gate_logits, self._to_gate_logits_weight_t, x,
-            )
-            gate = 2.0 * mx.sigmoid(gate_logits)  # (B, T, H)
+        # Sub-phase signposts (no-op when LTX_PROFILE_SIGNPOSTS is unset).
+        # Three regions: qkv (projections + norms + rope) → sdpa → out.
+        # Aggregates across all attention call sites; the parent phase
+        # signpost (video_self_attn / video_text_ca / etc.) wraps the whole
+        # call so trace tools can correlate.
+        with _signpost("attn_qkv"):
+            # 1) Gate logits first — independent of V/Q/K, lets MLX schedule it
+            #    in parallel with the projections below.
+            gate = None
+            if self.to_gate_logits is not None:
+                # 2 * sigmoid so zero-init weight gives identity (2 * 0.5 = 1.0)
+                gate_logits = self._projection_call(
+                    self.to_gate_logits, self._to_gate_logits_weight_t, x,
+                )
+                gate = 2.0 * mx.sigmoid(gate_logits)  # (B, T, H)
 
-        # 2) Project V before Q, K (mlx-video order).
-        context = x if context is None else context
-        v = self._projection_call(self.to_v, self._to_v_weight_t, context)
-        q = self._projection_call(self.to_q, self._to_q_weight_t, x)
-        k = self._projection_call(self.to_k, self._to_k_weight_t, context)
+            # 2) Project V before Q, K (mlx-video order).
+            context = x if context is None else context
+            v = self._projection_call(self.to_v, self._to_v_weight_t, context)
+            q = self._projection_call(self.to_q, self._to_q_weight_t, x)
+            k = self._projection_call(self.to_k, self._to_k_weight_t, context)
 
-        # 3) Apply RMSNorm to Q and K
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+            # 3) Apply RMSNorm to Q and K
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
-        # 4) Apply RoPE if position embeddings provided
-        if pe is not None:
-            q = apply_rotary_emb(q, pe, self.rope_type)
-            k = apply_rotary_emb(k, pe if k_pe is None else k_pe, self.rope_type)
+            # 4) Apply RoPE if position embeddings provided
+            if pe is not None:
+                q = apply_rotary_emb(q, pe, self.rope_type)
+                k = apply_rotary_emb(k, pe if k_pe is None else k_pe, self.rope_type)
+            _sp_barrier(q, k, v)
 
-        # 5) Attention core (compiled or inline depending on env toggle).
-        out = _attention_core(q, k, v, self.heads, self.dim_head, mask)
+        with _signpost("attn_sdpa"):
+            # 5) Attention core (compiled or inline depending on env toggle).
+            out = _attention_core(q, k, v, self.heads, self.dim_head, mask)
+            _sp_barrier(out)
 
-        # 6) Apply per-head gating if enabled (V2).
-        if gate is not None:
-            b, t, _ = out.shape
-            out = out.reshape(b, t, self.heads, self.dim_head)
-            out = out * gate[:, :, :, None]  # (B, T, H, D) * (B, T, H, 1)
-            out = out.reshape(b, t, self.heads * self.dim_head)
+        with _signpost("attn_out"):
+            # 6) Apply per-head gating if enabled (V2).
+            if gate is not None:
+                b, t, _ = out.shape
+                out = out.reshape(b, t, self.heads, self.dim_head)
+                out = out * gate[:, :, :, None]  # (B, T, H, D) * (B, T, H, 1)
+                out = out.reshape(b, t, self.heads * self.dim_head)
 
-        # 7) Output projection
-        return self._to_out(out)
+            # 7) Output projection
+            out = self._to_out(out)
+            _sp_barrier(out)
+        return out
 
     def profile(
         self,

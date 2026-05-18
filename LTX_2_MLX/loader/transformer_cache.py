@@ -264,17 +264,18 @@ class WeightFamilyCacheResult:
 
 
 def default_transformer_cache_root() -> Path:
-    """Return the default location for disposable weight cache artifacts."""
+    """Return the default location for disposable weight cache artifacts.
+
+    Resolution order:
+    1. ``LTX_MLX_WEIGHTS_CACHE_DIR`` (preferred name)
+    2. ``LTX_MLX_TRANSFORMER_CACHE_DIR`` (legacy alias, still honored)
+    3. ``~/.cache/ltx-2-mlx/weights-cache``
+    """
     env_path = os.environ.get("LTX_MLX_WEIGHTS_CACHE_DIR")
     if not env_path:
         env_path = os.environ.get("LTX_MLX_TRANSFORMER_CACHE_DIR")
     if env_path:
         return Path(env_path).expanduser()
-
-    shared_mlx = Path("/Users/Shared/huggingface/mlx")
-    if shared_mlx.exists():
-        return shared_mlx / "LTX-2-MLX-cache"
-
     return Path.home() / ".cache" / "ltx-2-mlx" / "weights-cache"
 
 

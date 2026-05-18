@@ -469,7 +469,7 @@ def main(argv: list[str] | None = None) -> None:
         help="NPZ sidecar produced by scripts/generate.py --save-latents.",
     )
     parser.add_argument("--weights", required=True)
-    parser.add_argument("--output-dir", default="/Users/Shared/huggingface/output/decode_tests")
+    parser.add_argument("--output-dir", default="outputs/decode_tests")
     parser.add_argument("--fps", type=float, default=24.0)
     parser.add_argument(
         "--vae-dtype",

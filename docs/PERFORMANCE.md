@@ -126,8 +126,7 @@ clean benchmark numbers.
 
 ## MLX Runtime Notes
 
-These notes come from the local MLX checkout under
-`/Users/Shared/huggingface/lib/mlx-main`.
+These notes come from a local MLX checkout (e.g. `mlx-main`).
 
 ### Lazy evaluation
 
@@ -279,7 +278,7 @@ research:
 Confirmed present in the diffusers venv:
 
 ```bash
-/Users/diffuser/.venvs/diffusers/bin/python - <<'PY'
+python - <<'PY'
 import mlx.core as mx
 for name in [
     "block_masked_mm", "gather_mm", "gather_qmm", "hadamard_transform",
@@ -1647,7 +1646,7 @@ xcrun xctrace record \
   --template "Metal System Trace" \
   --instrument "Points of Interest" \
   --attach <PID> \
-  --output /Users/Shared/huggingface/temp/my.trace \
+  --output "${TMPDIR:-/tmp}/my.trace" \
   --no-prompt
 ```
 
@@ -1827,8 +1826,8 @@ LTX-2-MLX modules, log every call's `(q.dtype, k.dtype, v.dtype,
 mask.dtype, shapes)`, then run one denoise step:
 
 ```python
-# /tmp/trace_analysis/sdpa_dtype_probe.py — runs scripts/generate.py
-# under a monkey-patched SDPA that records every call's dtype.
+# scripts/sdpa_dtype_probe.py — runs scripts/generate.py under a
+# monkey-patched SDPA that records every call's dtype.
 ```
 
 First run (RoPE fix only) revealed: **every per-block SDPA call had
@@ -1975,8 +1974,251 @@ post-AdaLN-fix):**
    (line 2009), and (b) partial-layer streaming quant disables
    resident-group compile (line 2007) — both can flip the speed sign.
 
-The probe tool (`/tmp/trace_analysis/sdpa_dtype_probe.py`) is reusable
-for any future "what dtype is actually reaching kernel X" question.
+The probe tool (`scripts/sdpa_dtype_probe.py`) is reusable for any
+future "what dtype is actually reaching kernel X" question.
+
+### 2026-05-17 follow-up: SDPA probe + non-sync A/B (gap was signpost overhead)
+
+The "+5.3 s residual to mlx-video" framing above turned out to be
+**signpost/sync-mode overhead**, not real GPU work.  Two new measurements
+disproved the gap and reframed the brutal-efficiency hunt.
+
+**(a) Per-call SDPA head-to-head, identical workloads, eval-barrier mode.**
+
+Extended `sdpa_dtype_probe.py` with `LTX_PROBE_TIME_SDPA=1` to wrap
+every `mx.fast.scaled_dot_product_attention` call in `mx.eval` barriers
++ timer.  Ran both projects at distilled stage 1, 1024×576 → 288×512
+latent, 2 steps, identical seed/prompt.  Required
+`LTX_DISABLE_COMPILED_ATTN=1 LTX_DISABLE_COMPILED_HELPERS=1` on the
+LTX side so `mx.eval` could break MLX's compiled regions.
+
+| Phase (shape)                                        | LTX total | mlxv total | Δ          |
+| ---------------------------------------------------- | --------- | ---------- | ---------- |
+| video_self_attn  q/k/v=(1,32,8784,128), mask=None    | 22,287 ms | 22,743 ms  | **−456**   |
+| video_text_ca    q=(1,32,8784,128), kv=(1,32,1024,128) | 2,696 ms | 2,791 ms   | **−96**    |
+| v2a_cross        q=(1,32,501,64), kv=(1,32,8784,64)  | 660 ms    | 703 ms     | **−43**    |
+| a2v_cross        q=(1,32,8784,64), kv=(1,32,501,64)  | 640 ms    | 650 ms     | **−10**    |
+| audio_text_ca    q=(1,32,501,64), kv=(1,32,1024,64)  | 108 ms    | 119 ms     | **−11**    |
+| audio_self_attn  (1,32,501,64)                       | 80 ms     | 82 ms      | tied       |
+| **SDPA TOTAL**                                       | **26,470** | **27,088** | **−618 (LTX wins by 2.3 %)** |
+
+Both projects produce **identical SDPA shapes** and **identical kernel
+selection** (every call BF16, no mask, same dims).  The "180 ms vs
+133 ms" gap from the 05-16 trace was a sampling-bucket artifact of
+the `metal-shader-profiler-dispatches` table, not a real per-call
+difference.  Per-block SDPA distribution is flat 232-245 ms (LTX) vs
+235-272 ms (mlxv) — LTX has the tighter tail.
+
+**(b) Non-sync end-to-end wall-time A/B.**
+
+Ran both projects in production lazy-graph mode (no signposts, no
+eval barriers) for 8 stage-1 steps each at the same workload, via
+the new script `scripts/bench_ab_wall_time.sh`:
+
+| Metric                      | LTX-2-MLX | mlx-video | Δ          |
+| --------------------------- | --------- | --------- | ---------- |
+| Total process wall (8 steps + load) | 6m 10s   | 6m 58s    | **+48 s**  |
+| Per-step denoise (8 steps sum)      | 364.40 s | 396.11 s  | **+31.7 s (+8.7 %)** |
+| Per-step average                    | 45.5 s/it | 49.5 s/it | **+4.0 s/it** |
+
+Per-step trajectory (LTX is consistent; mlxv drifts upward after step 4):
+
+| step | LTX (s) | mlxv (s) | Δ      |
+| ---- | ------- | -------- | ------ |
+| 1    | 46.30   | 48.62    | +2.32  |
+| 2    | 45.90   | 48.48    | +2.58  |
+| 3    | 45.60   | 48.43    | +2.83  |
+| 4    | 45.50   | 48.42    | +2.92  |
+| 5    | 45.40   | 49.25    | +3.85  |
+| 6    | 45.30   | 50.51    | +5.21  |
+| 7    | 45.20   | 51.17    | +5.97  |
+| 8    | 45.20   | 51.23    | +6.03  |
+
+**LTX-2-MLX is 8.7 % faster than mlx-video end-to-end in production.**
+The +5.3 s "residual" the prior section chased was the cost of:
+
+- 384 signpost emit pairs per step (8 phases × 48 blocks)
+- Per-phase `mx.eval` barriers in sync mode (lazy graph fully broken)
+- Profile/event overhead specific to the LTX trace protocol
+
+mlx-video's traces showed less overhead because they emit fewer
+signposts per block (they instrument at the block level, not the 8
+sub-ops).
+
+### Reframed brutal-efficiency hunt
+
+With the gap-to-mlxv question closed, the new question is: **how far
+below 45 s/it can we drive per-step wall on the same workload**?
+We're at 26 % of M1 Max BF16 peak on SDPA (2.7 TFlops/s of 10.4) and
+~64 % of peak on FF (6.7 TFlops/s).  Plenty of headroom.
+
+Per-step decomposition (from sync-mode 2-step capture, **divide by 2
+for per-step**):
+
+| Phase           | sync-mode wall / step | SDPA-only / step | non-SDPA / step |
+| --------------- | --------------------- | ---------------- | --------------- |
+| video_self_attn | 20.3 s                | 11.1 s           | **9.2 s**       |
+| video_ff        | 17.0 s                | (no SDPA)        | **17.0 s**      |
+| video_text_ca   | 6.5 s                 | 1.3 s            | **5.2 s**       |
+| a2v_cross       | 2.9 s                 | 0.3 s            | **2.6 s**       |
+| v2a_cross       | 2.7 s                 | 0.3 s            | **2.4 s**       |
+| audio combined  | 2.3 s                 | 0.1 s            | **2.2 s**       |
+| **TOTAL (sync)** | **51.7 s**           | **13.1 s**       | **38.6 s**      |
+
+(Non-sync per-step is 45 s; the ~6.6 s sync-mode delta is signpost
+overhead.  In non-sync mode the budget is ~38.6 s × (45/51.7) ≈
+33.6 s of non-SDPA work the lazy graph fuses, plus ~11.4 s of SDPA
+the graph cannot fuse.)
+
+**The 9.2 s/step "non-SDPA in video_self_attn phase" and 17 s/step
+video_ff are the two biggest unattributed buckets**.  Sub-phase
+signposts (added in this same commit) will break them down into:
+
+- **Attention internals**: `attn_qkv` (V/Q/K + gate_logits projections),
+  `attn_sdpa` (just the SDPA call, redundant with the per-call probe
+  but useful in-trace), `attn_out` (gate apply + output projection).
+  Fires from every attention call site.
+- **FF internals**: `v_ff_adaln` (the AdaLN modulation), `v_ff_inner`
+  (the `self.ff(...)` call — project_in + GELU + project_out fused
+  inside the FeedForward module).
+
+After capturing a fresh sync-mode 2-step trace with the new
+sub-phases, the rollup will show which of:
+
+- Q/K/V projections (4096 → 12288 matmul × 48 blocks × 8 steps)
+- Output projection (4096 → 4096 × 48 × 8)
+- FF project_in (4096 → 16384)
+- FF GELU
+- FF project_out (16384 → 4096)
+
+is the largest single addressable target.  Likely candidates:
+
+1. **Q/K/V fusion** — three separate matmuls into one combined matmul
+   if not already done by MLX.  ~30-40 % of that phase if applicable.
+2. **FlashAttention-2 custom Metal kernel** for video_self_attn at
+   T=8784.  At 26 % of peak we have ~3× headroom on this kernel
+   alone.  Bounded engineering effort: the shape is known and stable.
+3. **FF quant at acceptable quality** — mxfp8 `project_out` 32-47
+   already tested at 10 % faster than BF16.  Now a draft-quality
+   lever (no longer "catch up to mlxv"), but ~2 s/step on the table.
+
+### Tooling artifacts from this session
+
+- `scripts/sdpa_dtype_probe.py` — monkey-patches
+  `mx.fast.scaled_dot_product_attention` BEFORE any LTX import,
+  records every call's (dtype, shape) signature with caller stack.
+  Set `LTX_PROBE_TIME_SDPA=1` (requires `LTX_DISABLE_COMPILED_ATTN=1`
+  and `LTX_DISABLE_COMPILED_HELPERS=1`) to also wrap each call in
+  `mx.eval` barriers + timer for per-call wall time.  Set
+  `LTX_PROBE_TIME_LOG=/path/to/sdpa.jsonl` for one record per call.
+  `LTX_PROBE_MODULE=mlx_video.models.ltx_2.generate` runs against
+  mlx-video instead (uses `runpy.run_module` for package-relative
+  imports).  Reports: per-signature dtype histogram, per-signature
+  timing summary sorted by total ms, top-30 slowest individual calls.
+- `scripts/bench_ab_wall_time.sh` — production-mode A/B wall-time
+  comparison.  Sequential (no GPU contention).  Required env vars:
+  `LTX_REPO`, `MLXV_REPO`, `MLXV_MODEL_REPO`.  Optional:
+  `LTX_VENV_BIN`, `MLXV_VENV_BIN`, `STEPS`, `SEED`, `AB_OUTDIR`.
+  Default `STEPS=4` runs in ~10 min; `STEPS=8` for full stage-1
+  in ~16 min.  Parses per-step times from both projects' progress
+  output and prints a side-by-side comparison plus per-step trajectory.
+- Sub-phase signposts in `LTX_2_MLX/utils/_signpost.c` and
+  `LTX_2_MLX/utils/signpost.py` (`attn_qkv`, `attn_sdpa`,
+  `attn_out`, `v_ff_adaln`, `v_ff_inner`) for the brutal-efficiency
+  next step.  Wired into `attention.py` (`Attention.__call__`) and
+  `transformer.py` (around the video_ff block).  Nest inside the
+  existing 8 parent phase signposts; aggregate across all attention
+  call sites.
+- `scripts/analyze_signpost_subphases.py` — walks a sidecar log
+  (`LTX_PROFILE_SIGNPOST_LOG`), attributes each sub-phase to its
+  currently-open parent phase, prints a per-(parent, sub-phase)
+  rollup with `n`, total, mean, p50/p99/max, and an
+  `[unaccounted]` budget per parent.  Calls fired outside any
+  transformer parent (text encoder, AV connector during prompt
+  encode) get bucketed under `[no_parent]`.  Also prints the
+  top-N slowest individual intervals.
+
+### Sub-phase validation: 2-step sync-mode capture, 1024×576 stage 1
+
+Sanity-check run with `LTX_PROFILE_SIGNPOSTS=1 LTX_PROFILE_SIGNPOSTS_SYNC=1`
+and the new sub-phase signposts enabled.  All 13 phases emit cleanly,
+all begin/end pairs matched (no orphans), and sums reconcile with their
+parents within 1 % (the unaccounted residual is the unwrapped
+`residual_gate` at the end of each phase).
+
+**Per-parent sub-phase attribution (per step — divide totals by 2):**
+
+| Parent          | Sub-phase     | per-step | mean/block | p99/block | max/block |
+| --------------- | ------------- | --------:| ----------:| ---------:| ---------:|
+| video_self_attn | (total)       | 21.3 s   | 443.5 ms   | 510.2 ms  | 602.9 ms  |
+|                 | attn_sdpa     | 11.0 s   | 230.0 ms   | 241.5 ms  | 242.6 ms  |
+|                 | attn_qkv      | 7.7 s    | 161.0 ms   | 229.9 ms  | 322.5 ms  |
+|                 | attn_out      | 2.4 s    | 49.8 ms    | 59.6 ms   | 59.8 ms   |
+|                 | [unaccounted] | 0.1 s    |            |           | 0.6 %     |
+| video_ff        | (total)       | 18.9 s   | 392.8 ms   | 532.8 ms  | 777.1 ms  |
+|                 | v_ff_inner    | 18.7 s   | 389.3 ms   | 529.5 ms  | 774.4 ms  |
+|                 | v_ff_adaln    | 0.06 s   | 1.3 ms     | 2.0 ms    | 2.3 ms    |
+|                 | [unaccounted] | 0.1 s    |            |           | 0.6 %     |
+| video_text_ca   | (total)       | 7.5 s    | 156.8 ms   | 178.6 ms  | 202.6 ms  |
+|                 | attn_qkv      | 3.5 s    | 73.8 ms    | 94.3 ms   | 118.3 ms  |
+|                 | attn_out      | 2.4 s    | 49.6 ms    | 57.4 ms   | 58.7 ms   |
+|                 | attn_sdpa     | 1.3 s    | 27.9 ms    | 29.9 ms   | 30.1 ms   |
+|                 | [unaccounted] | 0.3 s    |            |           | 3.5 %     |
+| a2v_cross       | (total)       | 3.8 s    | 79.8 ms    | 128.1 ms  | 205.0 ms  |
+|                 | attn_qkv      | 1.7 s    | 35.1 ms    | 77.3 ms   | 136.3 ms  |
+|                 | attn_out      | 1.2 s    | 25.1 ms    | 27.6 ms   | 28.1 ms   |
+|                 | attn_sdpa     | 0.3 s    | 6.7 ms     | 7.6 ms    | 7.7 ms    |
+|                 | [unaccounted] | 0.6 s    |            |           | 16.1 %    |
+| v2a_cross       | (total)       | 3.2 s    | 66.1 ms    | 74.9 ms   | 77.3 ms   |
+|                 | attn_qkv      | 2.6 s    | 53.4 ms    | 62.2 ms   | 64.7 ms   |
+|                 | attn_sdpa     | 0.3 s    | 7.2 ms     | 8.2 ms    | 9.2 ms    |
+|                 | attn_out      | 0.2 s    | 4.5 ms     | 6.7 ms    | 7.1 ms    |
+|                 | [unaccounted] | 0.1 s    |            |           | 1.6 %     |
+| audio_ff        | (total)       | 1.6 s    | 33.7 ms    | 86.3 ms   | 114.6 ms  |
+| audio_self_attn | (total)       | 0.8 s    | 16.6 ms    | 32.4 ms   | 56.8 ms   |
+| audio_text_ca   | (total)       | 0.8 s    | 16.7 ms    | 22.9 ms   | 30.2 ms   |
+
+**Two rankings of the brutal-efficiency targets (they don't agree, by design):**
+
+| Sub-phase                       | per-step | rank by size | rank by actionability | why |
+| ------------------------------- |---------:|:------------:|:---------------------:| --- |
+| video_ff / v_ff_inner           | 18.7 s   | **#1**       | **#1**                | Two non-conflicting levers: (a) mxfp8 quant on project_in/project_out — tested at ~10 % faster (line 2007), quality cost; (b) custom Metal kernel fusing project_in + GELU + project_out into one pass so the 16384-dim intermediate never materializes — bandwidth win at T=8784, similar idea to FlashAttention.  Most leverage with least new engineering on the quant side; biggest theoretical ceiling on the fused-kernel side.  Combinable. |
+| video_self_attn / attn_sdpa     | 11.0 s   | **#2**       | **#3**                | Big but at-parity with mlx-video (per-call probe).  Only path forward is a custom FlashAttention-2 Metal kernel — bounded but high-effort.  Worth doing eventually but is the hardest target. |
+| video_self_attn / attn_qkv      | 7.7 s    | #3           | **#2**                | 3 separate matmuls (V, Q, K) + 2 RMSNorms + 2 RoPE calls per attention.  Fusing Q+K+V into one combined matmul would collapse most of this with bounded engineering (need to check whether MLX is already doing this internally before refactoring). |
+| video_text_ca / attn_qkv        | 3.5 s    | #4           | #5                    | Same lever as above but smaller — Q on T=8784, K/V on T=1024. |
+| v2a_cross / attn_qkv            | 2.6 s    | #5           | #6                    | Q on T=501, K/V on T=8784 — interesting bandwidth pattern.  Small absolute. |
+| video_self_attn / attn_out      | 2.4 s    | #6           | #4                    | 4096→4096 single matmul + per-head gate apply.  If the gate is close to identity (post-zero-init weights), the gate-apply could be elided — easy lever for a marginal win. |
+| video_text_ca / attn_out        | 2.4 s    | tied         | tied                  | Same as above, different parent. |
+
+**Three sanity-check observations:**
+
+1. **video_ff is almost entirely the inner FF matmul** — 99.1 %
+   of video_ff time is in `v_ff_inner` (project_in + GELU +
+   project_out); AdaLN modulation is 1.3 ms/block (0.3 %).
+   "Fuse AdaLN INTO the FF matmul" is dead-on-arrival because
+   AdaLN has no time to save (note: this is different from
+   internal FF fusion — project_in + GELU + project_out into one
+   kernel — which IS a live lever per the table above).
+   v_ff_inner owns 18 of the top 20 slowest individual sub-phase
+   intervals at this workload.
+2. **attn_sdpa cross-validates the per-call probe** — 22.08 s in
+   this sync-mode capture vs 22.29 s in the eval-barrier probe.
+   Same kernel, same shape, same speed.  Per-block SDPA wall is
+   bounded at 230 ms by MLX's current implementation.
+3. **a2v_cross has 16 % unaccounted time** — the AdaLN modulation
+   at `transformer.py:691-692` (`vx_norm3 * (1 + scale) + shift`)
+   is inside the `a2v_cross` parent signpost but NOT wrapped in a
+   sub-phase.  Worth wrapping if a2v_cross ever becomes a real
+   target (currently 3.8 s/step total — probably not).
+
+**Video ops dominate by a wide margin** — video_self_attn +
+video_ff + video_text_ca alone is 47.7 s/step out of ~50 s.
+Audio + cross-modal combined is < 10 s/step.  Optimization ROI
+continues to be video > everything else.
+
+The sub-phase signposts are now part of the default profile-mode
+toolkit; future captures will produce the same 13-phase rollup
+automatically without code changes.
 
 ### Scaling validation: 30-second 1024×576 (721 frames)
 

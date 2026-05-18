@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import subprocess
 import sys
 import time
@@ -38,11 +39,9 @@ from scripts.generate import (
 from LTX_2_MLX.loader import ensure_weight_family_caches
 
 
-DEFAULT_WEIGHTS = (
-    "/Users/Shared/huggingface/hub/models--Lightricks--LTX-2.3/"
-    "snapshots/76730e634e70a28f4e8d51f5e29c08e40e2d8e74/"
-    "ltx-2.3-22b-distilled-1.1.safetensors"
-)
+# Default weights path is taken from $LTX_DEFAULT_WEIGHTS_PATH (a personal
+# convenience for repeated invocations).  When unset, --weights is required.
+DEFAULT_WEIGHTS = os.environ.get("LTX_DEFAULT_WEIGHTS_PATH") or None
 def _clear() -> None:
     gc.collect()
     mx.clear_cache()
@@ -405,7 +404,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--latent", required=True, type=Path, help="NPZ containing final_video_latent")
     parser.add_argument("--latent-key", default="final_video_latent")
-    parser.add_argument("--weights", default=DEFAULT_WEIGHTS, type=Path, help="Stock checkpoint for VAE config metadata")
+    parser.add_argument(
+        "--weights",
+        default=DEFAULT_WEIGHTS,
+        required=DEFAULT_WEIGHTS is None,
+        type=Path,
+        help=(
+            "Stock checkpoint for VAE config metadata. Required unless "
+            "$LTX_DEFAULT_WEIGHTS_PATH is set."
+        ),
+    )
     parser.add_argument(
         "--vae-weights",
         "--component-weights",
