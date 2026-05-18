@@ -28,6 +28,11 @@ Available benches:
     sdpa_t_sweep        - SDPA at neighbor T values around 8784 to find
                           tile-alignment cliffs (is padding to a friendlier T
                           a free lever?)
+    sdpa_d_sweep        - SDPA at varying head_dim across MLX's bk=32/bk=16
+                          kernel-selection boundary at D=128.  Tests the FA-2
+                          tile-size hypothesis (does MLX's bk=32 path at
+                          D=120 achieve more TFlops/s than its bk=16 path
+                          at D=128?) WITHOUT writing a custom kernel.
     quant_matmul        - BF16 vs mxfp8 matmul at LTX FF/attention shapes;
                           measures per-shape regression and effective TFlops/s
                           (explains why end-to-end mxfp8 loses post-AdaLN-fix)
@@ -764,6 +769,167 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
               f"cost of any padding target above.")
 
 
+def bench_sdpa_d_sweep(warmup: int, iters: int) -> None:
+    """SDPA at varying head_dim across MLX's kernel-selection boundary.
+
+    Tests the FA-2 tile-size hypothesis WITHOUT writing a custom kernel.
+    MLX's sdpa_full dispatch (`scaled_dot_product_attention.cpp:198`) picks:
+
+        bq = 32; bk = bd < 128 ? 32 : 16;
+
+    So at D=120 we get bk=32 (matches pmetal's K-dim choice for d=128);
+    at D=128 we get bk=16.  If MLX's bk=16 path leaves compute on the
+    table at our shape neighborhood, we expect a KINK in per-FLOP
+    efficiency at the D=128 boundary -- D=120 should achieve meaningfully
+    higher TFlops/s than D=128 in MLX's own kernels.
+
+    Outcomes:
+    - **Kink at D=128 (sharp drop in TFlops/s, jump in ns/FLOP):**
+      MLX's bk=16 path leaves compute on the table -> FA-2 hypothesis
+      is REAL -> custom kernel with bigger K-tile worth writing.
+    - **Smooth curve through D=128:** MLX's tile choice is roughly
+      shape-insensitive -> FA-2 lift is at the bottom of the
+      1.1-1.3x range -> kernel work probably not worth it.
+    - **D=120 already at GEMM ceiling (~7.95 TFlops/s achieved here
+      earlier):** MLX's bk=32 path is hardware-bound -> even matching
+      pmetal's tile choice at D=128 may not help, because MLX's bk=16
+      kernel may have OTHER inefficiencies beyond tile size.
+
+    FLOPs counted as 2 matmuls (QK^T + PV), 2 FLOPs per MAC:
+        total_FLOPs = 4 * B * H * T**2 * D
+
+    Compute TFlops/s and ns_per_FLOP for direct comparison across D.
+    M1 Max BF16 hardware peak is ~10 TFlops/s; MLX `steel_gemm` on the
+    FF shape (different shape) achieves ~7.95 TFlops/s = ~80% of peak.
+    """
+    print()
+    print("=" * 100)
+    print(f"BENCH: SDPA D-sweep at ({B}, {H}, {T}, D) BF16, no mask"
+          f"  -- testing MLX bk=32 vs bk=16 kernel-selection cliff")
+    print("=" * 100)
+    print(f"  {'D':>4}  {'MLX_bk':>6}  {'mean_ms':>8}  {'p99_ms':>8}  "
+          f"{'TFlops/s':>9}  {'ns/FLOP':>8}  {'vs_D=128':>10}")
+    print(f"  {'-'*4}  {'-'*6}  {'-'*8}  {'-'*8}  "
+          f"{'-'*9}  {'-'*8}  {'-'*10}")
+
+    # D values straddling MLX's kernel-selection boundary at D=128.
+    # bk=32 below 128, bk=16 at/above 128.
+    D_values = [64, 80, 96, 112, 120, 128, 136, 160, 192, 256]
+
+    baseline_tflops = None  # at D=128
+    baseline_mean = None
+    rows: list[tuple] = []
+
+    for D_val in D_values:
+        bk = 32 if D_val < 128 else 16
+        scale = 1.0 / (D_val ** 0.5)
+
+        try:
+            q = mx.random.normal(shape=(B, H, T, D_val)).astype(DTYPE)
+            k = mx.random.normal(shape=(B, H, T, D_val)).astype(DTYPE)
+            v = mx.random.normal(shape=(B, H, T, D_val)).astype(DTYPE)
+            mx.eval(q, k, v)
+
+            def _call(_q=q, _k=k, _v=v, _scale=scale):
+                return mx.fast.scaled_dot_product_attention(
+                    _q, _k, _v, scale=_scale, mask=None,
+                )
+
+            durs = _time_call(_call, warmup=warmup, iters=iters)
+        except Exception as e:
+            rows.append((D_val, bk, None, None, None, None, f"FAILED: {type(e).__name__}"))
+            continue
+        finally:
+            try:
+                del q, k, v
+            except NameError:
+                pass
+            if hasattr(mx, "clear_cache"):
+                mx.clear_cache()
+            else:
+                mx.metal.clear_cache()
+
+        mean_ms = sum(durs) / len(durs)
+        p99 = _pct(durs, 99)
+        # FLOPs: 4 * B * H * T^2 * D  (2 matmuls, 2 FLOPs per MAC)
+        flops = 4.0 * B * H * T * T * D_val
+        tflops = (flops / 1e12) / (mean_ms / 1000.0)
+        ns_per_flop = (mean_ms * 1e6) / flops  # ns per FLOP
+
+        if D_val == 128:
+            baseline_tflops = tflops
+            baseline_mean = mean_ms
+
+        rows.append((D_val, bk, mean_ms, p99, tflops, ns_per_flop, None))
+
+    # Print rows
+    for D_val, bk, mean_ms, p99, tflops, ns_per_flop, err in rows:
+        if err is not None:
+            print(f"  {D_val:>4}  bk={bk:<3}  {err}")
+            continue
+        if baseline_tflops is not None and D_val != 128:
+            # Positive % = D_val achieves more TFlops/s than D=128 baseline
+            vs_baseline = f"{100*(tflops - baseline_tflops)/baseline_tflops:+.1f}%"
+        elif D_val == 128:
+            vs_baseline = "(baseline)"
+        else:
+            vs_baseline = "n/a"
+        print(f"  {D_val:>4}  bk={bk:<3}  {mean_ms:>8.2f}  {p99:>8.2f}  "
+              f"{tflops:>9.2f}  {ns_per_flop:>8.4f}  {vs_baseline:>10}")
+
+    # Cliff detection: compare D=120 (bk=32) vs D=128 (bk=16).
+    # If MLX's bk=32 kernel achieves significantly more TFlops/s than bk=16,
+    # that's direct evidence for the FA-2 tile-size hypothesis.
+    print()
+    d120 = next((r for r in rows if r[0] == 120 and r[4] is not None), None)
+    d128 = next((r for r in rows if r[0] == 128 and r[4] is not None), None)
+
+    if d120 is not None and d128 is not None:
+        _, _, _, _, tflops_120, _, _ = d120
+        _, _, _, _, tflops_128, _, _ = d128
+        delta_pct = 100 * (tflops_120 - tflops_128) / tflops_128
+        if delta_pct > 10:
+            print(f"  KINK DETECTED at D=128 boundary: D=120 (bk=32) achieves "
+                  f"{tflops_120:.2f} TFlops/s vs D=128 (bk=16) {tflops_128:.2f} "
+                  f"TFlops/s -- {delta_pct:+.1f}% per-FLOP efficiency win for "
+                  f"the bk=32 kernel.")
+            print(f"  >>> FA-2 hypothesis SUPPORTED.  MLX's bk=16 kernel at "
+                  f"D=128 leaves compute on the table.  A custom kernel "
+                  f"matching the bk=32 throughput at D=128 could yield "
+                  f"~{delta_pct:.0f}% SDPA speedup at our shape.")
+        elif delta_pct > 2:
+            print(f"  Small kink at D=128: D=120 (bk=32) {tflops_120:.2f} vs "
+                  f"D=128 (bk=16) {tflops_128:.2f} TFlops/s ({delta_pct:+.1f}%).  "
+                  f"Marginal -- the FA-2 lift may exist but is on the low end "
+                  f"of the 1.1-1.3x estimate.")
+        elif delta_pct > -2:
+            print(f"  NO kink at D=128 boundary: D=120 (bk=32) {tflops_120:.2f} vs "
+                  f"D=128 (bk=16) {tflops_128:.2f} TFlops/s "
+                  f"({delta_pct:+.1f}%, within noise).")
+            print(f"  >>> FA-2 hypothesis WEAKENED.  MLX's tile choice is roughly "
+                  f"shape-insensitive across the boundary.  Custom-kernel lift "
+                  f"likely under 10% -- probably not worth 2-5 days of work.")
+        else:
+            print(f"  D=128 (bk=16) is FASTER per FLOP than D=120 (bk=32): "
+                  f"{tflops_128:.2f} vs {tflops_120:.2f} TFlops/s ({-delta_pct:.1f}% "
+                  f"opposite direction).  Unexpected -- inverts the hypothesis.")
+
+    # Achieved vs peak summary at baseline D=128
+    if baseline_tflops is not None:
+        m1_max_bf16_peak = 10.0  # TFlops/s approx
+        gemm_ceiling = 7.95       # achieved by steel_gemm at FF shape
+        pct_peak = 100 * baseline_tflops / m1_max_bf16_peak
+        pct_gemm = 100 * baseline_tflops / gemm_ceiling
+        print(f"  At D=128: MLX SDPA achieves {baseline_tflops:.2f} TFlops/s = "
+              f"{pct_peak:.0f}% of M1 Max BF16 peak (~10) = "
+              f"{pct_gemm:.0f}% of MLX steel_gemm ceiling (7.95 at FF shape).")
+        max_lift = gemm_ceiling / baseline_tflops
+        end_to_end_lift_pct = (1 - 1.0/max_lift) * 0.22 * 100  # SDPA ~22% of step
+        print(f"  Theoretical maximum FA-2 lift (matching GEMM ceiling): "
+              f"{max_lift:.2f}x per-SDPA-call, ~{end_to_end_lift_pct:.1f}% "
+              f"end-to-end (SDPA is ~22% of step time).")
+
+
 # --- driver ---
 
 
@@ -776,6 +942,9 @@ BENCHES = {
     "sdpa": bench_sdpa_floor,
     "sdpa_t_sweep": bench_sdpa_t_sweep,
     "sdpa_sweep": bench_sdpa_t_sweep,
+    "sdpa_d_sweep": bench_sdpa_d_sweep,
+    "sdpa_d": bench_sdpa_d_sweep,
+    "d_sweep": bench_sdpa_d_sweep,
     "quant_matmul": bench_quant_matmul,
     "quant": bench_quant_matmul,
     "bf16_layout": bench_bf16_layout,

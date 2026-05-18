@@ -27,241 +27,328 @@ and failed experiments worth remembering.  This is the working notebook;
 
 ## Open
 
-### 2026-05-17: Microbench results for FF / attention candidate optimizations `[OPEN, ready to promote]`
-
-Concrete numbers from `scripts/bench_ff_microbench.py` — clean run with
-50 iters, 10-iter warmup, `bench-process-watch.sh` killing background
-macOS GPU agents (`mediaanalysisd`, `photoanalysisd`), Claude Code +
-other Metal-using apps closed.  BF16, M1 Max, shape T=8784 D=4096 H=32
-D_head=128 FF_inner=16384.  Override the back-of-envelope estimates
-from the earlier research scan.
-
-| Bench | mean / call | p99 | notes |
-|---|---|---|---|
-| `nn.gelu_approx` at (1, 8784, 16384) BF16 | **10.43 ms** | 10.49 ms | very tight tail |
-| `x * 1.0` (pure bandwidth reference) | 1.82 ms | 1.91 ms | |
-| 3× separate Q/K/V addmm (current) | **111.75 ms** | 113.18 ms | |
-| 1× packed Q/K/V addmm + split | **113.10 ms (-1.2 % SLOWER)** | 113.49 ms | |
-| FF chain naive (eval per op) | 309.73 ms | 311.56 ms | |
-| FF chain lazy (production path) | **309.16 ms** | 310.76 ms | |
-| FF chain `mx.compile` wrapped | **309.51 ms (-0.11 % vs lazy)** | 311.80 ms | both within noise |
-| SDPA at (1, 32, 8784, 128) BF16 isolated | **212.23 ms** | 213.92 ms | |
-| SDPA at same shape from 05-17 per-call probe | 230 ms | — | live pipeline |
-
-**SDPA T-alignment sweep (50 iters, clean run with bench-process-watch):**
-
-| T | aligned to | mean ms | norm (ns/T²) | vs T=8784 | viable padding target? |
-|---|---|---|---|---|---|
-| 8704 | 128 | 208.36 | 2.7503 | -1.82 % | ❌ truncates |
-| 8736 | 32 | 209.42 | 2.7441 | -1.32 % | ❌ truncates |
-| 8768 | 64 | 210.89 | 2.7432 | -0.63 % | ❌ truncates |
-| **8784** | **16 only** | **212.23** | **2.7505** | **baseline** | n/a |
-| 8800 | 32 | 212.63 | 2.7457 | +0.19 % | ✅ +16 — slower |
-| 8832 | 128 | 214.27 | 2.7469 | +0.96 % | ✅ +48 — slower |
-| 8896 | 64 | 217.19 | 2.7445 | +2.34 % | ✅ +112 — slower |
-| 8960 | 128 | 221.05 | 2.7535 | +4.16 % | ✅ +176 — slower |
-| 9216 | 128 | 236.52 | 2.7847 | +11.45 % | ✅ +432 — much slower |
-
-**SDPA scales nearly perfectly O(T²) across this range** — normalized cost
-spread is only 1.5 % across all 9 T values, and our T=8784 carries only a
-0.27 % per-tile-alignment penalty vs the best neighbor (T=8768).  The
-MLX `sdpa_full` kernel handles non-aligned T well.  No cliff to dodge.
-
-**Methodology note:** the bench-process-watch loop dropped p99 tails
-dramatically — GELU p99 went from 21 ms (noisy run) to 10.5 ms (clean
-run), and all other p99s collapsed to within ~1 % of mean.  Means
-shifted only slightly (GELU -14 %, Q/K/V -6 %, FF/SDPA <1 %) but the
-tighter distribution makes the comparisons more trustworthy.
-
-**Key empirical findings:**
-
-1. **GELU is compute-bound, not bandwidth-bound.**  5.7× the cost of pure
-   `x * 1.0` copy at the same shape.  The tanh + multiplies dominate.
-   Per-step ceiling for GELU-pass elimination via custom matmul-epilogue
-   kernel: **~500 ms / step = 1.10 % of 45.5 s/step.**  Higher than the
-   research agent's 0.7 % estimate (which assumed bandwidth-bound GELU),
-   but still small.
-2. **`mx.compile` does NOT fuse matmul+activation.**  Lazy vs compiled
-   differ by 0.11 % over 50 iters — both within noise.  Confirms MLX
-   source inspection (`is_fusable()` in `mlx/compile.cpp` excludes
-   matmul).  This kills the "wrap FF in mx.compile" idea.
-3. **Q+K+V fusion is empirically a regression** at our shape.  Packed
-   matmul is 1.2 % slower than 3 separate matmuls — the bandwidth saving
-   on reading `x` once (~0.5 ms at 300 GB/s) is dominated by the larger
-   output's worse tile alignment + the post-matmul split overhead.  This
-   also explains why the earlier `self_qkv:pack` / `kv:pack` experiments
-   in `PERFORMANCE.md`'s archive were "neutral-to-tiny".
-4. **SDPA tile-floor confirmed.**  212 ms isolated vs 230 ms in
-   production-context — the 8 % gap is plausible surrounding-op
-   interference (other dispatches competing for GPU, cache state).  The
-   tile-floor analysis holds.
-5. **FF chain is matmul-bound by a huge margin.**  309 ms total, of which
-   ~10 ms (3.4 %) is GELU and ~299 ms (96.6 %) is the two matmuls.  Eval
-   barriers between ops add only 0.6 ms — MLX's lazy graph isn't doing
-   meaningful fusion magic in the production path either.
-6. **Bench vs production FF discrepancy.**  Single FF call in isolation
-   = 309 ms → 48 blocks × 309 ms = **14.8 s/step**.  Production sync-mode
-   says video_ff = 18.7 s/step.  ~26 % higher in sync-mode production —
-   explained by (a) ~13 % signpost/eval-barrier overhead distributed
-   across phases (per the 05-17 follow-up's sync-vs-non-sync analysis)
-   and (b) weight cache / GPU contention with surrounding ops.
-7. **SDPA T-padding is not a lever.**  Sweeping T from 8704 to 9216
-   shows our T=8784 sits in the middle of a nearly-flat normalized-cost
-   distribution (spread only 1.5 % across the range).  T=8784 carries
-   only a 0.27 % per-tile-alignment penalty vs the best neighbor.  Every
-   padding-up target is slower (best at T=8800 is +0.19 % = +0.4 ms/call,
-   T=9216 is +11.45 %).  MLX `sdpa_full` handles non-aligned T well.
-
-**Revised brutal-efficiency ranking (post-microbench):**
-
-| Lever | Win | Effort | Verdict |
-|---|---|---|---|
-| Q+K+V fusion | -1 % (regression) | n/a | **DEAD** |
-| `mx.compile` around FF | 0 % | n/a | **DEAD** |
-| GELU-into-matmul fusion (custom Metal kernel) | ~1.3 % | 1-2 weeks | Small reward for the effort |
-| C++ MLX patch adding `TransformGELU` epilogue | ~1.3 % | 1-2 days + MLX rebuild | Same ceiling, less code |
-| `mxfp8 project_out 32-47` (already implemented) | ~5 % | hours | **Best BF16-quality trade currently** |
-| All-layer `mxfp8 project_out` | ~13 % (draft mode) | hours | Visibly different |
-| Custom FlashAttention-2 Metal kernel | ~10 % | 2-4 weeks | Biggest BF16-pure ceiling, hardest |
-| **Stop here** | 0 | 0 | **45.5 s/it IS the BF16 floor on M1 Max for this shape** |
-
-**To promote to `PERFORMANCE.md`:**
-
-- Update the "Active brutal-efficiency targets" section in the TL;DR to
-  reflect this ranking.  Specifically:
-  - Drop Q+K+V fusion as an actionable target (move to "tested neutral or
-    removed" matrix row, citing this scratchpad entry).
-  - Drop "wrap FF in mx.compile" if it appears anywhere (it doesn't, but
-    the framing in the existing matrix row could be updated).
-  - Reframe v_ff_inner as "BF16-pure ceiling is ~1.3 %; biggest realistic
-    BF16 lever is custom FA-2 kernel; biggest near-term lever is
-    mxfp8 project_out quant".
-- Move this entry to `[PROMOTED]` once that's done.
-
-### 2026-05-17: Pretranspose default cleanup -- project_out is the only real win `[PROMOTED]`
-
-The `--video-ff-layout project_in,project_out:pretranspose` +
-`--video-attn-layout to_q,to_k,to_v,to_out:pretranspose` default stack
-was inherited from the early "more pretranspose = more win" framing,
-but the isolated BF16 matmul microbench
-(`scripts/bench_ff_microbench.py bf16_layout`, clean 50-iter run at
-`$SHARED_TEMP_DIR/trace_analysis/bf16_layout_clean.log`) shows the win
-is concentrated at a single shape:
-
-| Shape | Naive (no layout) | Pretranspose | Δ | TFlops/s naive → pre |
-|---|---|---|---|---|
-| FF.project_in (4096→16384) | 147.29 ms | 151.03 ms | **+2.5 %** (regression) | 8.00 → 7.81 |
-| **FF.project_out (16384→4096)** | **228.15 ms** | **148.28 ms** | **−35.0 %** (huge) | **5.17 → 7.95** |
-| attn.to_q/k/v (4096→4096) | 36.84 ms | 37.22 ms | +1.0 % (tied) | 8.00 → 7.92 |
-| attn.to_out (4096→4096) | 36.91 ms | 37.13 ms | +0.6 % (tied) | 7.99 → 7.94 |
-
-**Root cause:** every BF16 matmul reaches ~8 TFlops/s (~77 % of M1 Max
-BF16 peak) EXCEPT naive `project_out`, which falls off a kernel-
-selection cliff to 5.17 TFlops/s.  The implicit `mx.addmm(b, x, W.T)`
-transpose-then-matmul for (K=16384, N=4096) picks a worse
-`steel_gemm_*_nt` variant than the explicit `mx.contiguous(W.T)` +
-matmul path.  Pretranspose's "production layout win" is entirely
-this cliff rescue; other shapes already achieve ~8 TFlops without
-pretranspose.
-
-**Memory implications:** none.  The runtime implementation
-(`pretranspose_project_*`) materializes the transposed weight then
-drops the original (`del self.project_out.weight`).  One weight per
-linear at steady state in either orientation.  The on-disk cache
-file size is also identical.  See `PERFORMANCE.md`'s archive note:
-"current path materializes each transposed weight layer by layer and
-drops the original weight immediately afterward... stable around 44GB
-process memory."
-
-**Defaults changed in `scripts/generate.py`:**
-
-- `DEFAULT_VIDEO_FF_LAYOUT_SPECS`:
-  `(project_in:pretranspose, project_out:pretranspose)` →
-  `(project_out:pretranspose,)`.  Help string updated to explain.
-- `DEFAULT_VIDEO_ATTN_LAYOUT_SPECS`:
-  `(to_out, to_q, to_k, to_v:pretranspose)` → `()` (empty, all off).
-  Help string updated.
-
-The flags themselves and the underlying transform code are
-**unchanged** -- only the default tuple is shorter.  Users can opt
-back into the historical behavior with
-`--video-ff-layout project_in:pretranspose,project_out:pretranspose
---video-attn-layout to_out:pretranspose,to_q:pretranspose,...`.
-
-**Expected production impact:** ~6-15 s saved on bakery wall (~0.4-1 %
-of 24m 40s).  Tiny but free.  Cache hash changes for both flag
-families, so a fresh cache will be built on first run with the new
-defaults.
-
-**Verified end-to-end** via kitten smoke (one-stage 288×512, 721
-frames, 8 distilled steps):
-
-| Metric | Old defaults | New defaults | Δ |
-|---|---|---|---|
-| Per-step | 75.9 s/it | **75.4 s/it** | **−0.7%** |
-| Denoise total | 10m 07s | **10m 03s** | **−4 s (−0.6%)** |
-| Total wall | 11m 34s | **11m 30s** | **−4 s (−0.6%)** |
-| Transformer cache TENSOR COUNT (metadata) | 4186 (1344 "layout") | 4186 (96 "layout") | same total; layout-tensor metadata down 14× |
-| Transformer cache FILE SIZE on disk | ~38.0 GB | ~38.0 GB | **essentially unchanged** (same weights, just in different orientation) |
-
-Speed delta is within run-to-run noise — at minimum a clean no-
-regression result, possibly a small real win.  **The cache file size
-does NOT change** — pretranspose stores `mx.contiguous(W.T)` instead
-of `W`, same number of bytes either way.  The "1344 → 96 layout
-tensors" is metadata about which tensors got the pretranspose
-treatment; it's not a disk-size win.  The real benefits of the trim
-are: (a) no regression, (b) no false invariant (we no longer carry
-defaults that the microbench shows are no-ops), and (c) honest
-metadata about what's actually pretransposed.
-
-**Side effect: audio defaults also trimmed.**  When
-`DEFAULT_VIDEO_FF_LAYOUT_SPECS` and `DEFAULT_VIDEO_ATTN_LAYOUT_SPECS`
-were changed, audio inherited via the shared cache-build path.  See
-"Audio pretranspose microbench" entry in Archive — verified safe at
-bakery scale; small-T workloads not re-verified.
-
-**Note for next investigator:** the audio FF / audio attn / video→audio
-pretranspose stack (`LTX_DISABLE_AUDIO_PRETRANSPOSE=1` to opt out) was
-NOT touched.  Original measurement was −11 % at small T (256×256×25)
-pre-AdaLN-fix.  Audio microbench at bakery T=502 (see next entry below)
-shows audio pretranspose is **neutral within noise across all four
-projections** — no cliff to rescue (unlike video project_out), no per-
-matmul win.  Recommendation: keep audio defaults as-is because the
-historical 11 % win at small T (where dispatch overhead dominates per-
-call matmul time) is plausibly real even if it doesn't show up at
-bakery scale.  Zero risk to leaving the defaults on (microbench shows
-neutral, not regression).
-
-### 2026-05-17: FlashAttention-2 custom Metal kernel for attn_sdpa `[OPEN, low priority]`
-
-Carried over from previous note.  Per the microbench above, SDPA is at the
-expected tile-floor (213 ms isolated, 230 ms live).  Custom FA-2 Metal port
-is the biggest remaining BF16-pure ceiling (~10 % of step) but multi-week
-effort with high risk.  Revisit only after the mxfp8 quant lever has been
-deployed and quality validated.
-
-**Open questions:**
-
-- Is there an existing FA-2 Metal port we could lift?  Manual GitHub
-  search needed (WebSearch was sandbox-blocked in earlier research).
-- What's the worst-case latency of a NAIVE Metal SDPA kernel at our shape
-  (T=8784, H=32, D=128)?  Just to know how much headroom Apple's
-  hand-tuned `sdpa_full` has over a naive baseline — if it's only 2×,
-  hand-rolling a kernel that BEATS it is unlikely.
+_(empty — investigation converged 2026-05-18; no actionable hypotheses
+remain.  See Promoted section below for what landed in
+`PERFORMANCE.md`, and Archive section for what was tested and dropped.)_
 
 ---
 
 ## Promoted
 
-(Entries moved to `PERFORMANCE.md` — kept here as stubs for cross-reference.)
+(Entries moved to `PERFORMANCE.md` — kept here as one-line stubs for
+cross-reference.)
 
-_(empty)_
+### 2026-05-17: Microbench results for FF / attention candidate optimizations `[PROMOTED 2026-05-18]`
+
+Findings from `scripts/bench_ff_microbench.py` (Q+K+V refutation,
+`mx.compile`+FF refutation, SDPA T-padding refutation, GELU cost
+bound, FF matmul-bound confirmation, SDPA tile-floor confirmation)
+landed in `PERFORMANCE.md` "Active brutal-efficiency targets" -- now
+shows the converged "investigation closed" framing with each
+previous candidate's status + microbench evidence.  Full original
+detail in this scratchpad's git history (commits 2026-05-17/18).
+
+### 2026-05-17: Pretranspose default cleanup -- project_out is the only real win `[PROMOTED]`
+
+Defaults trimmed in `scripts/generate.py`:
+- `DEFAULT_VIDEO_FF_LAYOUT_SPECS = (("project_out", "pretranspose"),)`
+  (dropped `project_in:pretranspose`)
+- `DEFAULT_VIDEO_ATTN_LAYOUT_SPECS = ()` (dropped all attention layouts)
+
+Microbench evidence: `bench_ff_microbench.py bf16_layout` showed
+project_out is a 35 % win (rescues kernel-selection cliff:
+5.17 → 7.95 TFlops/s) but project_in is +2.5 % regression and all
+four attention projections are tied within ±1 %.  Kitten smoke
+verified safe at bakery scale: 75.4 s/it vs 75.9 s/it (-0.7 %, no
+regression).  Documented in `PERFORMANCE.md` matrix rows for
+`--video-ff-layout` and `--video-attn-layout`.
+
+### 2026-05-17: FlashAttention-2 custom Metal kernel for attn_sdpa `[ABANDONED 2026-05-18]`
+
+D-sweep microbench refuted the tile-size hypothesis.  Full detail in
+Archive entry "2026-05-18: FA-2 custom kernel -- D-sweep refutes
+tile-size hypothesis".  Status reflected in `PERFORMANCE.md` "Active
+brutal-efficiency targets" table.
 
 ---
 
 ## Archive
 
 (Abandoned investigations kept for negative-result evidence.)
+
+### 2026-05-18: FA-2 custom kernel -- D-sweep refutes tile-size hypothesis `[ABANDONED]`
+
+**Bottom line:** the cheapest possible test of the FA-2 tile-size
+lever (a D-dimension sweep through MLX's bk=32/bk=16 kernel-selection
+boundary at D=128) refuted the hypothesis.  MLX SDPA at our shape is
+already at ~75% of MLX's own steel_gemm ceiling -- the theoretical
+maximum lift from a custom kernel is ~1.34x per-call = ~5.5%
+end-to-end.  Combined with a refuted tile-size lever and 2-5 days of
+implementation work with high risk, this is a clear pass.
+
+**D-sweep result** (`bench_sdpa_d_sweep` at B=1 H=32 T=8784, BF16
+non-causal, 50 iters, log at `$SHARED_TEMP_DIR/trace_analysis/sdpa_d_sweep.log`):
+
+| D | MLX bk | mean ms | TFlops/s | vs D=128 |
+|---|---|---|---|---|
+| 64 | 32 | 96.54 | 6.55 | +10.0% |
+| 80 | 32 | 121.08 | 6.53 | +9.6% |
+| 96 | 32 | 185.11 | 5.12 | -13.9% |
+| 112 | 32 | 195.37 | 5.66 | -4.9% |
+| 120 | 32 | 209.26 | 5.66 | -4.8% |
+| **128** | **16** | **212.40** | **5.95** | **(baseline)** |
+| 136 | 16 | 257.79 | 5.21 | -12.5% |
+| 160 | 16 | 263.35 | 6.00 | +0.8% |
+| 192 | 16 | 275.76 | 6.88 | +15.5% |
+| 256 | 16 | 352.36 | 7.18 | +20.6% |
+
+**Hypothesis was:** MLX's bk=16 path at D=128 leaves compute on the
+table; D=120 (bk=32) should achieve meaningfully higher TFlops/s.
+
+**Reality:** D=120 (bk=32) achieves 5.66 TFlops/s vs D=128 (bk=16) at
+5.95 TFlops/s -- the bk=16 kernel is actually 4.8% MORE efficient per
+FLOP at the boundary, NOT less.  MLX's `bk = bd < 128 ? 32 : 16`
+dispatch heuristic is empirically correct at the D=128 transition.
+
+**Pattern in the broader table** (interesting but not actionable):
+- D=64/80 well-tuned (canonical LLM head dims, most kernel-tuning love)
+- D=96 / D=136 fall off cliffs to ~5.2 TFlops/s -- likely fallback to
+  less-optimized template specializations at non-standard dims
+- D=192 / D=256 climb back up (higher arithmetic intensity amortizes
+  overhead, hits 7.18 TFlops/s = 90% of GEMM ceiling)
+- D=128 (us) sits in the middle plateau at 5.95 TFlops/s = 75% of
+  GEMM ceiling
+
+**Achieved-vs-peak at D=128:**
+- M1 Max BF16 hardware peak: ~10 TFlops/s -> 60% achieved
+- MLX `steel_gemm` ceiling (FF shape): 7.95 TFlops/s -> 75% achieved
+- Theoretical max FA-2 lift (match GEMM): 1.34x per-call
+- End-to-end if achieved: ~5.5% wall (SDPA is ~22% of step time)
+
+**What this leaves untested:**
+
+- **Q-tile size** (MFA's 96-row layout via TQ>1 or WM=8): D-sweep
+  doesn't test this dimension.  MLX always uses BQ=32 regardless of
+  D.  No free signal that BQ=64+ would help; would require custom
+  kernel writing to find out.
+- **Architectural changes** (KV aliasing, register softmax): possibly
+  meaningful at very long T but no direct evidence at our shape.
+- **Other unexplored micro-optimizations**: open-ended.
+
+None of these are pursued.  The combination of (a) most likely lever
+empirically refuted, (b) ~5.5% wall ceiling even if a custom kernel
+matched GEMM throughput, (c) 2-5 days of high-risk kernel work, makes
+this a clear pass.
+
+---
+
+**Research that's worth preserving** (kept here as negative-result
+context for future investigators; the lever may become viable on
+future hardware or with future MLX kernel improvements):
+
+**Tile choices across three projects** (head_dim=128, M1 Max / Apple7
+/ Max tier):
+
+| Project | bq × bk | Source |
+|---|---|---|
+| **MLX** `sdpa_full` non-NAX | **32 × 16** | `mlx/backend/metal/scaled_dot_product_attention.cpp:198` |
+| **pmetal** FlashAttention | **32 × 32** (NOT 64×32 as their docs claim) | `crates/pmetal-metal/src/kernels/metal/flash_attention.metal:271-272` |
+| **MFA** AttentionKernel | **96 × 32** | `kernels/AttentionDescriptor.cpp:522-630` Apple7 fork |
+
+**TGSM strategy comparison** (head_dim=128, half precision):
+
+| Kernel | Q tile | K tile | V tile | S/P | O accum | Aliasing | Total TGSM |
+|---|---|---|---|---|---|---|---|
+| **pmetal** | 8 KB | 8 KB | 8 KB | regs | regs | **none** | **~24 KB** |
+| **MLX Steel** BQ=32 BK=16 | 8.5 KB | KV_smem 6.1 KB | alias of K | regs | regs | **K/V share** | **~14.6 KB** |
+| **MFA** | **regs** | 8 KB | reuses arena | regs | **regs** | **all via `std::max`** | **~8 KB** |
+
+M1 Max has 32 KB TGSM available; MLX uses 14.6 KB.  **MLX is at the
+kernel-template-rigidity frontier (`static_assert(TQ == 1)` at
+`mma.h:184`), NOT the hardware frontier.**  Bigger tiles are
+physically possible -- the question (which the D-sweep refuted as
+profitable) was whether they'd deliver more compute.
+
+**`mx.fast.metal_kernel` capability survey** (relevant if revisiting):
+- Accepts arbitrary Metal source -- `simdgroup_multiply_accumulate`,
+  `simd_shuffle_xor`, threadgroup arrays, manual aliasing, async
+  `simdgroup_event` copies, `<metal_simdgroup_matrix>` all available
+- CANNOT import `mlx::steel` internal templates (`BlockLoaderT`,
+  `MMATile`, `row_reduce<Op>`) -- those would need re-implementation
+  in standalone Metal (~500 LOC total per the TGSM agent)
+- Requires compile-time-sized threadgroup arrays; template_args
+  mechanism (`custom_kernel.cpp:266-275`) supports int template
+  parameters for size-at-instantiation
+
+**pmetal FA kernel reusability:** NOT directly callable from MLX-land
+(Rust API takes IEEE f16 not BF16; no standalone FA bench binary;
+pyo3 module exposes only high-level APIs).  BUT their Metal shader
+source is plain text and portable:
+`crates/pmetal-metal/src/kernels/metal/flash_attention.metal`
+(1639 LOC), with a non-causal `flash_attention_forward_d128` kernel
+at line ~259.  Credits philipturner/metal-flash-attention as
+lineage.  Could be ported into `mx.fast.metal_kernel` if a future
+investigation finds reason to retry.
+
+**Three-phase investigation arc** (preserved for honesty about how
+the understanding evolved):
+
+1. **Phase 1 -- pmetal docs read:** Looked like MLX picked 32×16 vs
+   pmetal's 64×32 vs MFA's 96×32.  Hypothesis: "MLX is leaving
+   headroom."  (Later: pmetal docs were misleading -- their actual
+   code is 32×32, not 64×32.)
+2. **Phase 2 -- kernel-build experiment:** Background agent built a
+   naive BQ=64 BK=32 kernel via `mx.fast.metal_kernel`, hit TGSM
+   budget concerns (~47 KB vs 32 KB limit without aliasing).
+   Hypothesis reframed: "MLX may be at TGSM frontier."  (Later:
+   it's not -- MLX uses 14.6 KB of 32 KB available.)
+3. **Phase 3 -- TGSM-strategy comparison:** Background agent
+   confirmed MLX is at kernel-template-rigidity frontier, not TGSM
+   frontier; `mx.fast.metal_kernel` CAN express the tricks pmetal
+   and MFA use.  Hypothesis upgraded to "GREEN actionable" with
+   2-5 day effort estimate.
+4. **Phase 4 -- D-sweep microbench (THIS abandonment):** the
+   cheapest possible test of the K-tile hypothesis refuted it.
+   Hypothesis killed before kernel work began.
+
+**Artifacts** (kept on local /tmp -- delete at session end if not
+needed):
+- `/tmp/pmetal_dig/pmetal/` -- pmetal repo checkout
+- `/tmp/mlx_sdpa_tile_experiment/` -- phase-2 naive kernel artifacts
+
+**Bench code preserved:** `scripts/bench_ff_microbench.py
+sdpa_d_sweep` -- the bench that closed this hypothesis is in the
+repo and re-runnable if anyone wants to verify on different M1 Max
+units or after MLX upstream changes.
+
+### 2026-05-18: Draw Things / MFA research summary -- nothing portable for M1 Max `[ABANDONED]`
+
+Triggered by the "LTX 2.3 became 1.7x faster in just one month" Reddit
+headline and the Draw Things blog posts on Metal Quantized Attention +
+Metal FlashAttention v2.5 w/ Neural Accelerators.  Spawned two parallel
+agents to read the public posts and dig into the source of
+[liuliu/ccv](https://github.com/liuliu/ccv) (MFA lives at
+`lib/nnc/mfa/`) and
+[drawthingsai/draw-things-community](https://github.com/drawthingsai/draw-things-community).
+
+**The 1.7x is plausibly explained by ONE M3+ lever alone -- Draw
+Things' own blog cites Int8 attention as 1.19-1.76x e2e on M3+ hardware.
+M1 Max stops at the Apple7 gate for that lever and several others.**
+From `ccv_nnc_mfa.cpp` capability gates (verified via direct source
+read):
+
+| Lever | Source claim | MFA hardware gate | M1 Max? |
+|---|---|---|---|
+| Metal Quantized Attention (Int8) -- `NAInt8AttentionKernel` | 1.19-1.76x e2e, 1.43-1.95x single-step | `supportsFamily(1009)` = Apple9 (**M3+**) | ❌ |
+| FA v2.5 w/ Neural Accelerators (`mpp::tensor_ops::matmul2d`) | "4.6x on M5 over M4" | `ccv_nnc_mfa_has_neural_accelerators` = `supportsFamily(1010)` (Apple10, **M5 only**) | ❌ |
+| ANE rowwise GEMM (CoreML mlprogram, FF projections) | implicit in stack | `ccv_nnc_mfa_supports_int8_ane` = Apple9 (**M3+**) + macOS 26.1 for BF16 | ❌ |
+| Codex-authored VAE shader | "2.4x on M1-M4, 4.7x on M5" | none -- generic Metal | ✅ |
+| Classic MFA FA via `simdgroup_matrix_storage` (`AttentionKernel.cpp`) | shipped since 2023 | Apple7 (**M1+**) with M1-tuned tiles `parallelization=96 traversal=32` | ✅ |
+
+The Apple7 tile fork is explicit in `AttentionDescriptor::forwardMixed`
+(`kernels/AttentionDescriptor.cpp:522-630`): M1/M2 gets larger tiles
+(96x32 vs 32x16 on M3+) -- well-tuned, not a degraded fallback.
+
+**Nothing in MFA is directly portable for our M1 Max LTX-2.3 work, in
+ranked likelihood:**
+
+1. **MFA classic FA via `simdgroup_matrix_storage`**:  MLX's
+   `mx.fast.scaled_dot_product_attention` already routes through
+   `simdgroup_matrix` on M1 (verified in MLX source at
+   `mlx/backend/metal/scaled_dot_product_attention.cpp:177`).
+   Same intrinsics, same approximate ceiling.  Porting MFA's version
+   would be a multi-week rewrite into MLX's Steel template
+   infrastructure for at best modest gain.  Stays in scope only via
+   the FA-2 entry above (which now references this finding).
+2. **Conv3DKernel for VAE decode** (`kernels/Conv3DKernel.cpp`, 503
+   lines, no hardware gating):  Draw Things' "Codex-authored VAE
+   shader" claim of 2.4x on M1-M4 is presumably this.  But VAE
+   decode in our pipeline is only 49 s of 11m 30s total (~7 %) and
+   we're already on the "native Conv3d VAE decoder" path -- MLX is
+   presumably already using competitive `mx.conv_general` / Steel
+   kernels.  Recommendation per user: wait for the int-overflow fix
+   in upstream MLX VAE rather than port.  Listed for completeness.
+3. **Small ops** (`RMSNormKernel`, `RopeKernel`, `GELUKernel`,
+   `CastKernel`, `ExpKernel`, `CMulKernel`, `AddKernel`):  duplicates
+   of `mx.fast.rms_norm`, `mx.fast.rope`, etc.  Microsecond kernels.
+   Not worth replacing.
+4. **`GEMMKernel`**:  same regime as MLX's `steel_gemm` (~7.95 TFlops/s
+   at our FF shape, ~77 % of M1 Max BF16 peak per Pretranspose entry).
+5. **Hardware-gated kernels** (`NAAttentionKernel`, `NAConv3DKernel`,
+   `NAInt8AttentionKernel`, `NAMatMulSmallMKernel`, `ANERowwiseTransform*`):
+   physically unreachable on Apple7.
+
+**ANE on M1 Max specifically -- DEAD for LTX-2.3, three independent
+reasons:**
+
+1. **Working-set size:** 22B params, dynamic T=8784 sequence, large
+   activations -- the data-shuttling cost to/from system memory eats
+   the compute win.  Even on M3+ where Draw Things does use ANE, only
+   FF rowwise GEMM tail is offloaded -- never attention.
+2. **Dtype:** M1 Max ANE doesn't have native BF16.  BF16 on ANE
+   requires macOS 26.1 + M3+.  Extra FP16↔BF16 conversion would
+   kill the throughput case.
+3. **Op coverage:** ANE has limited 3D conv, no native attention, no
+   RoPE.  For a video transformer with audio sidecar you'd CoreML-
+   convert maybe 10 % of the graph at best; cross-boundary overhead
+   dominates.
+
+Where M1 Max ANE *is* useful (just not for us): `whisper.cpp`
+(~3x over CPU for speech), small CLIP / vision encoders, Apple
+Intelligence on-device LMs.  Pattern: static-shape, INT8/FP16,
+≤1-2 GB working set.
+
+**Why FA-2 isn't in MLX core** (informational, useful context):
+
+1. FA-2 *has* been ported to Metal -- by ccv/MFA, not MLX.
+2. FA-1 → FA-2's headline 2x on H100 came from NVIDIA-specific
+   warp scheduling + tensor cores; doesn't translate 1:1 to Apple
+   simdgroups (no warp shuffle in the same form, no tensor cores
+   until M5 NAX).  Realistic Apple FA-2 lift is 1.2-1.5x on
+   favorable shapes.
+3. MLX has been absorbing the *parts* of FA-2 that matter: tile-
+   floor logic for NAX (bq=64/bk=32 vs bq=32/bk=16), M5 cooperative-
+   tensor SDPA in late 0.30.x.  Priority has been M3+/M5 hardware
+   paths, not squeezing the last 20 % out of M1 simdgroup_matrix.
+4. MLX team is small; roadmap is dominated by training/grad,
+   distributed, mixed precision, new hardware.  Video diffusion
+   on M1 Max is a niche compute-bound regime that doesn't drive
+   their roadmap (most users run bandwidth-bound 7-13B LLMs where
+   existing SDPA is "good enough").
+5. License/code-style mismatch: MFA is C++/ObjC++ with template
+   metaprogramming generating Metal source.  MLX kernels live in
+   `mlx/backend/metal/kernels/*.metal` + Steel templates.  A copy
+   isn't a copy-paste -- it's a rewrite.
+
+**"S models" terminology:** Draw Things' Quantized Attention post:
+*"Int8 matrix multiplication applies only to the 8-bit S models we
+recently added."*  It's their Int8 quantization model variant -- not
+a chip suffix, not an `applegpu_g13s`-style GPU codename, not an
+LTX-2 sub-variant.
+
+**Key reference files for future investigation** (paths relative to
+each upstream repo root; clone from links above):
+
+ccv (`lib/nnc/mfa/`):
+
+- `ccv_nnc_mfa.cpp` -- capability gates lines 23-56, 141
+- `ccv_nnc_mfa_attention.cpp` -- NA/NAInt8 dispatch at lines 179, 381
+- `kernels/AttentionDescriptor.cpp` -- tile schedule fork lines 522-630
+- `kernels/AttentionKernel.cpp` -- classic FA via simdgroup_matrix, ~2400 lines
+- `kernels/Conv3DKernel.cpp` -- VAE-relevant, no hw gate, 503 lines
+- `ccv_nnc_mfa_ane_rowwise_coreml.mm:818` -- CoreML mlprogram + `MLComputeUnitsCPUAndNeuralEngine`
+
+draw-things-community:
+
+- `Libraries/SwiftDiffusion/Sources/Models/LTX2.swift` -- LTX2 graph, `FlashAttentionLevel` consumer, 2351 lines
+- `Libraries/SwiftDiffusion/Sources/Models/UNetProtocol.swift:14` -- `FlashAttentionLevel` enum
+
+**Bottom line:** the 1.7x is mostly an M3+ Int8-attention win, not a
+software lever we're leaving on the table for M1 Max.  On M1 Max the
+realistic same-direction levers are (a) the Conv3DKernel VAE shader
+(~7 % of wall, possibly redundant with MLX-native VAE which the user
+notes is awaiting an upstream int-overflow fix) and (b) the FA-2 entry
+above (1.2-1.5x SDPA at best, multi-week effort).  No new action items.
 
 ### 2026-05-17: Audio pretranspose microbench -- neutral at bakery T, defaults unchanged `[ABANDONED]`
 
@@ -338,13 +425,68 @@ End-to-end math closes perfectly:
 - B quantizes only project_out (~16% of step) → 66% × 16% = +10.6% (measured +10.2%)
 - C/D quantize attn + both FF (~60% of step) → 66% × 60% = +40% (measured +43-45%)
 
-The `mx.quantized_matmul` kernel achieves only ~22% of M1 Max INT8
-peak (~21 TFlops/s) — well below `steel_gemm`'s ~74% of BF16 peak.
-The "bandwidth savings" hypothesis (smaller quantized weights →
-fewer bytes read) does not pay off because at our matmul shapes we
-are **compute-bound, not bandwidth-bound** — every quantized matmul
-replaces a fast steel_gemm with a slower quantized_matmul, and the
-dequant overhead is additive.
+**The "22% of INT8 peak" framing earlier was a category error -- there
+is no INT8 matmul on M1 Max in MLX.**  Direct source read of
+`mlx/backend/metal/kernels/fp_quantized.h:139` and `:663` shows the
+non-NAX `mx.quantized_matmul` is a **BF16 matmul with on-the-fly
+dequant**, not an INT8 matmul:
+
+```cpp
+// fp_quantized.h:139 -- dequant happens inline, output is U-typed
+inline void dequantize(uint8_t w, U scale, threadgroup U* w_local) {
+  ...
+  w_local[0] = scale * Dequantize<8, U>{}(w);   // mxfp8 path
+}
+// fp_quantized.h:663 -- same BlockMMA / simdgroup_matrix as steel_gemm
+using mma_t = mlx::steel::BlockMMA<...>;
+mma_op.mma(Xs, Ws);                              // Ws is dequantized BF16
+```
+
+`U` is the activation dtype (BF16 for us).  `BlockMMA` is the same
+`simdgroup_matrix`-based MMA primitive that `steel_gemm` uses.  So the
+pipeline is: read packed FP8 weight → read per-block scale → multiply
+scale × dequantized byte → write BF16 into threadgroup memory → run
+BF16 MMA over the dequantized tile.  **The matmul itself runs at the
+BF16 ceiling minus dequant overhead -- M1's INT8 instruction throughput
+(`dot4I8Packed`, ~21 TFlops/s theoretical) is never reached because
+the kernel doesn't use it.**
+
+**Why mxfp8 will ALWAYS be slower than BF16 on M1 Max for our shapes**
+(three additive sources of the 7.95 → 4.7 TFlops/s gap):
+
+1. **Inline dequant in the inner loop.**  Every BF16 weight loaded into
+   the MMA tile costs an extra global scale-load (amortized 1/32),
+   an FP8→BF16 conversion, a multiply with the scale, and a
+   threadgroup-memory store.  The pure-BF16 path skips all of this
+   and loads BF16 weights directly into the MMA tile.
+2. **Disrupted MMA scheduling.**  `steel_gemm` keeps the MMA pipe full
+   via register tiling, double-buffered loads, and careful
+   threadgroup-memory layout.  Inserting dequant work between loads
+   and MMA stalls the pipe more often -- lower achievable arithmetic
+   intensity.
+3. **Less mature kernel tuning.**  The quantized kernel exists in two
+   variants: `quantized.h` (M1 path) and `quantized_nax.h` (M5-only).
+   Apple/MLX's optimization gradient is firmly on the NAX path
+   (cooperative-tensor `matmul2d`); the M1 fallback is the older,
+   less-tuned dequant-into-BF16-MMA approach.
+
+**Why bandwidth savings don't rescue this.**  In principle mxfp8 cuts
+weight-read bandwidth by ~50% vs BF16:
+
+| Shape | BF16 weight | mxfp8 weight + scales | Saving |
+|---|---|---|---|
+| project_out (16384×4096) | 128 MB | ~68 MB | ~150 µs at 400 GB/s |
+
+But `project_out` runs in **151 ms BF16 vs 251 ms mxfp8** -- the entire
+weight read is only ~0.3 ms in either case.  At our matmul shapes we
+are **compute-bound by a factor of ~500×**, not bandwidth-bound.
+Saving 150 µs of bandwidth is invisible when the compute regression is
+100 ms.
+
+**Structural conclusion**: mxfp8 cannot beat BF16 on M1 Max via the
+current MLX kernel, because the kernel reduces to "BF16 matmul +
+extra work."  There is no instruction path it can switch to that
+would deliver more compute than the BF16 ceiling itself.
 
 **Why the historical "mxfp8 ~13% draft mode" was real**: it was
 measured against a pre-AdaLN-fix BF16 baseline of 77.8 s/it
@@ -353,15 +495,29 @@ broken-BF16 vs quant.  Post-AdaLN-fix BF16 is 45.5 s/it (-42%) but
 the mxfp8 path got essentially no benefit (it doesn't hit the same
 SDPA path).  So the relative ordering flipped.
 
-**Verdict:** mxfp8 is not a draft-mode lever on this hardware/MLX
-version.  Until either (a) Apple ships a faster `mx.quantized_matmul`
-kernel that closes the gap to `steel_gemm`, or (b) you move to M3+
-NAX where fp8 hardware support might bypass the dequant bottleneck,
-quantization will always be a net regression at our shapes.  CLI
-flags (`--video-ff-quantize`, `--transformer-cache-quantize`) and
+**Verdict:** mxfp8 is structurally a net regression on M1 Max -- not
+fixable by tuning, only by either:
+
+- (a) A from-scratch native-INT8 kernel using M1's `dot4I8Packed`
+  intrinsics (~21 TFlops/s theoretical INT8 peak).  Same multi-week
+  kernel-writing effort class as the FA-2 hypothesis.  Apple, MLX, and
+  Draw Things have all independently chosen NOT to do this for Apple7
+  -- the engineering cost doesn't justify the win, and on M1 even a
+  perfect INT8 kernel would only modestly beat BF16 because Apple
+  didn't invest in INT8 throughput improvements until M3.
+- (b) M3+ hardware where Apple-tuned INT8 kernels start to beat BF16
+  (Draw Things' Int8 attention claims 1.19-1.76× e2e on M3+, which
+  arithmetically requires INT8 GEMM > BF16 GEMM).
+- (c) M5+ NAX hardware where the `mpp::tensor_ops::matmul2d`
+  cooperative-tensor path delivers tensor-core-class INT8 throughput
+  (per source verification: NAX requires GPU gen 17+, M5/M5 Pro --
+  NOT M3 as earlier text incorrectly claimed).
+
+CLI flags (`--video-ff-quantize`, `--transformer-cache-quantize`) and
 their underlying code paths are kept intact for future research and
 because the cache infrastructure is reusable for other quant modes
-that might land later.
+that might land later (e.g. INT4, FP4, future MLX kernels that
+actually use M1's INT8 instructions).
 
 **Bench script `scripts/bench_mxfp8_draft.sh`** is reusable for
 future quant experiments — runs four variants A/B/C/D with
@@ -416,5 +572,6 @@ Sweep across T = 8704, 8736, 8768, 8784, 8800, 8832, 8896, 8960, 9216
 **Verdict:** MLX `sdpa_full` handles non-32-aligned T well at our (H=32,
 D=128) shape; there's no cliff to dodge by padding.  The tile-floor
 analysis in `PERFORMANCE.md` stands: SDPA is at the MLX hardware-tile
-floor on M1 Max non-NAX; only a custom Metal kernel or M3+ hardware
-will change it.
+floor on M1 Max non-NAX; only a custom Metal kernel or M5+ hardware
+(NAX-capable, gen >= 17, per `mpp::tensor_ops::matmul2d`) will change
+it.

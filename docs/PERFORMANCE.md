@@ -11,7 +11,7 @@ top are most recent; older history is preserved at the bottom for context.
 
 ---
 
-## TL;DR — current state (2026-05-17)
+## TL;DR — current state (2026-05-18)
 
 **Production baseline at bakery (1024×576×481, distilled two-stage,
 `--fast-mode`, default flags):**
@@ -62,21 +62,29 @@ The following ship enabled by default:
 
 ### Active brutal-efficiency targets
 
-Ranked by actionability (raw-size ranking in parens):
+**Investigation converged 2026-05-18.  No actionable targets remain on
+M1 Max with the current MLX kernel set.**  Three previous candidates
+have been exhausted via microbench evidence (full reasoning in
+`PERFORMANCE_NOTES.md` Archive):
 
-1. **video_ff / v_ff_inner** — 18.7 s/step (#1 by size).  Two compatible
-   levers: (a) `mxfp8` quant on `project_in/project_out` (~10 % faster,
-   quality cost); (b) custom Metal kernel fusing `project_in + GELU +
-   project_out` so the 16384-dim intermediate never materializes.
-2. **video_self_attn / attn_qkv** — 7.7 s/step (#3 by size).  3 separate
-   matmuls + 2 RMSNorms + 2 RoPE calls per attention.  Fuse Q+K+V into one
-   combined matmul if MLX isn't already doing it internally.
-3. **video_self_attn / attn_sdpa** — 11.0 s/step (#2 by size).  At parity
-   with mlx-video; only path forward is a custom FlashAttention-2 Metal
-   kernel.  Bounded engineering, but the hardest target.
+| Previous candidate | Status | Evidence |
+|---|---|---|
+| **mxfp8 quant on `project_*`** | **DEAD** — +10-45 % SLOWER post-AdaLN-fix | `bench_ff_microbench.py quant_matmul`: `mx.quantized_matmul` is structurally a BF16 matmul with on-the-fly dequant (`fp_quantized.h:139`, `:663`) -- never reaches M1 INT8 instruction throughput.  Hits 4.7 TFlops/s vs steel_gemm's 7.95.  Will always lose on M1; flips on M3+/M5 hardware. |
+| **Q+K+V fusion into one matmul** | **DEAD** — −1.2 % regression | `bench_ff_microbench.py qkv`: 3 separate (111.75 ms) is faster than 1 packed (113.10 ms).  Bandwidth saving on input dominated by larger output's tile-alignment + post-split overhead. |
+| **Custom FlashAttention-2 Metal kernel** | **ABANDONED** — D-sweep refuted tile-size hypothesis | `bench_ff_microbench.py sdpa_d_sweep`: D=120 (MLX bk=32) achieves 5.66 TFlops/s vs D=128 (MLX bk=16) 5.95 TFlops/s -- MLX's small-tile choice is CORRECT.  MLX SDPA already at 75 % of steel_gemm ceiling; theoretical max FA-2 lift is ~1.34× per call ≈ ~5.5 % end-to-end.  Not worth 2-5 days of kernel work. |
+
+**Achievement summary:** 45.5 s/it stage-1 IS the BF16 performance
+floor on M1 Max for this shape with MLX 0.31.2.  Further wins require:
+- (a) **Silicon upgrade to M3+ (INT8 GEMM beats BF16) or M5+ (NAX
+  cooperative-tensor matmul)** — the same `--video-ff-quantize` and
+  `--transformer-cache-quantize` flags become positive levers on
+  M5+ once NAX routes `fp_quantized_nax.metal`.
+- (b) **Upstream MLX kernel improvements** — VAE int-overflow fix
+  (already pending), possible SDPA tile retuning, future native INT8
+  GEMM kernel using `dot4I8Packed`.
 
 See "2026-05-17 follow-up" session below for the per-parent rollup and
-detailed analysis.
+the original detailed analysis that drove this hunt.
 
 ### Where to look for what
 
@@ -957,19 +965,43 @@ kernel paths based on sequence length `T`:
 - `sdpa_full` — used when `T > 8`; covers all LTX latent grids.
 - `sdpa_vector_2pass` — used when `T ≤ 8`; not relevant to LTX.
 
-For `sdpa_full` on a non-NAX chip (M1 and M2 families,
-`applegpu_g13s/g13g/g14s/g14g`), tile sizes at `head_dim = 128` are
-hardcoded in `mlx/backend/metal/scaled_dot_product_attention.cpp`:
+SDPA dispatch logic at `mlx-main/mlx/backend/metal/scaled_dot_product_attention.cpp:177`:
 
-```
-bq = 32, bk = 16   # non-NAX, head_dim=128
+```cpp
+if (metal::is_nax_available() && q.shape(3) != 80 &&
+    (env::enable_tf32() || q.dtype() != float32)) {
+    return sdpa_full_self_attention_nax(...);  // NAX path: bq=64, bk=32
+}
+// else fall through to the regular path:
+int bq = 32;
+int bk = bd < 128 ? 32 : 16;
 ```
 
-NAX-capable chips (M3+, `applegpu_g15s/g15g/g15p`):
+So there are two SDPA tile-size regimes:
 
-```
-bq = 64, bk = 32   # NAX
-```
+| Path | Tile sizes | Kernel | Required hardware |
+|---|---|---|---|
+| **NAX** | `bq=64, bk=32` | `sdpa_full_self_attention_nax` — uses `mpp::tensor_ops::matmul2d` (Apple Metal Performance Primitives, dedicated tensor-multiply hardware) | M5+, macOS 26.2+, head_dim ≠ 80, not pure float32 (unless TF32 enabled) |
+| **Non-NAX** | `bq=32, bk=16` for `head_dim=128` (and `bk=32` for smaller head_dim) | regular `steel_attention_*` — uses `metal::simdgroup_matrix<T>` (general SIMD ops, no dedicated matrix hardware) | M1+ |
+
+`is_nax_available()` at `mlx-main/mlx/backend/metal/device.cpp:828`
+requires:
+
+- **macOS 26.2+** (where the `mpp::tensor_ops` headers exist), AND
+- **GPU generation 17+** (gen >= 17 for base/Pro variants, >= 18
+  for `p` variants).  GPU-gen mapping per
+  `device.cpp:489-497`: M1=13, M2=14, M3=15, M4=16, **M5=17**.
+
+**M1 Max is non-NAX** (gen 13) and uses the `bq=32, bk=16` path for
+our `head_dim=128` shape.  On M5+ the same workload would use the
+`bq=64, bk=32` tensor-core path — both bigger tiles AND dedicated
+matrix hardware, a step-function speedup.
+
+**Important earlier-doc correction:** previous versions of this
+section said "M3+ (NAX)" / "M3+ would double tile dimensions".  That
+was wrong inference — NAX requires **M5+**, not M3+.  M2/M3/M4 get
+modest improvements from broader architectural gains (more cores,
+more bandwidth, better cache) but do NOT unlock the NAX kernel path.
 
 No env var or runtime flag changes tile sizes for `sdpa_full` in MLX
 0.31.2.  MLX PR #3455 adds `MLX_SDPA_BLOCKS` but it only controls
@@ -983,7 +1015,12 @@ there is no software knob to recover the 4× token overhead.
 **Implications:**
 
 - On M1 Max, `sdpa_full` is at the hardware tile floor for `head_dim = 128`.
-- Upgrading to M3+ (NAX) would double both tile dimensions.
+- Upgrading to **M5+** (the actual NAX-capable family, NOT M3) would
+  unlock the `mpp::tensor_ops::matmul2d` hardware path entirely —
+  dedicated tensor-multiply units replacing the SIMD-group matrix
+  shim that M1-M4 use.  M2/M3/M4 buy modest improvements from
+  broader architectural gains (more cores, more bandwidth) but do
+  NOT unlock NAX.
 - Custom Metal kernel via `mx.fast.metal_kernel` could implement larger
   tiles but is a significant engineering effort.
 - Python-level chunked or tiled SDPA does not change the Metal tile width;
