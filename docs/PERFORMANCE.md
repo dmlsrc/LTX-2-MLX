@@ -41,8 +41,15 @@ closed.
 The following ship enabled by default:
 
 - BF16 compute throughout, native checkpoint dtype preserved.
-- Video FF layout: `project_in:pretranspose,project_out:pretranspose`.
-- Video attention layout: `to_q/to_k/to_v/to_out:pretranspose`.
+- Video FF layout: `project_out:pretranspose` only.  (The historical
+  default also included `project_in:pretranspose`, but microbench
+  evidence — `scripts/bench_ff_microbench.py bf16_layout` — showed
+  project_in pretranspose is a 2.5 % regression in isolation and
+  neutral end-to-end.  Only project_out earns its keep, with a 35 %
+  isolated-matmul win that rescues a kernel-selection cliff.)
+- Video attention layout: OFF by default.  (The historical default
+  was `to_q/to_k/to_v/to_out:pretranspose`; same microbench showed
+  these are tied with naive BF16 within ±1 % at the 4096×4096 shape.)
 - Audio pretranspose (audio attn `to_*`, video→audio attn `to_*`, audio FF).
 - AdaLN/RoPE dtype cast-back (no FP32 leakage into SDPA).
 - Skip negative prompt encoding for distilled mode (cfg=1.0 → no-op).
@@ -140,10 +147,10 @@ from the default stack when running A/Bs.
 | --- | --- | --- | --- | --- |
 | **--- shipped defaults ---** | | | | |
 | `--internal-audio auto` | default | none | -35 % wall on video-only (256×256×25) | Resolves to `on` iff `--generate-audio`.  Legacy `LTX_DISABLE_INTERNAL_AUDIO=1` is honored but the new flag is preferred.  Matches mlx-video. |
-| Audio module pretranspose | default | medium | -11 % AV (256×256×25) | `audio_attn1/2.to_*`, `video_to_audio_attn.to_*`, `audio_ff.project_*` use the same `mx.contiguous(weight.T)` cache as video.  Opt out: `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`. |
-| QKV pretranspose | default | medium | -4 % additional AV | `to_q/to_k/to_v` in default attention layout.  18 more matmuls per AV block per step with implicit transpose eliminated. |
-| `--video-ff-layout project_in:pretranspose,project_out:pretranspose` | default | medium | -28 % bakery vs no-layout (77 → 55 s/it) | Same-math.  Bakery 1024×576 smoke ran at ~55 s/it, stable ~44 GB process RAM. |
-| `--video-attn-layout to_out:pretranspose` (default), plus `to_q/k/v` | default | medium | marginal additional | Bakery smoke ran ~54 s/it combined with FF layouts. |
+| Audio module pretranspose | **partial default** (trimmed 2026-05-17) | none | -11 % AV (256×256×25) historical, neutral at bakery T=502 | The audio cache build inherits from `DEFAULT_VIDEO_FF_LAYOUT_SPECS` and `DEFAULT_VIDEO_ATTN_LAYOUT_SPECS`.  When those were trimmed (project_out:pretranspose only for FF, attn fully off), audio inherited the trimming.  `bf16_layout_audio` microbench at T=502 (bakery scale) confirmed all audio projections are tied with naive within ±1 % so the trimming is safe at bakery scale.  Historical −11 % at small T (256×256×25) is NOT re-verified — small-T workloads may regress.  Opt out the broader mechanism: `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`.  See `PERFORMANCE_NOTES.md`. |
+| QKV pretranspose | **opt-in (was default pre-2026-05-17)** | medium | -4 % additional AV at small T (256x256x25) | `to_q/to_k/to_v` were in the default attention layout, but `scripts/bench_ff_microbench.py bf16_layout` clean run showed they're tied with naive BF16 at the LTX-2.3 4096x4096 attention shape (within ±1 %).  The -4 % win was likely small-T-specific.  Re-enable via `--video-attn-layout to_q:pretranspose,to_k:pretranspose,to_v:pretranspose,to_out:pretranspose`. |
+| `--video-ff-layout project_out:pretranspose` | default | none | -28 % bakery vs no-layout (77 → 55 s/it) | Same-math.  ONLY `project_out` is enabled by default: per `scripts/bench_ff_microbench.py bf16_layout`, project_out alone is a 35 % isolated-matmul win (rescues a kernel-selection cliff at K=16384,N=4096 where naive falls to 5.17 TFlops/s vs 7.95 with pretranspose).  `project_in` was the historical default but is +2.5 % in isolation and neutral end-to-end; opt back in via `--video-ff-layout project_in:pretranspose,project_out:pretranspose`.  Implementation drops the original weight after transposing (memory-neutral steady state).  See `PERFORMANCE_NOTES.md` "Pretranspose default cleanup" entry. |
+| `--video-attn-layout` (default OFF, `()` empty) | default | none | none | Pre-2026-05-17 default was `to_out,to_q,to_k,to_v:pretranspose`.  Microbench (`bench_ff_microbench.py bf16_layout`) shows all four attention projections at the 4096x4096 shape are tied with naive BF16 (within ±1 %, all at ~7.9 TFlops/s).  Default flipped to OFF.  Opt back in via `--video-attn-layout to_out:pretranspose,to_q:pretranspose,to_k:pretranspose,to_v:pretranspose`.  End-to-end A/B with the old default still to be measured. |
 | AdaLN/RoPE dtype cast-back | default | none | **-16.8 % bakery total** | The `scale_shift_table` tensors are FP32 (sincos precision).  Inline math `normed * (1 + scale) + shift` and `x + residual * gate` was promoting BF16 → FP32, forcing SDPA to compile `steel_attention_float32_*_maskfloat32_*` kernels (~2× the data movement of BF16).  Fixed at 5 sites in `transformer.py` + `rope.py`.  Bakery 29m 38s → 24m 40s.  See [2026-05-17 AdaLN/RoPE fix](#2026-05-17-adalnrope-dtype-promotion-fix). |
 | Skip negative prompt encoding (distilled, cfg=1.0) | default | none | -10 % AV (256×256×25) + ~7 s/run on prompt encode | Distilled pipelines never use the negative encoding (cfg=1.0 makes it a no-op).  Both two-stage and one-stage now skip it.  Re-enable: `LTX_ENCODE_UNUSED_NEGATIVE=1`. |
 | OneStagePipeline CFG short-circuit | default | none | ~2× denoise vs CFG-on | When `cfg_scale==1.0 and audio_cfg_scale==1.0 and rescale_scale==0.0` for euler+no-STG runs, `OneStagePipeline.__call__` routes to `_denoise_loop_simple_av` — one transformer pass per step instead of two.  Log line "CFG disabled (scale 1.0) - Running optimized single-pass inference" confirms the short-circuit fired. |
@@ -160,10 +167,9 @@ from the default stack when running A/Bs.
 | `LTX_COMPILE_BLOCK_GROUPS=N` | opt-in | medium | neutral at tested scales | Eager-path `mx.compile` over N-block groups.  `N=4` at small T neutral; `N=48` at bakery neutral (18m 29s vs 18m 41s).  Compile-trace cost paid up front. |
 | `LTX_MONO_INLINED=1` (stage2_harness only) | opt-in | none | neutral | Inlined 48-block forward + AdaLN preprocess + output projection.  Latent diff vs modular: cosine sim 0.999+.  Same math.  Confirms `nn.Module` dispatch is free at the MLX-graph level.  See [Monolithic-inlined transformer](#monolithic-inlined-transformer-experiment-negative-result). |
 | **--- quantization opt-ins ---** | | | | |
-| `--video-ff-quantize project_out:mxfp8` (+ `--video-ff-quantize-layers RANGE`) | opt-in | medium | useful in selected ranges | Layers 32-47 ran 10 % faster on the 352×192 smoke with slight visual differences.  Layers 0-23 and 0-47 visibly different.  `project_in:mxfp8` slower than BF16 and hurts identity stability — don't use.  Stronger compression: `project_out:affine` is also available.  Justification: FFN sub-profile on a clean block (0.51-0.52 s total) showed `project_out` at ~42 %, `project_in` at ~12 %, `gelu` at ~0.7 % — so `project_out` is the leverage point and GELU is not worth touching. |
-| `--transformer-cache-quantize mxfp8-blocks` | opt-in | medium-high | none at 1024×576 vs streaming-pretranspose | Mirrors Comfy MXFP8 block32 policy in MLX-native cache form.  Auto-disables same-math layouts.  Stage-2 at 1024×576: 460 s/it vs 425 s/it for `--stream-transformer`.  Non-parity. |
-| `--transformer-cache-quantize mxfp8-blocks-pretranspose` | opt-in | medium-high | matches `mxfp8-blocks` | Packs `weight.T` before quantizing.  Layout gain does not stack on quantized cache at 1024×576. |
-| `--video-ff-quantize project_out:mxfp8` (no `-layers` flag = all 48) | opt-in | medium | faster but non-parity | Same `--video-ff-quantize` flag as above; just omit `--video-ff-quantize-layers` so the mode applies to every video FF block.  Mode-by-mode bakery 512×288 results: `mxfp8` is much faster but visibly different (different faces, possibly less clear; still usable as a draft mode); `mxfp4` is slower than `mxfp8` AND visibly worse mechanics; `nvfp4` matches `mxfp8` quality but no speed win.  Use as a draft-quality mode; not parity. |
+| `--video-ff-quantize project_out:mxfp8` (+ `--video-ff-quantize-layers RANGE`) | **regression post-AdaLN-fix** | medium | **+10-45% SLOWER than baseline** | Pre-AdaLN-fix the 352×192 smoke saw -10% (vs broken 77.8 s/it BF16 baseline).  Post-fix at the bakery shape: variant B (project_out only, no layout) is +10.2% slower.  Per-matmul microbench (`scripts/bench_ff_microbench.py quant_matmul`) shows `mx.quantized_matmul` is consistently ~66% slower than `steel_gemm` at our shapes (4.7 vs 7.95 TFlops/s).  Quant pays bandwidth-savings cost but we're compute-bound on weights at our matmul shapes.  Flag still works for future MLX/hardware where quant kernel improves; see `PERFORMANCE_NOTES.md` Archive "mxfp8 draft mode is DEAD". |
+| `--transformer-cache-quantize mxfp8-blocks` | **regression post-AdaLN-fix** | medium-high | **+43% SLOWER than baseline** | Pre-AdaLN-fix at stage 2 was 460 s/it vs 425 s/it for streaming-pretranspose (better than alternatives at the time).  Post-fix at stage 1: 65.0 s/it vs 45.5 s/it baseline (+42.9%).  Auto-disables same-math layouts.  Broader scope than `--video-ff-quantize` (attention + both FF) so the +66% per-matmul quant penalty compounds across more of the step.  Non-parity.  See `PERFORMANCE_NOTES.md` Archive. |
+| `--transformer-cache-quantize mxfp8-blocks-pretranspose` | **regression post-AdaLN-fix** | medium-high | **+45% SLOWER than baseline** | Pre-AdaLN-fix matched `mxfp8-blocks` speed.  Post-fix at stage 1: 66.0 s/it vs 45.5 baseline (+45.0%).  Packing `weight.T` before quantizing does NOT recover the layout win on top of quantized matmul.  See `PERFORMANCE_NOTES.md` Archive. |
 | **--- memory-constrained ---** | | | | |
 | `--stream-transformer` | opt-in | low-medium | constrained-memory preset | Expands to `--transformer-block-resident-blocks 16 --transformer-block-compile --transformer-block-compile-group-size 4`.  Preferred user-facing switch.  See [Block streaming](#block-streaming-constrained-memory-mode). |
 | `--transformer-block-resident-blocks` | opt-in | low | slower | Cache-backed streaming.  `r4` ~8 GB process RAM but ~70.5 s/it on bakery.  Constrained-memory mode, not fast path. |
@@ -1112,21 +1118,31 @@ Matrix](#benchmark-matrix) above; only read this section if you need the
 original experiment context (specific resolution + memory measurements,
 why a particular path was abandoned, recipe details).
 
-### Pretranspose layouts (shipped as defaults)
+### Pretranspose layouts
 
 - **`--video-ff-layout`** — `nn.Linear` computes `x @ weight.T`.  Caches
   contiguous `weight.T` after loading stock BF16 weights and calls
   `mx.addmm` against the cached layout.  Same-math.  Bakery 1024×576
   smoke: 77 → 55 s/it.  Original duplicate-cache implementation was
   slower and more memory hungry; current path materializes each
-  transposed weight layer by layer and drops the original.  Combined
-  `project_in:pretranspose,project_out:pretranspose` is the default
-  stack.
+  transposed weight layer by layer and drops the original.  **Default
+  as of 2026-05-17 is `project_out:pretranspose` only** — the
+  `bf16_layout` microbench showed that's the single matmul shape
+  (K=16384, N=4096) where pretranspose rescues a 5.17 → 7.95 TFlops/s
+  kernel-selection cliff.  `project_in` was in the pre-2026-05-17
+  default but measures as +2.5 % in isolation and neutral
+  end-to-end.  Opt back in via
+  `--video-ff-layout project_in:pretranspose,project_out:pretranspose`.
 - **`--video-attn-layout`** — same idea applied to attention output AND
   Q/K/V projections.  For AV blocks: video self-attention, video
   text-attention, audio-to-video attention; skips audio-only output
-  projections (those are covered by audio pretranspose).  Combined with
-  FF layouts gives ~54 s/it on bakery.
+  projections (those are covered by audio pretranspose).  **Default as
+  of 2026-05-17 is OFF (empty)** — the `bf16_layout` microbench
+  showed all four projections at the 4096×4096 attention shape are
+  tied with naive BF16 within ±1 % noise.  End-to-end "marginal
+  positive" observation in earlier sessions was likely measurement
+  noise.  Opt back in per-target via
+  `--video-attn-layout to_q:pretranspose,to_k:pretranspose,to_v:pretranspose,to_out:pretranspose`.
 
 ### Block streaming (constrained-memory mode)
 

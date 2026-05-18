@@ -97,19 +97,27 @@ ATTN_LAYOUT_SPECS = {
     # matter).  Opt-in via explicit --video-attn-layout if you want to A/B.
     "to_gate_logits": ("pretranspose",),
 }
+# Default to ONLY project_out pretranspose for video FF — that's the single
+# matmul where pretranspose rescues a kernel-selection cliff (35 % win,
+# 5.17 → 7.95 TFlops/s at (T=8784, K=16384, N=4096) BF16 per
+# scripts/bench_ff_microbench.py bf16_layout).  project_in pretranspose was a
+# 2.5 % regression in isolated microbench and neutral end-to-end per the older
+# PERFORMANCE.md observation — dropped from default but the flag still
+# supports it (--video-ff-layout project_in:pretranspose,project_out:pretranspose
+# to A/B against this default).  See docs/PERFORMANCE_NOTES.md for the
+# microbench data and reasoning.
 DEFAULT_VIDEO_FF_LAYOUT_SPECS = (
-    ("project_in", "pretranspose"),
     ("project_out", "pretranspose"),
 )
-# Pretranspose all four large attention projections by default.  to_gate_logits
-# is intentionally excluded — its tiny weight shape gives no measurable benefit
-# and adds cache-load + dispatch overhead.
-DEFAULT_VIDEO_ATTN_LAYOUT_SPECS = (
-    ("to_out", "pretranspose"),
-    ("to_q",   "pretranspose"),
-    ("to_k",   "pretranspose"),
-    ("to_v",   "pretranspose"),
-)
+# Default video-attn pretranspose to OFF.  The four large attention
+# projections (to_q/to_k/to_v/to_out) all sit at ~37 ms / call with or
+# without pretranspose in the isolated BF16 microbench (within 1 % noise,
+# all at ~7.9-8.0 TFlops/s).  Re-enable via
+# --video-attn-layout to_out:pretranspose,to_q:pretranspose,...
+# for A/B.  Earlier end-to-end PERFORMANCE.md observation called it
+# "marginal positive" but microbench evidence suggests that was likely
+# measurement noise.  See docs/PERFORMANCE_NOTES.md.
+DEFAULT_VIDEO_ATTN_LAYOUT_SPECS: tuple[tuple[str, str], ...] = ()
 DEFAULT_TRANSFORMER_LAYOUT_LAYERS = tuple(range(48))
 DEFAULT_LTX_REPO_ID = "Lightricks/LTX-2.3"
 LEGACY_LTX_REPO_ID = "Lightricks/LTX-2"
@@ -4972,7 +4980,12 @@ def main():
         metavar="TARGET:LAYOUT[,TARGET:LAYOUT]",
         help=(
             "Same-math video FF layout transform. Default is "
-            "project_in:pretranspose,project_out:pretranspose. Use 'off' to disable."
+            "project_out:pretranspose (the matmul where pretranspose rescues "
+            "a kernel-selection cliff -- 35%% faster per scripts/"
+            "bench_ff_microbench.py bf16_layout). Add project_in:pretranspose "
+            "if you want the historical-default behavior (microbench showed "
+            "+2.5%% regression in isolation, neutral end-to-end). Use 'off' "
+            "to disable."
         ),
     )
     parser.add_argument(
@@ -4989,8 +5002,12 @@ def main():
         default=DEFAULT_VIDEO_ATTN_LAYOUT_SPECS,
         metavar="TARGET:LAYOUT[,TARGET:LAYOUT]",
         help=(
-            "Same-math video-output attention layout transform. Default is "
-            "to_out:pretranspose. Use 'off' to disable."
+            "Same-math video attention layout transform. Default is OFF "
+            "(empty). Per scripts/bench_ff_microbench.py bf16_layout, "
+            "to_q/to_k/to_v/to_out pretranspose at the 4096x4096 attention "
+            "shape is tied within noise with naive BF16 (within +-1%%). "
+            "Re-enable per-target: to_out:pretranspose,to_q:pretranspose,... "
+            "Use 'off' to keep the new default explicit."
         ),
     )
     parser.add_argument(
