@@ -1089,12 +1089,16 @@ class LTXModel(nn.Module):
         previous_slot_layers: List[Optional[int]] = [None] * resident_blocks
 
         # LTX_COMPILE_BLOCK_GROUPS=N enables block-group mx.compile for the
-        # *non-streaming* path.  N is the group size.  Per prior experiments,
-        # N>4 has triggered Metal watchdog hangs at large shapes — warn but
-        # don't clamp (let the user A/B at their own risk).
-        # Compiled groups are cached on the model and reused across steps.
-        # Same compile-group machinery the streaming path uses; just
-        # bypasses block_streamer.bind() since there's no slot rotation.
+        # *non-streaming* path.  N is the group size; ceil(48/N) groups are
+        # compiled per pass and cached on the model for reuse across steps.
+        # Same compile-group machinery the streaming path uses, just bypasses
+        # block_streamer.bind() since there's no slot rotation.
+        #
+        # Empirically (`scripts/bench_compile_groups.sh`, 2026-05-18) the
+        # value of N is a no-op at bakery scale: off / N=4 / N=20 / N=48 all
+        # land within a 1.3% band = run-to-run noise.  Historical N>4
+        # watchdog hangs from the pre-AdaLN/RoPE-dtype-cast era no longer
+        # reproduce since the BF16-cast fix landed (2026-05-17).
         eager_compile_group_size = 0
         env_compile_groups = os.environ.get("LTX_COMPILE_BLOCK_GROUPS")
         if (
@@ -1111,18 +1115,6 @@ class LTXModel(nn.Module):
                 eager_compile_group_size = max(1, int(env_compile_groups))
             except ValueError:
                 eager_compile_group_size = 4
-            if eager_compile_group_size > 4 and not getattr(
-                self, "_compile_group_warning_emitted", False,
-            ):
-                # Leading newline breaks out of the active progress-bar line
-                # so the warning doesn't get appended to it.
-                print(
-                    f"\n  WARNING: LTX_COMPILE_BLOCK_GROUPS={eager_compile_group_size} "
-                    ">4 has historically triggered Metal watchdog hangs at "
-                    "large T — Ctrl-C and reduce if the bench appears stuck.",
-                    flush=True,
-                )
-                object.__setattr__(self, "_compile_group_warning_emitted", True)
 
         use_compiled_groups = (
             block_streamer is not None
