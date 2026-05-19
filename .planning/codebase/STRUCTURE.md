@@ -90,12 +90,16 @@ LTX-2-MLX/
 │   │   ├── prompt_enhancement.py # Optional prompt enhancement with LLMs
 │   │   └── __init__.py        # Exports utilities
 │   │
+│   ├── video_encoder.py       # encode_video() + TIERS (web/default/hq/export/reference)
+│   │
 │   └── kernels/               # Fused operations (optional)
 │       ├── fused_ops.py       # Future: fused kernels
 │       └── __init__.py
 │
 ├── scripts/                   # Entry points and utilities
-│   ├── generate.py            # Main video generation script (98KB, 2900+ lines)
+│   ├── generate.py            # Main video generation script (~5200 lines)
+│   ├── encode_modes_harness.py # A/B benchmark harness for encoder presets (built on video_encoder)
+│   ├── decode_latent_debug.py # Decode-only validation of saved latents (sweeps VAE modes)
 │   ├── download_weights.py    # Download models from HuggingFace
 │   └── generate_pytorch_checkpoints.py # Convert PyTorch → safetensors reference
 │
@@ -207,8 +211,8 @@ LTX-2-MLX/
 
 **`scripts/`:**
 - Purpose: Executable entry points
-- Contains: `generate.py` (main), download script, reference converters
-- Key files: `generate.py` (2900+ lines) - all CLI logic, pipeline creation, model loading
+- Contains: `generate.py` (main), `encode_modes_harness.py`, `decode_latent_debug.py`, download script, reference converters
+- Key files: `generate.py` (~5200 lines) - all CLI logic, pipeline creation, model loading. Video encoding goes through `LTX_2_MLX.video_encoder.encode_video()` (selected via `--encode-tier`).
 
 **`tests/`:**
 - Purpose: Unit, integration, and parity tests

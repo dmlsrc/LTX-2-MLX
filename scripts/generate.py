@@ -74,6 +74,7 @@ from LTX_2_MLX.model.video_vae.tiling import (
     TilingConfig,
 )
 from LTX_2_MLX.core_utils import to_velocity
+from LTX_2_MLX.video_encoder import encode_video, TIERS
 
 
 SUPPORTED_COMPUTE_DTYPES = {
@@ -2497,9 +2498,10 @@ def generate_video(
     save_latents: bool = False,
     save_text_embeddings: bool = False,
     save_run_log: bool = False,
+    save_audio_sidecar: bool = False,
     ge_gamma: float = 0.0,
     output_fps: float = NATIVE_FPS,
-    output_speed: float = 1.0,
+    output_tier: str = "default",
     # IC-LoRA and Keyframe Interpolation
     keyframes: list = None,
     ic_lora_weights: str = None,
@@ -2755,8 +2757,9 @@ def generate_video(
                 "save_latents": save_latents,
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
+                "save_audio_sidecar": save_audio_sidecar,
                 "output_fps": output_fps,
-                "output_speed": output_speed,
+                "output_tier": output_tier,
                 "image_path": image_path,
                 "image_strength": image_strength,
                 "lora_path": lora_path,
@@ -3522,7 +3525,7 @@ def generate_video(
             negative_audio_encoding=null_audio_encoding,
         )
 
-        # Convert to frames list for save_video
+        # Convert decoded video to per-frame list for encode_video
         # decode_latent returns (T, H, W, C) in uint8, so just convert to numpy list
         video_np = np.array(video)  # (T, H, W, C)
         frames = [video_np[t] for t in range(video_np.shape[0])]
@@ -3533,11 +3536,14 @@ def generate_video(
 
         # Save video
         print(f"\nSaving video to {output_path}...")
-        if audio_waveform is not None:
-            save_video_with_audio(frames, audio_waveform, output_path, fps=output_fps, speed=output_speed, audio_sample_rate=audio_sample_rate)
-        else:
-            save_video(frames, output_path, fps=output_fps, speed=output_speed)
-        print(f"Done! Video saved to {output_path}")
+        final_path = encode_video(
+            frames, output_path,
+            tier=output_tier, fps=output_fps,
+            audio_waveform=audio_waveform if audio_waveform is not None else None,
+            audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
+            save_audio_sidecar=save_audio_sidecar,
+        )
+        print(f"Done! Video saved to {final_path}")
         return
 
     # === IC-LORA PIPELINE ===
@@ -3655,8 +3661,8 @@ def generate_video(
 
         # Save video
         print(f"\nSaving video to {output_path}...")
-        save_video(frames, output_path, fps=output_fps, speed=output_speed)
-        print(f"Done! Video saved to {output_path}")
+        final_path = encode_video(frames, output_path, tier=output_tier, fps=output_fps)
+        print(f"Done! Video saved to {final_path}")
         return
 
     # === KEYFRAME INTERPOLATION PIPELINE ===
@@ -3745,8 +3751,8 @@ def generate_video(
 
         # Save video
         print(f"\nSaving video to {output_path}...")
-        save_video(frames, output_path, fps=output_fps, speed=output_speed)
-        print(f"Done! Video saved to {output_path}")
+        final_path = encode_video(frames, output_path, tier=output_tier, fps=output_fps)
+        print(f"Done! Video saved to {final_path}")
         return
 
     # === AUDIO-VIDEO PIPELINE ===
@@ -3959,7 +3965,7 @@ def generate_video(
         else:
             timings.mark("generation + decode")
 
-        # Convert to frames list for save_video
+        # Convert decoded video to per-frame list for encode_video
         video_np = np.array(video)
         print(f"  Raw video shape: {video_np.shape}, dtype: {video_np.dtype}")
         # Squeeze any singleton dimensions
@@ -3979,11 +3985,14 @@ def generate_video(
 
         # Save video with audio
         print(f"\nSaving video to {output_path}...")
-        if audio_waveform is not None:
-            save_video_with_audio(frames, audio_waveform, output_path, fps=output_fps, speed=output_speed, audio_sample_rate=audio_sample_rate)
-        else:
-            save_video(frames, output_path, fps=output_fps, speed=output_speed)
-        print(f"Done! Video saved to {output_path}")
+        final_path = encode_video(
+            frames, output_path,
+            tier=output_tier, fps=output_fps,
+            audio_waveform=audio_waveform if audio_waveform is not None else None,
+            audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
+            save_audio_sidecar=save_audio_sidecar,
+        )
+        print(f"Done! Video saved to {final_path}")
         timings.mark("output save")
         if save_run_log and run_metadata is not None:
             save_run_log_sidecar(
@@ -4330,7 +4339,7 @@ def generate_video(
         mx.eval(video)
         print(f"  Output video: {video.shape}")
 
-        # Convert to frames list for save_video
+        # Convert decoded video to per-frame list for encode_video
         frames = [np.array(video[f]) for f in range(video.shape[0])]
         print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
 
@@ -4381,7 +4390,7 @@ def generate_video(
     # Save video
     # Note: Audio generation is handled by the AUDIO-VIDEO PIPELINE section above
     print(f"\nSaving video to {output_path}...")
-    save_video(frames, output_path, fps=output_fps, speed=output_speed)
+    encode_video(frames, output_path, tier=output_tier, fps=output_fps)
     timings.mark("output save")
 
     print(f"\nDone! Video saved to {output_path}")
@@ -4410,193 +4419,11 @@ def generate_video(
         print("\nNote: VAE decoder was not loaded - output is placeholder visualization.")
 
 
-def save_video(frames: list, output_path: str, fps: float = NATIVE_FPS, speed: float = 1.0):
-    """Save frames as video using ffmpeg with optional speed adjustment.
-
-    Args:
-        frames: List of frame arrays (H, W, C) in uint8.
-        output_path: Output video file path.
-        fps: Generation and output frame rate.
-        speed: Playback speed multiplier (0.5=slow-mo, 1.0=normal, 2.0=fast).
-    """
-    import subprocess
-    import tempfile
-    from PIL import Image
-
-    # Create temp directory for frames
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Save frames as images with progress
-        print("  Writing frames...")
-        if HAS_TQDM:
-            iterator = tqdm(enumerate(frames), desc="  Saving frames", total=len(frames), ncols=80, ascii=True, mininterval=1.0, miniters=10)
-        else:
-            iterator = enumerate(frames)
-
-        for i, frame in iterator:
-            img = Image.fromarray(frame)
-            img.save(os.path.join(tmpdir, f"frame_{i:04d}.png"))
-
-        # Build ffmpeg filter chain
-        filters = []
-
-        # Speed adjustment
-        # setpts: lower value = faster, higher value = slower
-        if speed != 1.0:
-            # speed=2.0 means 2x faster, so PTS should be halved
-            pts_multiplier = 1.0 / speed
-            filters.append(f"setpts={pts_multiplier}*PTS")
-        # Build ffmpeg command
-        print("\n  Encoding video...")
-        cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(fps),  # Input frame cadence matches generation fps
-            "-i", os.path.join(tmpdir, "frame_%04d.png"),
-        ]
-
-        # Add filter chain if needed
-        if filters:
-            filter_str = ",".join(filters)
-            cmd.extend(["-vf", filter_str])
-            if speed != 1.0:
-                print(f"  Applying speed: {speed}x")
-
-        cmd.extend([
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-crf", "18",
-            "-loglevel", "error",
-            output_path
-        ])
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"  FFmpeg error: {result.stderr}")
-            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
-
-
-def save_video_with_audio(
-    frames: list,
-    audio_waveform: mx.array,
-    output_path: str,
-    fps: float = NATIVE_FPS,
-    speed: float = 1.0,
-    audio_sample_rate: int = 24000,
-):
-    """Save frames as video with audio using ffmpeg with optional speed adjustment.
-
-    Args:
-        frames: List of frame arrays (H, W, C) in uint8.
-        audio_waveform: Audio waveform tensor (B, 2, samples).
-        output_path: Output video file path.
-        fps: Generation and output frame rate.
-        speed: Playback speed multiplier (0.5=slow-mo, 1.0=normal, 2.0=fast).
-        audio_sample_rate: Audio sample rate in Hz.
-    """
-    import os
-    import shutil
-    import subprocess
-    import tempfile
-    import wave
-    from PIL import Image
-
-    # Create temp directory for frames and audio
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Save frames as images with progress
-        print("  Writing frames...")
-        if HAS_TQDM:
-            iterator = tqdm(enumerate(frames), desc="  Saving frames", total=len(frames), ncols=80, ascii=True, mininterval=1.0, miniters=10)
-        else:
-            iterator = enumerate(frames)
-
-        for i, frame in iterator:
-            img = Image.fromarray(frame)
-            img.save(os.path.join(tmpdir, f"frame_{i:04d}.png"))
-
-        # Save audio as WAV file
-        audio_path = os.path.join(tmpdir, "audio.wav")
-        print("\n  Writing audio...")
-
-        # audio_waveform shape: (B, 2, samples) - stereo
-        audio_np = np.array(audio_waveform[0])  # (2, samples)
-
-        # Convert from float [-1, 1] to int16
-        audio_int16 = (audio_np * 32767).clip(-32768, 32767).astype(np.int16)
-
-        # Interleave stereo channels: (2, samples) -> (samples, 2) -> flat
-        audio_interleaved = audio_int16.T  # (samples, 2)
-        audio_flat = audio_interleaved.flatten()
-
-        # Write WAV file
-        with wave.open(audio_path, 'wb') as wav_file:
-            wav_file.setnchannels(2)  # Stereo
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(audio_sample_rate)
-            wav_file.writeframes(audio_flat.tobytes())
-
-        # Save a sidecar WAV beside the MP4 so export compression can be compared directly.
-        sidecar_wav_path = os.path.splitext(output_path)[0] + ".wav"
-        shutil.copy2(audio_path, sidecar_wav_path)
-        print(f"    Sidecar WAV: {sidecar_wav_path}")
-
-        print(f"    Audio: {len(audio_flat) // 2} samples, {len(audio_flat) // 2 / audio_sample_rate:.2f}s")
-
-        # Build video filter chain
-        video_filters = []
-
-        # Speed adjustment for video
-        if speed != 1.0:
-            pts_multiplier = 1.0 / speed
-            video_filters.append(f"setpts={pts_multiplier}*PTS")
-
-        # Build audio filter chain for speed adjustment
-        # atempo filter range is 0.5-2.0, so chain multiple for extreme speeds
-        audio_filters = []
-        if speed != 1.0:
-            remaining_speed = speed
-            while remaining_speed > 2.0:
-                audio_filters.append("atempo=2.0")
-                remaining_speed /= 2.0
-            while remaining_speed < 0.5:
-                audio_filters.append("atempo=0.5")
-                remaining_speed /= 0.5
-            if remaining_speed != 1.0:
-                audio_filters.append(f"atempo={remaining_speed}")
-
-        # Build ffmpeg command
-        print("\n  Encoding video with audio...")
-        cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(fps),  # Input frame cadence matches generation fps
-            "-i", os.path.join(tmpdir, "frame_%04d.png"),
-            "-i", audio_path,
-        ]
-
-        # Add video filter chain if needed
-        if video_filters:
-            cmd.extend(["-vf", ",".join(video_filters)])
-            if speed != 1.0:
-                print(f"  Applying speed: {speed}x")
-
-        # Add audio filter chain if needed
-        if audio_filters:
-            cmd.extend(["-af", ",".join(audio_filters)])
-
-        cmd.extend([
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-b:a", "320k",
-            "-ar", str(audio_sample_rate),
-            "-pix_fmt", "yuv420p",
-            "-crf", "18",
-            "-shortest",  # Use shortest duration (video or audio)
-            "-loglevel", "error",
-            output_path
-        ])
-
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"  FFmpeg error: {result.stderr}")
-            raise RuntimeError(f"FFmpeg failed: {result.stderr}")
+# save_video / save_video_with_audio moved to LTX_2_MLX.video_encoder
+# (encode_video, called above from each pipeline). The legacy bodies took
+# a `speed` multiplier and re-encoded via PNG round-tripping; both have
+# been dropped — speed adjustment belongs in an editor, and the new
+# encoder pipes raw frames directly into ffmpeg.
 
 
 def main():
@@ -4624,7 +4451,19 @@ def main():
     parser.add_argument("--cfg-stage1", type=float, default=None, help="Stage 1 CFG (defaults to --cfg value)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--fps", type=float, default=NATIVE_FPS, help=f"Generation and output frame rate (default: {NATIVE_FPS}).")
-    parser.add_argument("--speed", type=float, default=1.0, help="Playback speed multiplier (0.5=slow-mo, 1.0=normal, 2.0=fast)")
+    parser.add_argument(
+        "--encode-tier",
+        choices=sorted(TIERS),
+        default="default",
+        help=(
+            "Output encode tier, picked by destination. "
+            "web: universal browser/player compat (H.264 + AAC). "
+            "default: everyday output on Apple / modern browsers (HEVC HW 10-bit 4:2:0 + ALAC). "
+            "hq: local viewing with full chroma (HEVC SW 10-bit 4:4:4 + ALAC). "
+            "export: editor / colorist hand-off (ProRes 422 HQ + PCM 24-bit, .mov). "
+            "reference: canonical highest-fidelity copy (ProRes 4444 + PCM 24-bit + alpha, .mov)."
+        ),
+    )
     parser.add_argument(
         "--output",
         type=str,
@@ -5150,6 +4989,15 @@ def main():
         help="Save generation parameters, argv, output paths, and timings as an _run.json sidecar",
     )
     parser.add_argument(
+        "--save-audio-sidecar",
+        action="store_true",
+        help=(
+            "Write a sidecar .wav next to the output video carrying the "
+            "vocoder output before audio-codec compression. Useful for A/B "
+            "comparison against ALAC/AAC. Implied by --save-all-sidecars."
+        ),
+    )
+    parser.add_argument(
         "--save-all-sidecars",
         "--save-debug-sidecars",
         dest="save_all_sidecars",
@@ -5246,6 +5094,7 @@ def main():
         args.save_latents = True
         args.save_text_embeddings = True
         args.save_run_log = True
+        args.save_audio_sidecar = True
 
     resolved_num_frames = resolve_num_frames(
         num_frames=args.frames,
@@ -5353,11 +5202,12 @@ def main():
         save_latents=args.save_latents,
         save_text_embeddings=args.save_text_embeddings,
         save_run_log=args.save_run_log,
+        save_audio_sidecar=args.save_audio_sidecar,
         # GE (Gradient Estimation) parameter
         ge_gamma=args.ge_gamma,
-        # Output FPS and speed
+        # Output FPS + encode tier
         output_fps=args.fps,
-        output_speed=args.speed,
+        output_tier=args.encode_tier,
         # IC-LoRA and Keyframe Interpolation
         keyframes=args.keyframe,
         ic_lora_weights=args.ic_lora_weights,

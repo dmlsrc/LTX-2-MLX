@@ -119,6 +119,7 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **VAE decode defaults to native Conv3d + zero padding** - `--vae-tiling auto` now picks a RAM-aware native tile plan, so override `--vae-decoder`, `--vae-tiling`, or `--vae-spatial-padding` only for A/B tests
 - **Default canvas is 512x288** - pass `--height`/`--width` only when you want to leave the fast 16:9 preview size
 - **Default outputs are timestamped** - without `--output`, runs save to `DIFFUSERS_OUTPUT_DIR`, then `OUTPUT_DIR`, then `outputs/` as `ltx_YYYYmmdd_HHMMSS.mp4`; use `--output-prefix` to name a run family
+- **Pick the encode tier by destination** - `--encode-tier {web,default,hq,export,reference}` (default: `default`) selects codec/container/audio together. `web` is libx264 + AAC for universal browser compat; `default` is hardware HEVC + ALAC for Apple/modern browsers; `hq` is software HEVC 4:4:4; `export` and `reference` are ProRes (.mov) for NLE / mastering workflows
 - **Converted-weight cache defaults to auto** - the first run builds reusable transformer, connector, video VAE, audio VAE, and vocoder cache files; pass `--weights-cache off` only when you specifically want direct stock-weight loading
 - **Keep `--weights` as the bundle path** - advanced runs can override individual subsystems with `--transformer-weights`, `--connector-weights`, `--vae-weights`, `--audio-vae-weights`, `--vocoder-weights`, and `--config-weights`
 - **MLX allocator cache defaults to 1GB** - this keeps unified-memory pressure lower without needing a routine `--mlx-cache-limit-gb 1`
@@ -127,7 +128,8 @@ See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 - **Save latents for decode-only tests** - add `--save-latents` to write an NPZ sidecar next to the requested output; distilled two-stage runs include both stage-1 and stage-2 latents plus the existing final-latent keys
 - **Save text conditioning for denoise A/Bs** - add `--save-text-embeddings` to write the positive/negative AV text encoder outputs as an `_text.npz` sidecar that can be reused with `--embedding`
 - **Save run metadata for reproducibility** - add `--save-run-log` to write params, argv, outputs, and timings as an `_run.json` sidecar, starting before the long generation step
-- **Save all reproducibility sidecars** - add `--save-all-sidecars` to turn on latents, text conditioning, and run metadata together
+- **Save the lossless audio next to the encoded video** - add `--save-audio-sidecar` to write the vocoder's raw WAV alongside the output (useful for A/B against the codec-compressed audio inside the container)
+- **Save all reproducibility sidecars** - add `--save-all-sidecars` to turn on latents, text conditioning, run metadata, and the audio WAV sidecar together
 - **Use `--pipeline distilled`** - Fast no-CFG two-stage inference (8+3 steps)
 - **Use `--stream-transformer` before `--low-memory`** - the streaming preset is the cleaner constrained-memory path for modern distilled runs; `--low-memory` remains an emergency fallback
 - **Reduce resolution** - Start with `--height 256 --width 384` for testing

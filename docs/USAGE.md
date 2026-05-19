@@ -328,12 +328,30 @@ python scripts/generate.py "Epic wide shot of a medieval castle at dawn"
 
 ## Output
 
-Videos are saved as MP4 files with H.264 encoding at 24fps:
+Videos are written through `LTX_2_MLX.video_encoder.encode_video()` at 24fps.
+The actual codec and container depend on `--encode-tier` (default: `default`):
+
+| Tier        | Codec / Container                                | Audience                                |
+|-------------|--------------------------------------------------|-----------------------------------------|
+| `web`       | H.264 SW 8-bit 4:2:0 CRF 18 + AAC 320k (.mp4)    | Universal browser/player compat          |
+| `default`   | HEVC HW 10-bit 4:2:0 q=65 + ALAC (.mp4)          | Everyday output on Apple / modern browsers |
+| `hq`        | HEVC SW 10-bit 4:4:4 CRF 14 + ALAC (.mp4)        | Local viewing, full chroma (no browser support) |
+| `export`    | ProRes 422 HQ + PCM 24-bit (.mov)                | Editor / colorist hand-off              |
+| `reference` | ProRes 4444 + PCM 24-bit + alpha (.mov)          | Canonical highest-fidelity copy         |
+
+The container extension (`.mp4` / `.mov`) is forced by the tier; if `--output`
+specifies a `.mp4` for a ProRes tier, `encode_video()` rewrites it to `.mov`.
 
 ```bash
-# Default timestamped output location
+# Default timestamped output location (default tier: HEVC HW + ALAC)
 python scripts/generate.py "Your prompt"
 # → saves to outputs/ltx_YYYYmmdd_HHMMSS.mp4
+
+# Web-compat output (H.264 + AAC) for browser embed
+python scripts/generate.py "Your prompt" --encode-tier web
+
+# Editor-grade output (ProRes 422 HQ in .mov)
+python scripts/generate.py "Your prompt" --encode-tier export
 
 # Custom output directory and filename prefix
 python scripts/generate.py "Your prompt" \
@@ -346,7 +364,7 @@ python scripts/generate.py "Your prompt" --output my_video.mp4
 
 When `--output` is omitted, the output directory resolves in this order:
 `--output-dir`, `DIFFUSERS_OUTPUT_DIR`, `OUTPUT_DIR`, then `outputs/`.
-Sidecars use the same timestamped stem as the MP4.
+Sidecars use the same timestamped stem as the encoded video.
 
 ### Latent Sidecars
 
@@ -409,13 +427,17 @@ paths, and timing summary for the run. The sidecar is created at run start with
 `status: "started"` and overwritten with completed timings when the output is
 saved, so interrupted long runs still leave their parameters behind.
 
-Use `--save-all-sidecars` to enable latent sidecars, text conditioning, and the
-run log together. Distilled two-stage runs save both stage-1 and stage-2 latents
-while keeping the final-latent keys for existing decode-only tooling. It is
-equivalent to passing:
+Use `--save-audio-sidecar` to keep the vocoder's WAV output alongside the
+encoded video. The encoded audio inside the video container is whatever codec
+the tier specifies (ALAC for `default`/`hq`, AAC for `web`, PCM for ProRes
+tiers); the sidecar is always uncompressed WAV at the vocoder's native sample
+rate. Useful for A/B comparisons against the codec-compressed audio.
+
+Use `--save-all-sidecars` to enable every sidecar together. It is equivalent to
+passing:
 
 ```bash
---save-latents --save-text-embeddings --save-run-log
+--save-latents --save-text-embeddings --save-run-log --save-audio-sidecar
 ```
 
 ## Troubleshooting

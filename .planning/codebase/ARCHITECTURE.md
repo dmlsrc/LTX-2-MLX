@@ -155,14 +155,19 @@ LTX-2-MLX implements a **layered pipeline architecture** for text-to-video gener
 ## Entry Points
 
 **`scripts/generate.py`:**
-- Location: `scripts/generate.py` (98KB main entry point)
+- Location: `scripts/generate.py` (main entry point, ~5200 lines)
 - Triggers: Command-line invocation: `python scripts/generate.py "prompt" [--pipeline {distilled|text-to-video|one-stage|two-stage}] [options]`
 - Responsibilities:
-  - Parse CLI arguments (height, width, frames, steps, cfg_scale, seed, etc.)
+  - Parse CLI arguments (height, width, frames, steps, cfg_scale, seed, encode_tier, etc.)
   - Load all weights (transformer, text encoder, VAE, upscalers if needed)
   - Create selected pipeline
   - Call pipeline.generate() with config
-  - Save output video/audio to disk
+  - Hand decoded frames + audio to `LTX_2_MLX.video_encoder.encode_video()` with the chosen tier
+
+**`LTX_2_MLX/video_encoder.py`:**
+- Purpose: Single entry point for writing MP4/MOV outputs. Exposes `TIERS` (web / default / hq / export / reference) and `encode_video()`.
+- Used by: `scripts/generate.py` (production output) and `scripts/encode_modes_harness.py` (A/B benchmarks).
+- Pattern: Pipe raw frames into ffmpeg via stdin; tier picks the codec / container / chroma / bit depth.
 
 **Pipeline Factory Functions:**
 - Location: Each pipeline module exports `create_*_pipeline()` function
