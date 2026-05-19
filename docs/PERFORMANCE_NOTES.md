@@ -76,6 +76,217 @@ brutal-efficiency targets" table.
 
 (Abandoned investigations kept for negative-result evidence.)
 
+### 2026-05-18: Consolidated quiet-machine microbench sweep -- RoPE has the only marginal remaining lever `[ABANDONED]`
+
+**Bottom line:** ran all five new microbenches
+(`fused_ffn_feasibility`, `pointwise_bw`, `adaln_residual`, `rope`, `vae_ops`)
+on a quiet machine at ITERS=50 WARMUP=5.  Five independent
+calibration + lever-search results.  Only one surfaced any remaining
+lever (RoPE precision), and it tops out below 1 % of step time.  No
+further microbench candidates remain that haven't been measured.
+
+**Log:** `$SHARED_TEMP_DIR/trace_analysis/ff_microbench_new_20260518_221142.log`
+**Code:** `scripts/bench_ff_microbench.py {fused,pointwise_bw,adaln,rope,vae}`
+
+**Pointwise BF16 bandwidth ceiling on this hardware** (calibration):
+- Peak achieved: **340.6 GB/s** at 512 MB `x+x` (~85 % of M1 Max ~400 GB/s nominal HBM).
+- LTX residual (72 MB):    219.7 `x+x` / 247.0 `x+y` GB/s (65-73 % of peak).
+- LTX FF hidden (288 MB):  305.6 `x+x` / 290.7 `x+y` GB/s (85-92 % of peak).
+- Small tensors (1-16 MB): dispatch-bound at 8-150 GB/s — informational.
+- **Use 340 GB/s as the divisor when grading any bandwidth-bound op below.**
+
+**Fused FFN feasibility re-confirmed** (tighter numbers vs the earlier
+exploratory ITERS=10 run):
+- Stock FF: 311.6 ms at **7.57 TFlops/s = 95 % of `steel_gemm` ceiling**.
+- project_out alone: 7.96 TFlops/s = **100 % of GEMM ceiling**.
+- Recoverable: +10.9 ms (3.5 % conservative) to +21.1 ms (6.8 % optimistic) per call.
+- Per-step ceiling: **+521 ms to +1011 ms = +1.15 % to +2.22 % of 45.5 s/step**.
+- Same verdict: NOT WORTH IT.  See "Custom fused / streamed BF16 FFN
+  kernel" entry below for the full reasoning.
+
+**AdaLN + residual chain** (defends the production default):
+- Compiled chain (production): 1.52 ms at **285 GB/s = 84 % of pointwise peak** -- already near ceiling.
+- Inline chain (no compile):    8.29 ms at  52 GB/s.  `mx.compile` gives a 5.5x lift.
+- Per-run cost of compiled chain: 0.58 s = 0.64 % of step.
+- If inline ran instead, would lose **1.3 s/step = 2.86 % of step**.
+- **KEEP `mx.compile` wrappers on `_adaln_inline` / `_residual_gate_inline`**;
+  defends `transformer.py:57-58` defaults with a number.
+- Custom AdaLN+residual Metal kernel headroom = gap from 285 to 340 GB/s
+  = ~16 % of chain time = ~0.10 % of step.  **NOT WORTH IT.**
+
+**RoPE -- the only remaining lever** (production:
+`LTX_2_MLX.model.transformer.rope.apply_split_rotary_emb`):
+- Production (FP32 cos/sin + cast back to BF16): 4.28 ms at **67.2 GB/s
+  = 20 % of pointwise peak**.  By far the worst-efficiency op benched.
+- All-BF16 freqs (lower precision):              1.66 ms at 130 GB/s = 38 % of peak.
+  Saves **2.62 ms (61 % of RoPE time)** per call.
+- Bare BF16 multiply at half-shape:              0.57 ms at 188 GB/s
+  (close to per-shape pointwise ceiling -- 92 % of the 205 GB/s achieved
+  at the comparable LTX residual size).
+- Bare concatenate at full shape:                0.56 ms at 259 GB/s.
+- Per-step: production RoPE = **0.82 s/run = 0.90 % of step**.
+- **Lever A (BF16 cos/sin):** TESTED 2026-05-18, **DEAD**.  Patched
+  `apply_split_rotary_emb` with env-gated cast (`LTX_ROPE_BF16_FREQS=1`),
+  ran kitten one-stage (288x512x721, 8 steps, seed 42) baseline vs
+  experimental.  Speed: 75.9 → 74.5 s/it = -1.85 %, but baseline ran
+  with the older `project_in+project_out+full-attention` layout stack
+  vs the trimmed default — comparison confounded, real RoPE delta is
+  within noise of single-sample runs.  Quality: same-seed output
+  shows visible drift (e.g. light switch on the wall renders
+  differently).  Precision change cascades into the render through
+  AdaLN-conditioned attention.  Patch reverted, env var removed, A/B
+  script deleted.
+- **Lever B (merge RoPE into QKV matmul epilogue):** caps at **0.90 %
+  of step** even with a perfect kernel.  Multi-day Metal effort for
+  sub-1 % return on a hot path whose precision is already proven
+  sensitive (per Lever A's visible drift).  NOT WORTH IT.
+
+**VAE Conv3d -- blocked on upstream fix**:
+- `nn.Conv3d` achieves **4.47-5.72 TFlops/s = 56-72 % of `steel_gemm`
+  ceiling** across three decoder shapes (bottleneck → mid → late).
+- Conv3d dominates the resnet block (~80-95 % of its time).
+- Pixel-norm + silu are negligible (<0.42 ms even at the late stage).
+- Headroom IF the pending `mx.conv_general` int-overflow fix lifts
+  Conv3d to GEMM ceiling: ~1.5-2x on Conv3d × ~7 % VAE share of total
+  wall = **~2.4-3.5 % end-to-end ceiling**.
+- **Blocked on upstream MLX.**  Re-run `vae_ops` after the fix lands
+  to confirm the lift; numbers above set the upper bound.
+
+**Consolidated remaining-lever ceiling on M1 Max:**
+
+| Lever                                       | Status                                  | Per-step ceiling |
+|---|---|---|
+| Custom fused / streamed BF16 FFN kernel     | DEAD (re-confirmed quiet-machine)       | 1.15-2.22 %      |
+| Custom AdaLN+residual Metal kernel          | NOT WORTH IT                            | ~0.10 %          |
+| RoPE BF16 cos/sin (Lever A)                 | DEAD — tested, visible output drift     | up to 0.55 %     |
+| RoPE merged into QKV epilogue (Lever B)     | NOT WORTH IT (kernel effort)            | up to 0.90 %     |
+| VAE Conv3d int-overflow fix                 | BLOCKED upstream                        | 2.4-3.5 %        |
+
+**Total combined remaining lever headroom on M1 Max:** ~2.4-3.5 % of
+step, entirely gated on the upstream `mx.conv_general` int-overflow
+fix.  All five candidates surfaced by the consolidated microbench
+sweep have now been tested or are blocked.  **The investigation is
+fully closed.**
+
+**Side finding -- compile-block-groups watchdog memory now stale**
+(2026-05-18, end-to-end `scripts/bench_compile_groups.sh`):
+
+| group   | step1 wall | steady (n=1) | vs off  |
+|---|---|---|---|
+| off     | 46.10 s    | 45.90 s      | (ref)   |
+| N=4     | 45.90 s    | 45.50 s      | -0.87 % |
+| N=20\*  | 45.80 s    | 45.30 s      | -1.31 % |
+| N=48    | 45.90 s    | 45.40 s      | -1.09 % |
+
+\*N=20 was a bash-builtin-collision accident (script's `GROUPS`
+shadowed by bash's `GROUPS` array → "20" = staff GID).  The accident
+turned into useful data: **the historical "compile-group > 4 causes
+watchdog hangs" memory is now stale** -- since the BF16/AdaLN dtype
+cast fix landed (2026-05-17), N=20 and N=48 STEPS=2 both ran to
+completion with no hang and no desktop-interactivity regression.
+
+All four values land in a 0.6 s band (45.30-45.90 s) = ~1.3 % range
+= run-to-run noise.  **`mx.compile` over the LTX block stack does
+literally nothing detectable at this resolution**, regardless of
+group size.  Bonus finding: step1 at N=48 (whole-transformer compile
+trace) is 45.90 s vs off's 46.10 s — `mx.compile`'s trace cost is
+essentially free at the LTX scale.  No "amortize compile over many
+steps" argument left.
+
+Feedback memory `feedback_perf_flags.md` updated; bench script's
+watchdog warning softened.  The stale warning string is still printed
+by the model code somewhere (saw it fire at N=20 and N=48) — needs a
+follow-up grep + edit pass when convenient.  If a higher-precision
+answer than ±1.3 % is wanted, re-run at
+`STEPS=4 COMPILE_GROUPS=off,4,8,16,48` (~75 min, 3 steady samples per
+run) — but absent a hypothesis the curve hides anything, this looks
+like a fully closed door.
+
+### 2026-05-18: Custom fused / streamed BF16 FFN kernel -- feasibility microbench shows ~3-7 % ceiling `[ABANDONED]`
+
+**Bottom line:** the stock matmul → GELU → matmul FF chain already runs at
+**91-95 % of MLX's own `steel_gemm` ceiling**; a custom fused Metal kernel
+(or any pure-MLX streamed/tiled variant on top) can save at most the GELU
+pass and the hidden-tensor HBM round-trip.  Per-call ceiling: **3.8 %
+(conservative)** to **7.5 % (optimistic)** of stock wall.  Per-step ceiling:
+**+1.3 % to +2.6 % of a 45.5 s step**.  Combined with the requirement that
+a tiled kernel match `steel_gemm` GEMM efficiency (which tiling typically
+loses), this is a clear pass.
+
+**Trigger:** offline patch sketch for a "streamed BF16 FFN" (per-chunk
+streaming over the inner dim to avoid the full `T × inner_dim`
+intermediate) circulated for review.  Rather than build the prototype, we
+wrote `bench_fused_ffn_feasibility` to bound the maximum possible win
+first.
+
+**Bench:** `scripts/bench_ff_microbench.py fused` -- new mode added
+2026-05-18.  At LTX-2.3 stage-1 shape (B=1 T=8784 D=4096 INNER=16384 BF16),
+20 iters, M1 Max:
+
+| mode | mean ms | TFlops/s | % of GEMM ceiling | peak MB |
+|---|---|---|---|---|
+| stock FF (matmul → GELU → matmul) | 324.5 | 7.27 | 91 % | 287.8 |
+| project_in matmul only            | 156.4 | 7.38 | 93 % | -- |
+| project_out matmul only           | 158.2 | 7.61 | 96 % | -- |
+| both matmuls chained, no GELU     | 312.3 | 7.55 | 95 % | 287.8 |
+| gelu_approx at hidden shape       |  12.3 | n/a (50.5 GB/s) | -- | 0 |
+
+**Floors (per FF call):**
+- floor A (project_in + project_out, sum): 314.6 ms
+- floor B (chained, no GELU; still writes/reads hidden via HBM): 312.3 ms
+  -> stock-B recoverable = **+12.2 ms = +3.8 %**
+- floor C (B minus hidden HBM round-trip, perfect tiled fused kernel):
+  ~300.1 ms  -> stock-C recoverable = **+24.4 ms = +7.5 %**
+- floor C is an upper bound and assumes tiling does NOT drop GEMM
+  efficiency below the 95 % `steel_gemm` ceiling currently observed.
+
+**Extrapolation** (48 blocks × 2 steps = 96 FF calls per stage-1 2-step run):
+- conservative (vs floor B): +585 ms / step = +1.29 % of 45.5 s
+- optimistic   (vs floor C): +1173 ms / step = +2.58 % of 45.5 s
+- 30 s clip (~91 / 61 = 1.49× tokens, both stages): ~15-30 s total wall ceiling
+
+**Why the streamed-FFN sketch specifically does NOT clear that bar:**
+
+The circulated prototype computed FFN by streaming over the inner
+dimension as N smaller MLX GEMMs with output-tensor accumulation
+(`out = out + (hidden_chunk @ w_out_chunk)` per chunk).  Concretely:
+
+1. **Output accumulation kills the memory story.**  Each chunk reads and
+   writes the full `tokens × dim_out` output (~72 MB).  At 16 chunks
+   that's ~1.1 GB of extra output traffic the stock path doesn't have.
+2. **N small GEMMs vs 1 well-tuned `steel_gemm`** -- empirically the
+   matmuls are already at 91-96 % of ceiling; chunking can only lose.
+3. **Weight memory roughly doubles** -- chunks are `mx.contiguous(...)`
+   copies of `_project_*_weight_t` slices; originals are not freed.
+4. **Silent correctness hole for non-GELU FFNs** -- the sketch
+   hardcoded `nn.gelu_approx` but didn't check whether the target
+   `FeedForward` was the GELU variant or `SwiGLU` (which exists in the
+   codebase and is the activation for SwiGLU FFN variants).
+
+A real fused Metal kernel could in principle save the +1.3 % to +2.6 %
+ceiling above, but the engineering cost (multi-day Metal work, riskier
+than the FA-2 attempt because two GEMMs must serialize on one kernel
+issue) is not justified for that envelope.
+
+**What this kills:**
+- Custom fused BF16 FFN Metal kernel
+- Streamed / tiled FFN on top of MLX (any chunk size)
+- `mx.compile`-based FFN fusion (already refuted by `ff_chain` bench
+  on 2026-05-17 -- `is_fusable()` excludes matmul)
+
+**What it leaves untested:**
+- A fused kernel that ALSO drops to FP16 / FP8 (out of scope: dtype
+  change).
+- Architectural reductions (fewer FFNs, MoE routing, layer skipping).
+- Hardware upgrades (M3+ INT8 GEMM, M5+ NAX cooperative-tensor matmul)
+  -- the recoverable envelope is so small that any of these dwarfs it.
+
+**Bench code preserved:** `scripts/bench_ff_microbench.py fused` is in
+the repo and re-runnable if anyone wants to verify on different M1 Max
+units or after MLX upstream kernel improvements.  If the
+`steel_gemm`-to-stock-FF gap widens past ~10 % in a future MLX release,
+this hypothesis becomes worth revisiting.
+
 ### 2026-05-18: FA-2 custom kernel -- D-sweep refutes tile-size hypothesis `[ABANDONED]`
 
 **Bottom line:** the cheapest possible test of the FA-2 tile-size
