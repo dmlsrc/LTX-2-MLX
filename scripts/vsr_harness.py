@@ -29,6 +29,16 @@ The VAE decoder defaults track scripts/generate.py's happy path
 (native-conv3d + zero spatial padding) via the encode_modes_harness
 helpers, and chunks are cast to uint8 inside MLX so peak RAM stays
 bounded on long clips.
+
+Known limitation for `--video` on edited footage
+------------------------------------------------
+`--quality balanced` chains previous-frame state through VSR for temporal
+coherence. Across a hard cut that's the wrong context (the "previous
+output" is from the previous shot, not this shot) and can produce
+ghosting around the cut frame. LTX latents are single-shot generations
+with no cuts, so this is moot for `--latent`. For edited MP4s, the
+`VsrSession.reset_temporal_context()` hook is exposed; auto scene-cut
+detection isn't built in.
 """
 
 from __future__ import annotations
@@ -40,25 +50,60 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
 import numpy as np
 from PIL import Image
-
-import AVFoundation as av
-import CoreAudio
-import CoreMedia
-import Foundation
-import libdispatch
-import Quartz
-import VideoToolbox as vt
-
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# PyObjC frameworks — VideoToolbox VSR + AVAssetWriter pipeline. These are
+# only needed by this script and not by the rest of LTX-2-MLX, so they're
+# in the optional 'vsr' dependency group. Install with:
+#     uv pip install '.[vsr]'
+# (or just `uv pip install pyobjc` for everything).
+try:
+    import AVFoundation as av
+    import CoreAudio
+    import CoreMedia
+    import Foundation
+    import libdispatch
+    import Quartz
+    import VideoToolbox as vt
+    _PYOBJC_IMPORT_ERROR: ImportError | None = None
+except ImportError as _e:
+    av = CoreAudio = CoreMedia = Foundation = libdispatch = Quartz = vt = None  # type: ignore
+    _PYOBJC_IMPORT_ERROR = _e
+
+
+def _require_pyobjc() -> None:
+    if _PYOBJC_IMPORT_ERROR is not None:
+        raise SystemExit(
+            "vsr_harness requires PyObjC frameworks (VideoToolbox / AVFoundation / "
+            "CoreMedia / CoreAudio / Quartz / Foundation / libdispatch).\n"
+            "Install the optional 'vsr' extra:\n"
+            "    uv pip install '.[vsr]'\n"
+            "or install pyobjc directly:\n"
+            "    uv pip install pyobjc\n"
+            f"\nUnderlying ImportError: {_PYOBJC_IMPORT_ERROR}"
+        )
+
 
 NATIVE_FPS = 24.0
+
+# CMTime base for video PTS. 24000 lands bit-exact on 24/25/30/48/50/60 and
+# is exact for 23.976 (frame_duration=1001) — the NTSC base. Bigger than 600
+# (which doesn't divide NTSC rates) and chosen to keep PTS math in ints.
+VIDEO_TIME_SCALE = 24000
+
+
+def _frame_pts(frame_index: int, fps: float) -> Any:
+    """Build a CMTime for a given video frame index using VIDEO_TIME_SCALE."""
+    frame_duration = int(round(VIDEO_TIME_SCALE / float(fps)))
+    return CoreMedia.CMTimeMake(frame_index * frame_duration, VIDEO_TIME_SCALE)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +186,20 @@ def _rgb_to_pixel_buffer(frame: np.ndarray, pb: Any) -> None:
         _write_fp16_rgba_to_buffer(rgba_fp16, pb)
         return
 
-    # NV12 path — uint8 RGB only.
+    # NV12 path. Source can be either uint8 RGB (from --video / ffmpeg) or
+    # fp16 RGBA (from --latent / chunk_to_rgba_fp16). For fp16 input we use
+    # kCIFormatRGBAh so CIContext sees the full precision and does the
+    # single RGB->YUV quantization at NV12 render time (one quant in YUV
+    # space). For uint8 input the source is already quantized upstream.
+    if frame.dtype == np.float16:
+        h, w, _ = frame.shape
+        data = Foundation.NSData.dataWithBytes_length_(frame.tobytes(), frame.nbytes)
+        ci_image = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
+            data, w * 8, (w, h), Quartz.kCIFormatRGBAh, _srgb_colorspace()
+        )
+        _ci_context_singleton().render_toCVPixelBuffer_(ci_image, pb)
+        return
+
     h, w, _ = frame.shape
     rgba = np.empty((h, w, 4), dtype=np.uint8)
     rgba[..., 0:3] = frame
@@ -227,11 +285,12 @@ def _validate_combination(w: int, h: int, scale: int, quality: str) -> None:
 class VsrSession:
     """Per-frame VSR with the previous-frame chain held across chunks."""
 
-    def __init__(self, in_w: int, in_h: int, scale: int, quality: str):
+    def __init__(self, in_w: int, in_h: int, scale: int, quality: str, fps: float = 24.0):
         _validate_combination(in_w, in_h, scale, quality)
         self.in_w, self.in_h = in_w, in_h
         self.out_w, self.out_h = in_w * scale, in_h * scale
         self.quality = quality
+        self.fps = float(fps)
 
         if quality == "fast":
             self.config = vt.VTLowLatencySuperResolutionScalerConfiguration.alloc(
@@ -306,6 +365,19 @@ class VsrSession:
                 return pb
         return _make_pixel_buffer_from_attrs(self.out_w, self.out_h, self.dst_attrs)
 
+    def reset_temporal_context(self) -> None:
+        """Drop the previous-frame chain. Use at scene cuts on --video input.
+
+        balanced mode (HighQuality Video) feeds the previous source + previous
+        output frame into VSR for temporal coherence. Across a hard cut that's
+        the wrong context and can produce ghosting / smear around the cut
+        frame. For LTX-generated clips this is moot — they're single-shot
+        generations with no cuts. For arbitrary MP4 input, call this at known
+        cut boundaries before the next `upscale_to_buffer`.
+        """
+        self._prev_src_frame = None
+        self._prev_dst_frame = None
+
     def close(self) -> None:
         if self.processor is not None:
             self.processor.endSession()
@@ -315,7 +387,7 @@ class VsrSession:
         src_pb = self._make_src_buffer()
         _rgb_to_pixel_buffer(frame, src_pb)
         dst_pb = self._make_dst_buffer()
-        pts = CoreMedia.CMTimeMake(frame_index, int(NATIVE_FPS))
+        pts = _frame_pts(frame_index, self.fps)
         src_frame = vt.VTFrameProcessorFrame.alloc().initWithBuffer_presentationTimeStamp_(src_pb, pts)
         dst_frame = vt.VTFrameProcessorFrame.alloc().initWithBuffer_presentationTimeStamp_(dst_pb, pts)
 
@@ -352,6 +424,82 @@ class VsrSession:
 # Input sources — chunk iterators
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Scene-cut detection. Used to reset VSR's previous-frame chain on hard cuts
+# in --video input, so balanced (HQ Video) doesn't smear across a cut.
+# ---------------------------------------------------------------------------
+
+def _to_uint8_rgb(frame: np.ndarray) -> np.ndarray:
+    """Coerce a frame to (H, W, 3) uint8 for thumbnail / histogram work."""
+    if frame.dtype == np.float16 or frame.dtype == np.float32:
+        rgb = np.clip(frame[..., :3] * 255.0, 0, 255).astype(np.uint8)
+    elif frame.shape[-1] == 4:
+        rgb = frame[..., :3]
+    else:
+        rgb = frame
+    return rgb
+
+
+def _frame_thumbnail(frame: np.ndarray, target_size: int = 32) -> np.ndarray:
+    rgb = _to_uint8_rgb(frame)
+    h, w = rgb.shape[:2]
+    step_h = max(1, h // target_size)
+    step_w = max(1, w // target_size)
+    return np.ascontiguousarray(rgb[::step_h, ::step_w])
+
+
+def _frame_histogram(frame: np.ndarray, bins: int = 32) -> np.ndarray:
+    rgb = _to_uint8_rgb(frame)
+    hists = [np.histogram(rgb[..., c], bins=bins, range=(0, 256))[0] for c in range(3)]
+    return np.concatenate(hists).astype(np.float32)
+
+
+class CutDetector:
+    """Detects hard cuts between consecutive frames. Modes:
+
+    "off"    no-op
+    "simple" downsampled-pixel mean absolute difference. ~1 ms/frame.
+             threshold ~0.2-0.35 typical (fraction of full-scale).
+    "hist"   per-channel 32-bin histogram chi-squared distance. ~3 ms/frame.
+             threshold ~0.4-0.8 typical (normalized chi-squared).
+
+    Both report False for the very first frame (no previous to compare).
+    False positives reset VSR's temporal context for one frame, which is
+    visually invisible. False negatives let one cut ghost — tune threshold
+    down if you see ghosting.
+    """
+
+    def __init__(self, mode: str, threshold: float):
+        self.mode = mode
+        self.threshold = float(threshold)
+        self._prev: np.ndarray | None = None
+
+    def is_cut(self, frame: np.ndarray) -> bool:
+        if self.mode == "off":
+            return False
+        if self.mode == "simple":
+            curr = _frame_thumbnail(frame)
+            if self._prev is None:
+                self._prev = curr
+                return False
+            diff = np.abs(curr.astype(np.int16) - self._prev.astype(np.int16))
+            mad = diff.mean() / 255.0
+            self._prev = curr
+            return bool(mad > self.threshold)
+        if self.mode == "hist":
+            curr = _frame_histogram(frame)
+            if self._prev is None:
+                self._prev = curr
+                return False
+            a, b = self._prev, curr
+            eps = 1e-6
+            chi2 = ((a - b) ** 2 / (a + b + eps)).sum()
+            norm = chi2 / (a.sum() + eps)
+            self._prev = curr
+            return bool(norm > self.threshold)
+        raise ValueError(f"Unknown cut-detect mode: {self.mode!r}")
+
+
 def chunk_to_rgba_fp16(chunk: Any, mx_mod: Any) -> np.ndarray:
     """(B,3,T,H,W) bf16 in [-1,1] -> (T,H,W,4) fp16 in [0,1] with alpha=1.
 
@@ -386,26 +534,15 @@ def latent_dims(latent: Any) -> tuple[int, int, int]:
     return n_frames, height, width
 
 
-def iter_latent_chunks(
-    latent: Any,
-    decoder: Any,
-    *,
-    backend: str,
-    mx_mod: Any,
-    output_format: str = "uint8_rgb",
-) -> Iterator[np.ndarray]:
-    """Yield decoded chunks. output_format selects the conversion:
-       "uint8_rgb"  -> (T,H,W,3) uint8  (for LowLatency VSR / NV12 source)
-       "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
-    """
-    from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_tiled
-    from LTX_2_MLX.model.video_vae.simple_decoder import decode_latent
-    from scripts.encode_modes_harness import chunk_to_uint8
+def plan_vae_tiling(latent: Any, backend: str) -> tuple[Any, int, str]:
+    """Decide the tiling cfg + chunk count up front.
 
-    if output_format == "fp16_rgba":
-        convert = chunk_to_rgba_fp16
-    else:
-        convert = chunk_to_uint8
+    Returns (cfg, n_chunks, human_description). `cfg` is the TilingConfig
+    or None for single-shot decode. Pure CPU/dim arithmetic — no GPU work —
+    so it's cheap to call before any tqdm bar starts (which is what avoids
+    clobbering the bar with VAE tiling status mid-stream).
+    """
+    from LTX_2_MLX.model.video_vae.tiling import TilingConfig
 
     n_frames, height, width = latent_dims(latent)
     cfg = TilingConfig.auto(
@@ -413,10 +550,54 @@ def iter_latent_chunks(
         decoder_backend=backend,
     )
     if cfg is None:
-        print("VAE tiling: off (auto picked single-shot decode for this backend/shape)")
-        # Converter does its own mx.eval; no need to force a separate sync
-        # on the lazy `video` array.
-        video = decode_latent(latent, decoder)
+        return cfg, 1, f"off (single-shot decode of {n_frames} frames)"
+
+    sp = cfg.spatial_config
+    tp = cfg.temporal_config
+    spatial_desc = (
+        f"spatial tile={sp.tile_size_in_pixels} overlap={sp.tile_overlap_in_pixels}"
+        if sp else "no spatial"
+    )
+    temporal_desc = (
+        f"temporal tile={tp.tile_size_in_frames} overlap={tp.tile_overlap_in_frames}"
+        if tp else "no temporal"
+    )
+    if tp is not None:
+        tile = tp.tile_size_in_frames
+        overlap = tp.tile_overlap_in_frames
+        step = max(1, tile - overlap)
+        n_chunks = max(1, -(-(n_frames - overlap) // step))
+    else:
+        n_chunks = 1
+    return cfg, n_chunks, f"{spatial_desc}, {temporal_desc}"
+
+
+def iter_latent_chunks(
+    latent: Any,
+    decoder: Any,
+    *,
+    cfg: Any,
+    mx_mod: Any,
+    output_format: str = "uint8_rgb",
+) -> Iterator[np.ndarray]:
+    """Yield decoded chunks. output_format selects the conversion:
+       "uint8_rgb"  -> (T,H,W,3) uint8  (for LowLatency VSR / NV12 source)
+       "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
+
+    Silent: takes the tiling cfg pre-computed by plan_vae_tiling() so the
+    outer tqdm bar isn't clobbered by mid-stream prints.
+    """
+    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
+    from LTX_2_MLX.model.video_vae.simple_decoder import decode_latent
+    from scripts.encode_modes_harness import chunk_to_uint8
+
+    convert = chunk_to_rgba_fp16 if output_format == "fp16_rgba" else chunk_to_uint8
+
+    if cfg is None:
+        # Single-shot path. Ask decode_latent for the raw float (B, C, T, H, W)
+        # output so the converter can quantize at the destination format
+        # instead of paying an 8-bit round-trip inside decode_latent.
+        video = decode_latent(latent, decoder, dtype=mx_mod.bfloat16)
         yield convert(video, mx_mod)
         del video
         gc.collect()
@@ -426,19 +607,7 @@ def iter_latent_chunks(
             pass
         return
 
-    sp = cfg.spatial_config
-    tp = cfg.temporal_config
-    spatial_desc = (
-        f"spatial tile={sp.tile_size_in_pixels} overlap={sp.tile_overlap_in_pixels}"
-        if sp else "no spatial tiling"
-    )
-    temporal_desc = (
-        f"temporal tile={tp.tile_size_in_frames} overlap={tp.tile_overlap_in_frames}"
-        if tp else "no temporal tiling"
-    )
-    print(f"VAE tiling: {spatial_desc}, {temporal_desc}")
-
-    for chunk in decode_tiled(latent, decoder, cfg, show_progress=True):
+    for chunk in decode_tiled(latent, decoder, cfg, show_progress=False):
         # The converter does its own mx.eval at the end. An extra eval here
         # would just add a sync point and prevent MLX from batching the
         # clip+cast+transpose with the VAE's tail kernels.
@@ -700,7 +869,7 @@ class AVWriter:
 
         if not writer.startWriting():
             raise RuntimeError(f"AVAssetWriter.startWriting failed: {writer.error()}")
-        writer.startSessionAtSourceTime_(CoreMedia.CMTimeMake(0, int(round(fps))))
+        writer.startSessionAtSourceTime_(CoreMedia.CMTimeMake(0, VIDEO_TIME_SCALE))
 
         self.writer = writer
         self.video_input = video_input
@@ -777,7 +946,7 @@ class AVWriter:
 
     def append(self, pb: Any) -> None:
         self._wait_for_ready(self.video_input, "video")
-        pts = CoreMedia.CMTimeMake(self.frame_count, int(round(self.fps)))
+        pts = _frame_pts(self.frame_count, self.fps)
         if not self.adaptor.appendPixelBuffer_withPresentationTime_(pb, pts):
             raise RuntimeError(
                 f"[{self.label}] appendPixelBuffer failed at frame {self.frame_count}: "
@@ -794,9 +963,7 @@ class AVWriter:
                     f"[{self.label}] audio pump didn't finish (progress="
                     f"{self._audio_progress[0]}/{self.audio_track.n_samples})"
                 )
-        self.writer.endSessionAtSourceTime_(
-            CoreMedia.CMTimeMake(self.frame_count, int(round(self.fps)))
-        )
+        self.writer.endSessionAtSourceTime_(_frame_pts(self.frame_count, self.fps))
         done = threading.Event()
         self.writer.finishWritingWithCompletionHandler_(lambda: done.set())
         done.wait()
@@ -826,19 +993,35 @@ def _make_bgra_pool_buffer(adaptor: Any, w: int, h: int) -> Any:
     return pb
 
 
-def _render_comparison_buffer(pre_rgb: np.ndarray, post_pb: Any, scale: int, dest_pb: Any) -> None:
+def _render_comparison_buffer(pre_frame: np.ndarray, post_pb: Any, scale: int, dest_pb: Any) -> None:
     """Side-by-side: NEAREST-upscaled pre on the left, VSR post on the right.
 
     Pre is upscaled in numpy with np.repeat (true NEAREST). Both halves are then
     composited via CoreImage and rendered into dest_pb in one GPU pass.
+
+    Accepts pre as either (H,W,3) uint8 RGB (LL / --video path) or (H,W,4)
+    fp16 RGBA (HQ path with --vae-tiling). Promotes uint8 inputs to RGBA8 for
+    CIImage and converts fp16 to uint8 for the comparison's BGRA destination.
     """
-    in_h, in_w, _ = pre_rgb.shape
+    in_h, in_w = pre_frame.shape[:2]
     out_w, out_h = in_w * scale, in_h * scale
 
-    pre_up = np.repeat(np.repeat(pre_rgb, scale, axis=0), scale, axis=1)
-    rgba = np.empty((out_h, out_w, 4), dtype=np.uint8)
-    rgba[..., 0:3] = pre_up
-    rgba[..., 3] = 255
+    pre_up = np.repeat(np.repeat(pre_frame, scale, axis=0), scale, axis=1)
+    if pre_up.dtype == np.float16 or pre_up.dtype == np.float32:
+        # fp16/fp32 [0,1] RGBA -> uint8 RGBA
+        rgba = np.clip(pre_up * 255.0, 0, 255).astype(np.uint8)
+        if rgba.shape[-1] == 3:
+            rgba_full = np.empty((out_h, out_w, 4), dtype=np.uint8)
+            rgba_full[..., 0:3] = rgba
+            rgba_full[..., 3] = 255
+            rgba = rgba_full
+    else:
+        rgba = np.empty((out_h, out_w, 4), dtype=np.uint8)
+        if pre_up.shape[-1] == 4:
+            rgba[:] = pre_up
+        else:
+            rgba[..., 0:3] = pre_up
+            rgba[..., 3] = 255
     data = Foundation.NSData.dataWithBytes_length_(rgba.tobytes(), rgba.nbytes)
     pre_ci = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
         data, out_w * 4, (out_w, out_h), Quartz.kCIFormatRGBA8, _srgb_colorspace(),
@@ -902,12 +1085,19 @@ def _decode_audio_track(
 def run(args: argparse.Namespace) -> None:
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
-    pre_dir = out_root / "pre"
-    post_dir = out_root / "post"
+    # Mirror generate.py's naming: <prefix>_<YYYYMMDD_HHMMSS> as the file stem,
+    # then suffix per artifact (post, comparison, audio, cuts, pre/, post/).
+    # Same path convention so VSR outputs sit alongside generate.py outputs
+    # in the same DIFFUSERS_OUTPUT_DIR without colliding.
+    from scripts.generate import sanitize_output_prefix
+    stem = f"{sanitize_output_prefix(args.output_prefix)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    pre_dir = out_root / f"{stem}_pre"
+    post_dir = out_root / f"{stem}_post"
     if args.save_pre_frames:
         pre_dir.mkdir(parents=True, exist_ok=True)
     if args.save_post_frames:
         post_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[setup] output stem: {stem}")
 
     audio_track: AudioTrack | None = None
 
@@ -932,7 +1122,7 @@ def run(args: argparse.Namespace) -> None:
             audio_track = _decode_audio_track(audio_latent, args.weights, compute_dtype)
             print(f"[setup] audio decode in {time.perf_counter() - t:.2f}s")
             if args.save_audio_sidecar:
-                sidecar = out_root / "audio.wav"
+                sidecar = out_root / f"{stem}_audio.wav"
                 audio_track.save_wav(sidecar)
                 print(f"[setup] audio sidecar: {sidecar}")
 
@@ -945,16 +1135,28 @@ def run(args: argparse.Namespace) -> None:
         print(f"[setup] video VAE loaded in {time.perf_counter() - t:.2f}s")
         total_frames, in_h, in_w = latent_dims(latent)
         fps = args.fps
-        chunk_format = "fp16_rgba" if args.quality in ("balanced", "high") else "uint8_rgb"
+        # Always carry VAE output as fp16 RGBA from MLX through to the VSR
+        # source upload. Quantization should happen at the destination format,
+        # not earlier. For HQ VSR (RGBAHalf source) that means no quant until
+        # the HEVC encoder; for LL VSR (NV12 source) it means CIContext does
+        # the single 8-bit YUV quantization at render time (one step in YUV
+        # space, not two — one in RGB then one in YUV).
+        chunk_format = "fp16_rgba"
+        if args.vae_tiling == "off":
+            vae_cfg, n_vae_chunks, vae_tiling_desc = None, 1, "off (forced single-shot decode)"
+        else:
+            vae_cfg, n_vae_chunks, vae_tiling_desc = plan_vae_tiling(latent, args.vae_decoder_backend)
+        print(f"VAE tiling: {vae_tiling_desc} ({n_vae_chunks} chunk{'s' if n_vae_chunks != 1 else ''})")
         chunks = iter_latent_chunks(
             latent, decoder,
-            backend=args.vae_decoder_backend, mx_mod=mx,
+            cfg=vae_cfg, mx_mod=mx,
             output_format=chunk_format,
         )
     else:
         print(f"Reading video: {args.video}")
         in_w, in_h, fps, total_frames = probe_video(Path(args.video))
         chunks = iter_video_chunks(Path(args.video), in_w, in_h, chunk_size=args.video_chunk_size)
+        n_vae_chunks = None  # no VAE on --video path
 
     out_w, out_h = in_w * args.scale, in_h * args.scale
     profile = _pick_hevc_profile(args.quality, args.encode_chroma)
@@ -967,7 +1169,18 @@ def run(args: argparse.Namespace) -> None:
     print(f"Encoder: HEVC profile={profile} q={args.quality_setting} "
           f"audio={args.audio_codec if audio_track else 'none'}")
 
-    session = VsrSession(in_w, in_h, scale=args.scale, quality=args.quality)
+    session = VsrSession(in_w, in_h, scale=args.scale, quality=args.quality, fps=fps)
+
+    cut_detector: CutDetector | None = None
+    cut_log = None
+    if args.cut_detect != "off":
+        cut_detector = CutDetector(args.cut_detect, args.cut_threshold)
+        if args.cut_log:
+            cut_log = open(args.cut_log, "w")
+        print(
+            f"Cut detector: mode={args.cut_detect} threshold={args.cut_threshold}"
+            + (f", log={args.cut_log}" if args.cut_log else "")
+        )
 
     audio_kwargs: dict[str, Any] = {}
     if audio_track is not None:
@@ -976,7 +1189,7 @@ def run(args: argparse.Namespace) -> None:
     post_writer: AVWriter | None = None
     if not args.no_post_mp4:
         post_writer = AVWriter(
-            out_root / "post.mp4",
+            out_root / f"{stem}_post.mp4",
             width=out_w, height=out_h, fps=fps,
             source_pixel_format=_resolve_pixel_format(session.dst_attrs),
             profile=profile,
@@ -994,7 +1207,7 @@ def run(args: argparse.Namespace) -> None:
     comparison_writer: AVWriter | None = None
     if args.comparison:
         comparison_writer = AVWriter(
-            out_root / "comparison.mp4",
+            out_root / f"{stem}_comparison.mp4",
             width=2 * out_w, height=out_h, fps=fps,
             source_pixel_format=PIX_BGRA,
             profile=profile,
@@ -1005,6 +1218,30 @@ def run(args: argparse.Namespace) -> None:
 
     processed = 0
     t_total = time.perf_counter()
+    pbar_total = (
+        min(total_frames, args.max_frames)
+        if (total_frames and args.max_frames is not None) else
+        (args.max_frames or total_frames or None)
+    )
+    # Two stacked bars: VAE chunks (one tick per ~16s GPU pass) and VSR frames
+    # (one tick per ~140ms). Both with ascii / ncols / mininterval matching
+    # generate.py — keeps Terminal.app from re-rasterizing at 10 Hz while
+    # MLX is mid-flight. Drop the VAE bar entirely for --video (no VAE).
+    # ascii=" #" uses a two-state palette (space / hash) instead of the
+    # default ascii=True palette (which prints digits 1-9 for fractional
+    # cell fill, like "##########3"). Slightly coarser, much cleaner-looking.
+    _tqdm_kwargs = dict(ncols=80, ascii=" #", mininterval=2.0, leave=True)
+    vae_pbar = None
+    if n_vae_chunks is not None:
+        vae_pbar = tqdm(
+            total=n_vae_chunks, unit="chunk", desc="VAE chunks",
+            position=0, **_tqdm_kwargs,
+        )
+    vsr_pbar = tqdm(
+        total=pbar_total, unit="frame", desc="VSR frames",
+        position=1 if vae_pbar is not None else 0,
+        smoothing=0.1, **_tqdm_kwargs,
+    )
     try:
         for chunk in chunks:
             t_h, t_w = chunk.shape[1], chunk.shape[2]
@@ -1012,10 +1249,21 @@ def run(args: argparse.Namespace) -> None:
                 raise RuntimeError(
                     f"chunk dims {t_w}x{t_h} don't match VSR config {in_w}x{in_h}"
                 )
+            if vae_pbar is not None:
+                vae_pbar.update(1)
             for i in range(chunk.shape[0]):
                 if args.max_frames is not None and processed >= args.max_frames:
                     break
                 src_frame = chunk[i]
+
+                # Reset VSR's previous-frame state at hard cuts so balanced
+                # mode doesn't smear across the cut.
+                if cut_detector is not None and cut_detector.is_cut(src_frame):
+                    session.reset_temporal_context()
+                    if cut_log is not None:
+                        cut_log.write(f"{processed}\n")
+                        cut_log.flush()
+
                 vsr_pb = session.upscale_to_buffer(src_frame, processed)
 
                 if post_writer is not None:
@@ -1029,27 +1277,42 @@ def run(args: argparse.Namespace) -> None:
                     comparison_writer.append(comp_pb)
 
                 if args.save_pre_frames:
-                    Image.fromarray(src_frame).save(pre_dir / f"frame_{processed:05d}.png")
+                    # src_frame is uint8 RGB (LL / --video) or fp16 RGBA (HQ
+                    # latent). Coerce to uint8 RGB for the PNG sidecar.
+                    if src_frame.dtype != np.uint8:
+                        pre_rgb_u8 = np.clip(src_frame[..., :3] * 255.0, 0, 255).astype(np.uint8)
+                    else:
+                        pre_rgb_u8 = src_frame if src_frame.shape[-1] == 3 else src_frame[..., :3]
+                    Image.fromarray(pre_rgb_u8).save(pre_dir / f"frame_{processed:05d}.png")
                 if args.save_post_frames:
                     Image.fromarray(_pixel_buffer_to_rgb(vsr_pb)).save(
                         post_dir / f"frame_{processed:05d}.png"
                     )
 
                 processed += 1
-                if processed % 16 == 0:
-                    elapsed = time.perf_counter() - t_total
-                    rate = processed / elapsed if elapsed > 0 else 0
-                    print(f"  pipeline: {processed} frames ({rate:.2f} fps)")
+                vsr_pbar.update(1)
 
             if args.max_frames is not None and processed >= args.max_frames:
                 break
             del chunk
             gc.collect()
     finally:
+        # Close in position order (top-down) so tqdm's cursor lands cleanly
+        # below the last bar. Closing bottom-up causes the cursor to wrap
+        # back over the top bar and the final terminal state looks swapped.
+        if vae_pbar is not None:
+            vae_pbar.close()
+        vsr_pbar.close()
+        # Push past both bars so the "Processed N frames" summary doesn't
+        # overwrite the VSR bar.
+        sys.stdout.write("\n")
+        sys.stdout.flush()
         session.close()
         for writer in (post_writer, comparison_writer):
             if writer is not None:
                 writer.finish()
+        if cut_log is not None:
+            cut_log.close()
 
     elapsed = time.perf_counter() - t_total
     rate = processed / elapsed if elapsed > 0 else 0
@@ -1092,9 +1355,51 @@ def main() -> None:
         default="zero",
         help="VAE spatial padding. zero matches generate.py's default.",
     )
+    parser.add_argument(
+        "--vae-tiling",
+        choices=["auto", "off"],
+        default="auto",
+        help=(
+            "auto (default) lets TilingConfig.auto_native_conv3d pick tile "
+            "size from RAM + int32 conv3d limits — same policy as generate.py. "
+            "off forces decode_latent in a single pass (no temporal chunks). "
+            "Faster end-to-end when it fits, but peak RAM scales with full "
+            "frame count; expect OOM on long clips."
+        ),
+    )
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--fps", type=float, default=NATIVE_FPS)
-    parser.add_argument("--scale", type=int, choices=[2, 4], default=2)
+    parser.add_argument(
+        "--output-prefix",
+        default="vsr",
+        help=(
+            "Filename prefix for the timestamped outputs. The MP4s, optional "
+            "audio sidecar, and pre/post PNG dirs all share a single "
+            "<prefix>_<YYYYMMDD_HHMMSS> stem so a run's artifacts cluster "
+            "together and don't collide with prior runs in the same dir. "
+            "Matches scripts/generate.py's naming convention."
+        ),
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=NATIVE_FPS,
+        help=(
+            "Playback fps for --latent (latents don't carry an fps; default "
+            f"{NATIVE_FPS} matches generate.py). Ignored for --video — the "
+            "input file's r_frame_rate is honored instead."
+        ),
+    )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        choices=[2, 4],
+        default=None,
+        help=(
+            "Upscale factor. If omitted, inferred from --quality: 2 for fast, "
+            "4 for balanced/high. VideoToolbox enforces (scale, quality) pairing — "
+            "fast only supports 2x, balanced/high only support 4x."
+        ),
+    )
     parser.add_argument(
         "--quality",
         choices=["fast", "balanced", "high"],
@@ -1148,6 +1453,29 @@ def main() -> None:
         default=None,
         help="Process at most N frames (debugging).",
     )
+    parser.add_argument(
+        "--cut-detect",
+        choices=["off", "simple", "hist"],
+        default="off",
+        help=(
+            "Reset VSR's previous-frame chain at hard cuts. "
+            "off = never reset (correct for single-shot LTX latents). "
+            "simple = downsampled-pixel MAD, ~1ms/frame, threshold ~0.25. "
+            "hist = per-channel histogram chi-squared, ~3ms/frame, threshold ~0.5. "
+            "Only meaningful for edited --video input in balanced/high modes."
+        ),
+    )
+    parser.add_argument(
+        "--cut-threshold",
+        type=float,
+        default=0.25,
+        help="Cut-detect threshold (mode-dependent). See --cut-detect.",
+    )
+    parser.add_argument(
+        "--cut-log",
+        default=None,
+        help="If set, write detected cut frame indices to this file (one per line).",
+    )
     parser.add_argument("--save-pre-frames", action="store_true",
                         help="Also write pre/*.png (off by default — comparison.mp4 has the same data).")
     parser.add_argument("--save-post-frames", action="store_true",
@@ -1158,9 +1486,13 @@ def main() -> None:
                         help="Also write a side-by-side comparison.mp4 "
                              "(NEAREST-upscaled pre vs VSR post). Off by default.")
     args = parser.parse_args()
+    _require_pyobjc()
 
     if args.latent and not args.weights:
         parser.error("--latent requires --weights")
+
+    if args.scale is None:
+        args.scale = 2 if args.quality == "fast" else 4
 
     run(args)
 

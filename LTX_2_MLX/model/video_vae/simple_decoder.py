@@ -722,6 +722,7 @@ def decode_latent(
     key: Optional[mx.array] = None,
     temporal_chunk_size: int = 7,
     temporal_overlap: int = 2,
+    dtype: Optional[Any] = None,
 ) -> mx.array:
     """
     Decode latent to video frames.
@@ -739,9 +740,30 @@ def decode_latent(
         key: Optional random key for deterministic decoding (reserved for future use).
         temporal_chunk_size: Max latent frames per chunk (default 7, proven clean).
         temporal_overlap: Overlap in latent frames between chunks for blending (default 2).
+        dtype: Output precision.
+               None (default) or mx.uint8: clip + scale to [0, 255], cast to
+               uint8, return (T, H, W, 3). The common case for ffmpeg / PNG
+               consumers — backward-compatible.
+               A float type (mx.float16 / mx.float32 / mx.bfloat16): return
+               the raw decoder output (B, C, T, H, W) in [-1, 1] cast to that
+               dtype. Lets higher-precision consumers (VSR's RGBAHalf source,
+               10-bit HEVC, 16-bit ProRes) quantize at their own destination
+               format instead of paying an 8-bit round-trip here.
+
+               TODO: migrate the existing callers to pass dtype explicitly
+               where it matters for output fidelity. Specifically the
+               higher-bit-depth tiers in scripts/encode_modes_harness.py
+               (h265_10bit_*, h265_rgb_lossless, prores_*) and the pipelines
+               under LTX_2_MLX/pipelines/ that hand their decoded video into
+               video_encoder.encode_video with tier=hq / export / reference —
+               those all currently take uint8 here and then promote back to
+               10/16-bit downstream, wasting precision the decoder produced.
+               Web/default tiers (8-bit YUV 4:2:0) should keep the uint8
+               default since their final destination is 8-bit anyway.
 
     Returns:
-        Video frames as uint8 (T, H, W, 3) in [0, 255].
+        See `dtype`. uint8 returns (T, H, W, 3) in [0, 255]; a float dtype
+        returns the raw (B, C, T, H, W) decoder output in [-1, 1].
     """
     # Add batch dim if needed
     if latent.ndim == 4:
@@ -831,12 +853,19 @@ def decode_latent(
             # Trim to exact expected length
             video = video[:, :, :total_pixel_frames, :, :]
 
-    # Convert to uint8: output is in [-1, 1] (matching PyTorch)
-    video = mx.clip((video + 1) / 2, 0, 1) * 255
-    video = video.astype(mx.uint8)
-
-    # Rearrange: (B, C, T, H, W) -> (T, H, W, C)
-    video = video[0]  # Remove batch
-    video = video.transpose(1, 2, 3, 0)
-
-    return video
+    # Honor the requested output dtype. Default (None / mx.uint8) preserves
+    # the legacy ffmpeg-friendly (T, H, W, 3) uint8 format. Float dtypes get
+    # the raw (B, C, T, H, W) decoder output untouched so the consumer can
+    # quantize at its own destination format.
+    if dtype is None or dtype == mx.uint8:
+        video = mx.clip((video + 1) / 2, 0, 1) * 255
+        video = video.astype(mx.uint8)
+        video = video[0]                       # (C, T, H, W)
+        video = video.transpose(1, 2, 3, 0)    # (T, H, W, C)
+        return video
+    if dtype in (mx.float16, mx.float32, mx.bfloat16):
+        return video.astype(dtype) if dtype != video.dtype else video
+    raise ValueError(
+        f"decode_latent dtype must be None / mx.uint8 / mx.float16 / "
+        f"mx.float32 / mx.bfloat16; got {dtype!r}"
+    )

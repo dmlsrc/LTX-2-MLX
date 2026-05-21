@@ -56,6 +56,18 @@ test = [
     "pytest-timeout>=2.1.0",
     "torch>=2.9.1",
 ]
+vsr = [
+    # Used only by scripts/vsr_harness.py (VideoToolbox Super Resolution).
+    # macOS 15+ only; install with: uv pip install '.[vsr]'
+    "pyobjc-core>=10.0",
+    "pyobjc-framework-AVFoundation>=10.0",
+    "pyobjc-framework-CoreAudio>=10.0",
+    "pyobjc-framework-CoreMedia>=10.0",
+    "pyobjc-framework-Cocoa>=10.0",     # Foundation
+    "pyobjc-framework-libdispatch>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-VideoToolbox>=10.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/username/LTX-2-MLX"
