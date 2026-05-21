@@ -21,6 +21,7 @@ Submodules expose lower-level helpers:
 
     pixel_buffers   CVPixelBuffer create/read/write, CMTime helpers
     comparison      Side-by-side composite for `comparison.mp4`
+    progress        Phase-accurate stacked progress bars
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from ._compat import autorelease_pool, require_pyobjc
 # point a class is actually constructed (via require_pyobjc in each ctor).
 from .audio import AudioTrack
 from .cut_detect import CutDetector
+from .progress import PhaseBar, StackedPhaseBars
 from .vsr import VsrSession
 from .temporal import VtfrcSession
 from .writer import AVWriter
@@ -40,6 +42,8 @@ __all__ = [
     "AudioTrack",
     "AVWriter",
     "CutDetector",
+    "PhaseBar",
+    "StackedPhaseBars",
     "VsrSession",
     "VtfrcSession",
     "autorelease_pool",

@@ -60,13 +60,13 @@ from typing import Any, Iterator
 
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
 
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from LTX_2_MLX.videotoolbox import (  # noqa: E402
-    AudioTrack, AVWriter, CutDetector, VsrSession, VtfrcSession,
+    AudioTrack, AVWriter, CutDetector, StackedPhaseBars,
+    VsrSession, VtfrcSession,
     autorelease_pool, require_pyobjc,
 )
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb  # noqa: E402
@@ -515,7 +515,12 @@ def run(args: argparse.Namespace) -> None:
             + (f", log={args.cut_log}" if args.cut_log else "")
         )
 
-    # ---- Progress bars (stacked, throttled) --------------------------------
+    # ---- Progress bars (stacked, deferred-start, median-window rate) -------
+    # PhaseBar's clock starts at the first update() and the displayed pace
+    # is the median of the last-N inter-tick intervals; see videotoolbox/
+    # progress.py for the rationale. Plain tqdm gave both stacked bars the
+    # same wall-clock elapsed (= total run time) and inflated the VSR rate
+    # as the VAE-chunk-1 warmup amortized over a growing frame count.
     target_frame_total = total_frames
     if target_frame_total and do_temporal:
         target_frame_total = int(round(total_frames * (target_fps / source_fps)))
@@ -524,18 +529,15 @@ def run(args: argparse.Namespace) -> None:
         if (target_frame_total and args.max_frames is not None) else
         (args.max_frames or target_frame_total or None)
     )
-    _tqdm_kwargs = dict(ncols=80, ascii=" #", mininterval=2.0, leave=True)
-    vae_pbar = None
-    if n_vae_chunks is not None:
-        vae_pbar = tqdm(
-            total=n_vae_chunks, unit="chunk", desc="VAE chunks",
-            position=0, **_tqdm_kwargs,
-        )
-    out_pbar = tqdm(
-        total=pbar_total, unit="frame",
+    bars = StackedPhaseBars()
+    vae_pbar = (
+        bars.add(total=n_vae_chunks, desc="VAE chunks", unit="chunk")
+        if n_vae_chunks is not None else None
+    )
+    out_pbar = bars.add(
+        total=pbar_total,
         desc="output frames" if do_temporal else "VSR frames",
-        position=1 if vae_pbar is not None else 0,
-        smoothing=0.1, **_tqdm_kwargs,
+        unit="frame",
     )
 
     # ---- Pipeline loop -----------------------------------------------------
@@ -560,17 +562,6 @@ def run(args: argparse.Namespace) -> None:
                 )
             if vae_pbar is not None:
                 vae_pbar.update(1)
-                # When VAE is fully drained, log the actual elapsed VAE time
-                # via tqdm.write (which prints above the bars, not over them)
-                # since tqdm's bar-internal "elapsed" runs from bar creation
-                # to bar close — i.e., until end-of-run for both bars — so
-                # the displayed time on the bar itself is misleading.
-                if (n_vae_chunks is not None
-                        and vae_pbar.n >= n_vae_chunks
-                        and not getattr(vae_pbar, "_vae_done_logged", False)):
-                    vae_elapsed = vae_pbar.format_dict.get("elapsed", 0.0)
-                    tqdm.write(f"VAE chunks: done in {vae_elapsed:.1f}s")
-                    vae_pbar._vae_done_logged = True
             for i in range(chunk_len):
                 if args.max_frames is not None and appended >= args.max_frames:
                     break
@@ -662,11 +653,7 @@ def run(args: argparse.Namespace) -> None:
             del chunk
             gc.collect()
     finally:
-        if vae_pbar is not None:
-            vae_pbar.close()
-        out_pbar.close()
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        bars.close()
         if vtfrc is not None:
             vtfrc.close()
         session.close()
