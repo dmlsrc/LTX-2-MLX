@@ -412,6 +412,14 @@ def run(args: argparse.Namespace) -> None:
                 sidecar = out_root / f"{stem}_audio.wav"
                 audio_track.save_wav(sidecar)
                 print(f"[setup] audio sidecar: {sidecar}")
+        # The audio latent is consumed at this point; free it (and any other
+        # post-audio state) so the Metal heap is clean before VAE decode.
+        del audio_latent
+        gc.collect()
+        try:
+            mx.clear_cache()
+        except Exception:
+            pass
 
         t = time.perf_counter()
         decoder = make_video_decoder_default(
@@ -472,51 +480,68 @@ def run(args: argparse.Namespace) -> None:
     )
 
     # ---- Sessions + writers ------------------------------------------------
-    session = VsrSession(
-        in_w, in_h, mode=args.spatial_mode, fps=source_fps,
-    )
+    # Defer constructing the VSR session, VtfrcSession, and AVWriters until
+    # the *first* VAE chunk has materialized.  These hold Metal resources
+    # — the HQ VSR model in particular pins ~100MB of Metal heap — so
+    # creating them up front would compete with chunk-1 VAE decode for
+    # the same unified-memory pool.  Lazy init via _build_post_pipeline.
+    session: VsrSession | None = None
     vtfrc: VtfrcSession | None = None
-    if do_temporal:
-        vtfrc = VtfrcSession(
-            out_w, out_h,
-            source_fps=source_fps, target_fps=target_fps,
-            mode=args.temporal_mode,
-        )
-
-    audio_kwargs: dict[str, Any] = {}
-    if audio_track is not None:
-        audio_kwargs = {"audio_track": audio_track, "audio_codec": args.audio_codec}
-
     post_writer: AVWriter | None = None
-    if not args.skip_post_mp4:
-        post_writer = AVWriter(
-            out_root / f"{stem}_post.mp4",
-            width=out_w, height=out_h, fps=target_fps,
-            source_pixel_format=_pb.resolve_pixel_format(
-                vtfrc.dst_attrs if vtfrc is not None else session.dst_attrs
-            ),
-            profile=profile,
-            quality=args.encode_quality,
-            label="post",
-            **audio_kwargs,
-        )
-        # Zero-copy from VSR (or VtfrcSession's output) into encoder
-        if vtfrc is not None:
-            vtfrc.use_dst_pool(post_writer.adaptor.pixelBufferPool())
-        else:
-            session.use_dst_pool(post_writer.adaptor.pixelBufferPool())
-
     comparison_writer: AVWriter | None = None
-    if args.comparison:
-        comparison_writer = AVWriter(
-            out_root / f"{stem}_comparison.mp4",
-            width=2 * out_w, height=out_h, fps=target_fps,
-            source_pixel_format=_pb.PIX_BGRA,
-            profile=profile,
-            quality=args.encode_quality,
-            label="comparison",
-            **audio_kwargs,
-        )
+
+    def _build_post_pipeline() -> tuple[
+        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None
+    ]:
+        """Materialize VSR + temporal + writer sessions just-in-time.
+
+        Called on the first chunk so chunk-1 VAE has the Metal heap to
+        itself.  Returns (session, vtfrc, post_writer, comparison_writer);
+        the dst-pool wiring for zero-copy is set up before returning.
+        """
+        s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
+        v: VtfrcSession | None = None
+        if do_temporal:
+            v = VtfrcSession(
+                out_w, out_h,
+                source_fps=source_fps, target_fps=target_fps,
+                mode=args.temporal_mode,
+            )
+        audio_kwargs: dict[str, Any] = {}
+        if audio_track is not None:
+            audio_kwargs = {"audio_track": audio_track, "audio_codec": args.audio_codec}
+
+        pw: AVWriter | None = None
+        if not args.skip_post_mp4:
+            pw = AVWriter(
+                out_root / f"{stem}_post.mp4",
+                width=out_w, height=out_h, fps=target_fps,
+                source_pixel_format=_pb.resolve_pixel_format(
+                    v.dst_attrs if v is not None else s.dst_attrs
+                ),
+                profile=profile,
+                quality=args.encode_quality,
+                label="post",
+                **audio_kwargs,
+            )
+            # Zero-copy from VSR (or VtfrcSession's output) into encoder.
+            if v is not None:
+                v.use_dst_pool(pw.adaptor.pixelBufferPool())
+            else:
+                s.use_dst_pool(pw.adaptor.pixelBufferPool())
+
+        cw: AVWriter | None = None
+        if args.comparison:
+            cw = AVWriter(
+                out_root / f"{stem}_comparison.mp4",
+                width=2 * out_w, height=out_h, fps=target_fps,
+                source_pixel_format=_pb.PIX_BGRA,
+                profile=profile,
+                quality=args.encode_quality,
+                label="comparison",
+                **audio_kwargs,
+            )
+        return s, v, pw, cw
 
     # ---- Cut detector ------------------------------------------------------
     cut_detector: CutDetector | None = None
@@ -577,6 +602,23 @@ def run(args: argparse.Namespace) -> None:
                 )
             if vae_pbar is not None:
                 vae_pbar.update(1)
+            # Lazy init of the post-VAE pipeline.  Doing this *after* chunk 1
+            # materialized keeps the VSR HQ model + AVWriter pixel pool out of
+            # the Metal heap during chunk-1 VAE decode (which is the most
+            # memory-contended step of the run).
+            #
+            # _build_post_pipeline() prints status from VsrSession / AVWriter
+            # constructors; route those through bars.write() so they appear
+            # above the live progress bars instead of stomping mid-line.
+            if session is None:
+                import contextlib
+                import io as _io
+                _buf = _io.StringIO()
+                with contextlib.redirect_stdout(_buf):
+                    session, vtfrc, post_writer, comparison_writer = _build_post_pipeline()
+                msg = _buf.getvalue().rstrip("\n")
+                if msg:
+                    bars.write(msg)
             for i in range(chunk_len):
                 if args.max_frames is not None and appended >= args.max_frames:
                     break
@@ -671,7 +713,8 @@ def run(args: argparse.Namespace) -> None:
         bars.close()
         if vtfrc is not None:
             vtfrc.close()
-        session.close()
+        if session is not None:
+            session.close()
         for writer in (post_writer, comparison_writer):
             if writer is not None:
                 writer.finish()

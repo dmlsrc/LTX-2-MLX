@@ -323,6 +323,46 @@ class StackedPhaseBars:
         self._bars.append(bar)
         return bar
 
+    def write(self, message: str) -> None:
+        """Print `message` above the bar stack without corrupting the bars.
+
+        Same idea as tqdm.write(): erase the live bars, print the message at
+        the position they used to occupy, then redraw the bars in their new
+        position one (or more) lines further down.  The cursor invariant
+        ("one line below the bottom bar") is preserved across the call.
+
+        Multi-line messages are fine — each embedded newline pushes the bars
+        down by one more line.
+
+        No-op pass-through when no bars are active yet (writes to stderr
+        as-is) so callers can use this unconditionally during setup.
+        """
+        if not self._bars:
+            sys.stderr.write(message)
+            if not message.endswith("\n"):
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+            return
+
+        n_bars = self._stack.total
+        # Up to the topmost bar's row, then erase from there to end of screen.
+        # \033[<n>A = move cursor up n lines.  \033[J = erase from cursor to
+        # end of screen.  Together: wipe all bar rows and leave cursor at the
+        # top of the freshly-vacated region.
+        sys.stderr.write(f"\033[{n_bars}A\r\033[J")
+        # Write the message, ensuring it terminates with a newline so the
+        # cursor lands on the line below.
+        sys.stderr.write(message)
+        if not message.endswith("\n"):
+            sys.stderr.write("\n")
+        # Reserve n_bars fresh rows for the bars so the cursor is back at
+        # "one line below the bottom bar" — the invariant render() relies on.
+        sys.stderr.write("\n" * n_bars)
+        sys.stderr.flush()
+        # Force-redraw each bar at its (now-shifted) row.
+        for bar in self._bars:
+            bar._render(force=True)
+
     def close(self) -> None:
         """Close all bars and drop the cursor below the stack. Idempotent."""
         if not self._bars:
