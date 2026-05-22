@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 from ..conditioning.item import ConditioningItem
+from ..conditioning.keyframe import VideoConditionByKeyframeIndex
 from ..conditioning.latent import VideoConditionByLatentIndex
 from ..conditioning.tools import VideoLatentTools
 from ..model.transformer import Modality
@@ -22,7 +23,7 @@ from ..types import LatentState
 
 @dataclass
 class ImageCondition:
-    """An image condition for replacing latent at a specific frame."""
+    """An image condition for first-frame replacement or keyframe guidance."""
 
     image_path: str
     frame_index: int
@@ -109,7 +110,10 @@ def create_image_conditionings(
     width: int,
     dtype: mx.Dtype = mx.float32,
 ) -> List[ConditioningItem]:
-    """Create conditionings that replace latent at specific frame indices.
+    """Create canonical image conditionings.
+
+    The first frame replaces the latent directly. Non-zero frame indices are
+    appended as keyframe tokens, matching the upstream two-stage pipeline.
 
     Args:
         images: List of image conditioning configurations
@@ -135,12 +139,18 @@ def create_image_conditionings(
         encoded_latent = video_encoder(image_tensor)
         mx.eval(encoded_latent)
 
-        # Create conditioning item
-        conditioning = VideoConditionByLatentIndex(
-            latent=encoded_latent,
-            strength=img_cond.strength,
-            latent_idx=img_cond.frame_index,
-        )
+        if img_cond.frame_index == 0:
+            conditioning = VideoConditionByLatentIndex(
+                latent=encoded_latent,
+                strength=img_cond.strength,
+                latent_idx=0,
+            )
+        else:
+            conditioning = VideoConditionByKeyframeIndex(
+                keyframes=encoded_latent,
+                strength=img_cond.strength,
+                frame_idx=img_cond.frame_index,
+            )
         conditionings.append(conditioning)
 
     return conditionings

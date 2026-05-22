@@ -2784,6 +2784,19 @@ def generate_video(
                 "audio_cfg_scale": audio_cfg_scale,
                 "rescale_scale": rescale_scale,
             },
+            # Output-affecting env-var flags.  These aren't CLI parameters but
+            # they materially change the bits the model produces, so capture
+            # them here so post-hoc forensics on a saved run can tell which
+            # mode generated the output.
+            "env_flags": {
+                "LTX_NORMALIZE_AUDIO_NOISE": bool(
+                    os.environ.get("LTX_NORMALIZE_AUDIO_NOISE")
+                ),
+                "LTX_VELOCITY_MODE": bool(os.environ.get("LTX_VELOCITY_MODE")),
+                "LTX_PAD_PROMPT_TO_MAX": (
+                    os.environ.get("LTX_PAD_PROMPT_TO_MAX", "1") != "0"
+                ),
+            },
         }
 
     print(f"\n{'='*50}")

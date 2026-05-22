@@ -13,7 +13,7 @@ import gc
 import os
 import time
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import mlx.core as mx
 import numpy as np
@@ -27,6 +27,7 @@ import numpy as np
 # Falls back to the X0 path automatically when state has a non-uniform mask
 # (image conditioning) or when the wrapped transformer isn't an X0Model.
 _USE_VELOCITY_MODE = bool(os.environ.get("LTX_VELOCITY_MODE"))
+_NORMALIZE_AUDIO_NOISE = bool(os.environ.get("LTX_NORMALIZE_AUDIO_NOISE"))
 
 from .common import (
     ImageCondition,
@@ -1087,6 +1088,8 @@ class OneStagePipeline:
         progress_message: Optional[Callable[[str], None]] = None,
         positive_audio_encoding: Optional[mx.array] = None,
         latent_save_path: Optional[str] = None,
+        stage_1_sigmas: Optional[Sequence[float]] = None,
+        stage_2_sigmas: Optional[Sequence[float]] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate with the distilled AV checkpoint in two stages.
@@ -1124,8 +1127,18 @@ class OneStagePipeline:
         mx.random.seed(config.seed)
         noiser = GaussianNoiser()
         stepper = self.diffusion_step
-        stage_1_sigmas = mx.array(DISTILLED_SIGMA_VALUES)
-        stage_2_sigmas = mx.array(STAGE_2_DISTILLED_SIGMA_VALUES)
+        stage_1_sigmas = mx.array(
+            DISTILLED_SIGMA_VALUES if stage_1_sigmas is None else stage_1_sigmas,
+            dtype=mx.float32,
+        )
+        stage_2_sigmas = mx.array(
+            STAGE_2_DISTILLED_SIGMA_VALUES if stage_2_sigmas is None else stage_2_sigmas,
+            dtype=mx.float32,
+        )
+        if len(stage_1_sigmas) < 2:
+            raise ValueError("stage_1_sigmas must contain at least two sigma values.")
+        if len(stage_2_sigmas) < 2:
+            raise ValueError("stage_2_sigmas must contain at least two sigma values.")
         total_steps = len(stage_1_sigmas) + len(stage_2_sigmas) - 2
         if callback:
             callback(0, total_steps)
@@ -1175,9 +1188,14 @@ class OneStagePipeline:
             audio_tools = self._create_audio_tools(audio_shape)
             audio_state = audio_tools.create_initial_state(dtype=config.dtype)
             audio_state = noiser(audio_state, noise_scale=1.0)
-            audio_state = audio_state.replace(
-                latent=self._channelwise_normalize_audio_noise(audio_state.latent)
+            emit_progress_message(
+                "  Audio noise normalization: "
+                f"{'enabled' if _NORMALIZE_AUDIO_NOISE else 'disabled'}"
             )
+            if _NORMALIZE_AUDIO_NOISE:
+                audio_state = audio_state.replace(
+                    latent=self._channelwise_normalize_audio_noise(audio_state.latent)
+                )
 
         emit_progress_message(
             f"  Distilled stage 1: {len(stage_1_sigmas) - 1} steps at "

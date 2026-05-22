@@ -24,12 +24,6 @@ from .ic_lora import (
     create_image_conditionings,
     create_video_conditionings,
 )
-from .distilled import (
-    DistilledConfig,
-    DistilledPipeline,
-    ImageCondition as DistilledImageCondition,
-    create_distilled_pipeline,
-)
 from .one_stage import (
     OneStageCFGConfig,
     OneStagePipeline,
@@ -65,11 +59,6 @@ __all__ = [
     "load_video_tensor",
     "create_image_conditionings",
     "create_video_conditionings",
-    # Distilled
-    "DistilledConfig",
-    "DistilledPipeline",
-    "DistilledImageCondition",
-    "create_distilled_pipeline",
     # One-stage CFG
     "OneStageCFGConfig",
     "OneStagePipeline",

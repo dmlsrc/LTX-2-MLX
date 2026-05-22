@@ -128,20 +128,83 @@ This is a numerical precision divergence across 48 transformer layers. Audio spe
 - Added mx.eval() after STFT conv1d and conv_post
 - 10-second clips now complete without kernel panic
 
-### Duration-Dependent Amplitude Bug (ACTIVE — Next to Fix)
-- 5-second clip: RMS 5535, peak 31977 — loud, healthy audio, near-perfect speech
-- 10-second clip: RMS 1137, peak 9899 — **5x quieter**, speech mumbles
-- The 10s clip is quiet FROM THE START (second 0: RMS 1467), not just degrading at the end
-- This means the audio latent amplitude scales inversely with duration
-- Something in the pipeline normalizes by number of tokens/frames
-- Most likely in: noise generation, denoising step, or MultiModalGuider
-- Video quality is NOT affected — only audio
+### Duration-Dependent Amplitude Bug (RESOLVED — May 21, 2026)
 
-### Temporal Degradation Pattern (CONFIRMED — partly explained by gate bug)
+**Original symptom (April 2026):**
+- 5-second clip: RMS 5535, peak 31977 — loud, healthy audio, near-perfect speech
+- 10-second clip: RMS 1137, peak 9899 — **5x quieter**, speech mumbles from second 0
+- Audio latent amplitude appeared to scale inversely with duration
+- Video quality unaffected, only audio
+
+**Workaround applied at the time** (commit `3ce9ab7`, April 13 2026):
+`OneStageAVPipeline._channelwise_normalize_audio_noise` was added and called
+unconditionally at stage-1 audio init, whitening the per-channel statistics
+of the audio noise tensor so that long clips wouldn't suffer the amplitude
+collapse.  This made the audio init *not match* the distribution the LTX-2
+audio LoRA was trained on (un-normalized `N(0,1) * sigma_max`, per upstream
+Lightricks `ltx-pipelines/utils/blocks.py`).
+
+**Empirical re-test on May 21, 2026** confirms the underlying bug is no
+longer present and the workaround is no longer needed:
+
+| Mode                                | 20-second clip RMS | Peak | dBFS RMS | Speech burst RMS |
+|-------------------------------------|--------------------|------|----------|------------------|
+| `LTX_NORMALIZE_AUDIO_NOISE=0` (new default) | 588        | 10687 | -34.92  | ~1000-1600       |
+| `LTX_NORMALIZE_AUDIO_NOISE=1` (legacy)      | 608        | 11775 | -34.63  | ~800-1400        |
+| Historical-bug 10s clip (April)             | 1137       | 9899  | —       | mumble level     |
+
+Both modes produce healthy 20-second audio with proper dialog levels, no
+"5× quieter from second 0" pattern.  The per-second RMS trajectories show
+normal silence floors (40-80 RMS) and proper speech bursts (>1000 RMS)
+throughout the clip in both modes — no inverse-duration amplitude scaling.
+
+**Why the bug is gone:** several fixes landed *after* the workaround that
+appear to have removed the original root cause without anyone re-testing:
+- Denoise mask broadcasting `(B,T) → (B,T,1)` (commit `3ce9ab7`, same commit
+  as the workaround — but the broadcast fix likely resolved the latent
+  amplitude scaling issue on its own).
+- Audio VAE decoder corrections (causal axis drop, PixelNorm, weight paths)
+  bringing audio VAE to 0.999 correlation with PyTorch.
+- Vocoder LeakyReLU slope fix (0.1 → 0.01) and native MLX dilation.
+- `av_ca_timestep_scale_multiplier` set to 1000 (was 1) — fixed audio-video
+  cross-attention gate factor.
+
+**Resolution in code** (commit landing May 21, 2026):
+- Channelwise normalization gated behind `LTX_NORMALIZE_AUDIO_NOISE` env var.
+- **Default: OFF.**  Now matches upstream Lightricks input distribution.
+- Set `LTX_NORMALIZE_AUDIO_NOISE=1` to restore legacy MLX behavior for A/B.
+- `env_flags` field in run-log sidecar records which mode produced each
+  output, so post-hoc forensics can identify the regime.
+
+**Why this matters for cross-modal output**, not just audio: the V2.3 AV
+transformer has `a2v` cross-attention layers — changing the audio noise
+init at step 0 propagates through to the video branch.  Observed effect
+on a 20-second bakery prompt at seed=124: character appearance, ambient
+prop layout, and speech tone all shifted coherently between the two
+modes.  Default OFF puts us on the same attractor as a stock Lightricks
+run with the same prompt+seed.
+
+**DO NOT RE-ADD the unconditional normalization without re-validating
+that the duration-amplitude symptom has returned.**  If you suspect it
+has, regenerate a 20-second clip with `LTX_NORMALIZE_AUDIO_NOISE=0` and
+compare per-second RMS against the table above before changing the
+default.
+
+### Temporal Degradation Pattern (RESOLVED — May 21, 2026)
+Historical observation (April 2026):
 - 5 second clip: nearly perfect voice (with 1000x gate fix)
 - 10 second clip: overall 5x quieter + mumbles toward end
 - 20 second clip: degradation from 7-8 seconds onward
-- The gate fix solved speech clarity for short clips; the amplitude bug is separate
+
+Re-tested May 21, 2026 with a 20-second bakery generation
+(`LTX_NORMALIZE_AUDIO_NOISE=0`, distilled two-stage, seed=124): no
+amplitude degradation across the clip duration.  Dialog seconds 8-15
+produce normal RMS bursts (~1000-1600), silence floors are clean
+(~40-80 RMS).  Cumulative effect of the gate fix, denoise broadcast
+fix, audio VAE/vocoder parity fixes, and timestep scale multiplier
+fix appears to have resolved the original temporal degradation along
+with the amplitude collapse.  See the Duration-Dependent Amplitude
+Bug closure note above for the empirical table.
 
 ### Potential Deep-Dive Areas
 - Compare audio latents (pre-VAE-decode) between MLX and ComfyUI for same seed/prompt

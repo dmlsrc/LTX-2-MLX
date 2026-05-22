@@ -146,7 +146,7 @@ python scripts/generate.py "Your prompt" --seed 42
 
 ## Pipelines
 
-### Distilled Pipeline
+### Distilled Two-Stage Pipeline
 
 Optimized for speed with no-CFG two-stage generation:
 
@@ -476,35 +476,11 @@ This is typically a timestep conditioning issue. Ensure you're using the latest 
 
 ## API Usage
 
-```python
-from LTX_2_MLX.pipelines import DistilledPipeline
-from LTX_2_MLX.model.text_encoder import create_av_text_encoder
-from LTX_2_MLX.model.transformer import LTXModel, X0Model
-from LTX_2_MLX.model.video_vae import SimpleVideoDecoder
-
-# Load models
-text_encoder = create_av_text_encoder()
-transformer = LTXModel(...)
-x0_model = X0Model(transformer)
-vae_decoder = SimpleVideoDecoder()
-
-# Create pipeline
-pipeline = DistilledPipeline(
-    text_encoder=text_encoder,
-    transformer=x0_model,
-    video_decoder=vae_decoder,
-)
-
-# Generate
-video = pipeline(
-    prompt="A cat walking through a garden",
-    height=512,
-    width=768,
-    num_frames=65,
-    num_steps=8,
-    seed=42,
-)
-```
+The old `DistilledPipeline` library wrapper has been archived. Programmatic
+distilled two-stage generation now uses the same `OneStagePipeline` /
+`OneStageAVPipeline.generate_distilled_two_stage` route as `scripts/generate.py`.
+Use the CLI as the reference entry point unless you are wiring the model
+components directly.
 
 ## Performance Benchmarks
 

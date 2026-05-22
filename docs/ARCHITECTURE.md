@@ -89,7 +89,8 @@ LTX_2_MLX/
 │
 ├── pipelines/
 │   ├── text_to_video.py      # Basic text-to-video
-│   ├── distilled.py          # Legacy distilled pipeline API
+│   ├── archive/
+│   │   └── distilled.py.bak  # Archived legacy distilled pipeline API
 │   ├── one_stage.py          # AV one-stage and distilled two-stage
 │   ├── two_stage.py          # Two-stage with upscaling
 │   ├── ic_lora.py            # Image conditioning LoRA
@@ -151,42 +152,28 @@ Position encoding for video tokens:
 
 ## Inference Flow
 
-### Distilled Pipeline (8 steps)
+### Distilled Two-Stage Pipeline (8 + 3 steps)
 
 ```python
 # 1. Text encoding
 text_encoding = text_encoder.encode(prompt)  # (1, 1024, 4096)
 
-# 2. Initialize noise
-latent = mx.random.normal(shape=(1, 128, T, H, W))
+# 2. Stage 1 initializes half-resolution video/audio latents, applies
+#    first-frame or keyframe conditioning, then noises at sigma=1.0.
+stage_1_sigmas = [1.0, 0.994, 0.988, 0.981, 0.975, 0.909, 0.725, 0.422, 0.0]
+video_latent, audio_latent = denoise_av(stage_1_sigmas, width // 2, height // 2)
 
-# 3. Denoising loop (8 steps)
-sigmas = [1.0, 0.994, 0.988, 0.981, 0.975, 0.909, 0.725, 0.422, 0.0]
+# 3. Spatial upscaler works in the VAE's un-normalized latent space.
+video_latent = stats.normalize(spatial_upscaler(stats.un_normalize(video_latent)))
 
-for i in range(8):
-    # Patchify latent for transformer
-    latent_seq = patchifier.patchify(latent)
+# 4. Stage 2 re-noises the upscaled video latent and stage-1 audio latent at
+#    sigma=0.909375, then runs 3 refinement steps.
+stage_2_sigmas = [0.909, 0.725, 0.422, 0.0]
+video_latent, audio_latent = denoise_av(stage_2_sigmas, width, height)
 
-    # Create modality with positions
-    modality = Modality(
-        latent=latent_seq,
-        context=text_encoding,
-        timesteps=mx.array([sigmas[i]]),
-        positions=pixel_coords,
-    )
-
-    # Predict denoised (x0)
-    x0_seq = x0_model(modality)
-
-    # Unpatchify
-    denoised = patchifier.unpatchify(x0_seq)
-
-    # Euler step
-    velocity = (latent - denoised) / sigmas[i]
-    latent = latent + velocity * (sigmas[i+1] - sigmas[i])
-
-# 4. VAE decode
-video = vae_decoder.decode(latent)  # (T, H, W, 3) uint8
+# 5. Decode after the transformer is released.
+video = vae_decoder.decode(video_latent)
+audio = audio_decoder.decode(audio_latent)
 ```
 
 ## Memory Requirements

@@ -12,15 +12,15 @@ from LTX_2_MLX.pipelines.text_to_video import (
     GenerationConfig,
     TextToVideoPipeline,
 )
-from LTX_2_MLX.pipelines.distilled import (
-    DistilledConfig,
-)
 from LTX_2_MLX.pipelines.common import (
     ImageCondition,
+    create_image_conditionings,
     load_image_tensor,
     post_process_latent,
     timesteps_from_mask,
 )
+from LTX_2_MLX.conditioning.keyframe import VideoConditionByKeyframeIndex
+from LTX_2_MLX.conditioning.latent import VideoConditionByLatentIndex
 from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
 
 
@@ -76,37 +76,6 @@ class TestGenerationConfig:
             assert "8*k + 1" in str(exc_info.value)
 
 
-class TestDistilledConfig:
-    """Tests for DistilledConfig dataclass."""
-
-    def test_valid_config(self):
-        """Test valid distilled configuration (resolution divisible by 64)."""
-        # DistilledConfig requires resolution divisible by 64
-        config = DistilledConfig(height=512, width=768, num_frames=97)
-        assert config.height == 512
-        assert config.width == 768
-        assert config.num_frames == 97
-        assert config.seed == 42
-        assert config.fps == NATIVE_FPS
-
-    def test_invalid_frame_count_raises(self):
-        """Test invalid frame counts raise ValueError."""
-        with pytest.raises(ValueError) as exc_info:
-            DistilledConfig(height=512, width=768, num_frames=100)
-        assert "8*k + 1" in str(exc_info.value)
-
-    def test_resolution_must_be_divisible_by_64(self):
-        """Test resolution validation for two-stage pipeline."""
-        # Valid resolutions (divisible by 64)
-        config = DistilledConfig(height=512, width=768, num_frames=97)
-        assert config.height == 512
-
-        # Invalid resolutions
-        with pytest.raises(ValueError) as exc_info:
-            DistilledConfig(height=480, width=700, num_frames=97)  # Neither divisible by 64
-        assert "divisible by 64" in str(exc_info.value)
-
-
 # ============================================================================
 # ImageCondition Tests
 # ============================================================================
@@ -128,6 +97,53 @@ class TestImageCondition:
         )
         assert cond.frame_index == 5
         assert cond.strength == 0.8
+
+
+class TestCreateImageConditionings:
+    """Tests for image-conditioning item selection."""
+
+    class _FakeEncoder:
+        def __call__(self, image_tensor):
+            return mx.ones(
+                (
+                    image_tensor.shape[0],
+                    128,
+                    image_tensor.shape[2],
+                    image_tensor.shape[3] // 32,
+                    image_tensor.shape[4] // 32,
+                ),
+                dtype=image_tensor.dtype,
+            )
+
+    def test_first_frame_uses_latent_replacement(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img_path = os.path.join(tmpdir, "test.png")
+            Image.new("RGB", (64, 64), color=(128, 64, 32)).save(img_path)
+
+            conditionings = create_image_conditionings(
+                [ImageCondition(img_path, frame_index=0, strength=0.9)],
+                self._FakeEncoder(),
+                height=64,
+                width=64,
+            )
+
+        assert isinstance(conditionings[0], VideoConditionByLatentIndex)
+        assert conditionings[0].latent_idx == 0
+
+    def test_nonzero_frame_uses_keyframe_conditioning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img_path = os.path.join(tmpdir, "test.png")
+            Image.new("RGB", (64, 64), color=(128, 64, 32)).save(img_path)
+
+            conditionings = create_image_conditionings(
+                [ImageCondition(img_path, frame_index=9, strength=0.8)],
+                self._FakeEncoder(),
+                height=64,
+                width=64,
+            )
+
+        assert isinstance(conditionings[0], VideoConditionByKeyframeIndex)
+        assert conditionings[0].frame_idx == 9
 
 
 # ============================================================================
