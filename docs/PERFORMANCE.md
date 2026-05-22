@@ -56,7 +56,7 @@ The following ship enabled by default:
 - Non-padded tokenizer (no `padding="max_length"`).
 - `--internal-audio auto` (on iff `--generate-audio`).
 - `--mlx-cache-limit-gb 1`.
-- `--vae-decoder native-conv3d` (lower peak memory than the simple path).
+- `--vae-decoder native` (lower peak memory than the legacy path).
 - Terminal redraw throttling (`DenoiseProgress` no heartbeat thread,
   `tqdm` with `ascii=True` + `mininterval=1-2s`).
 
@@ -170,7 +170,7 @@ from the default stack when running A/Bs.
 | Tokenize without max-length padding | default | none | -5 % AV (256×256×25) | Tokenizer was padding 2 real tokens to 1024 before Gemma forward.  Re-enable: `LTX_PAD_PROMPT_TO_MAX=1`. |
 | `--mlx-cache-limit-gb 1` | default | low | neutral | Same-math allocator-cache cap.  Bakery AV process RAM 44 GB → 40 GB with no time penalty.  `0` returns freed buffers immediately. |
 | Defer AV text encoder load until after Gemma | default | low | neutral; -6 GB prompt-encode peak | Trim Gemma hidden states, materialize, free Gemma, then load AV connector. |
-| `--vae-decoder native-conv3d` | default | medium | none for denoise | Lower peak memory than `--vae-decoder simple`.  See [Decode-time notes](#decode-time-notes-not-denoise-speed). |
+| `--vae-decoder native` | default | medium | none for denoise | Lower peak memory than `--vae-decoder legacy`.  See [Decode-time notes](#decode-time-notes-not-denoise-speed). |
 | Terminal redraw throttling | default | none | -5.9 % bakery total on macOS | `DenoiseProgress` no longer spawns a heartbeat thread; `tqdm` uses `ascii=True + mininterval=1-2s`.  Bakery 31m 28s → 29m 38s.  Stage 2 alone -8 %.  See [Terminal redraw throttling](#terminal-redraw-throttling) for the full story. |
 | **--- env-toggle opt-ins ---** | | | | |
 | `LTX_VELOCITY_MODE=1` | opt-in | low | neutral | Inline velocity-form Euler update in `_denoise_loop_simple_av`.  Same math.  Kept env-gated for future MLX versions. |
@@ -1108,10 +1108,10 @@ Tested locally: no win on small AV smoke; slightly slower in one A/B.
 
 VAE tiled decode, VAE spatial padding, and output encoding affect decode
 quality, memory, or save time.  They are useful but **not denoise-speed
-fixes**.  See the matrix entry for `--vae-decoder native-conv3d`.
+fixes**.  See the matrix entry for `--vae-decoder native`.
 
 Native Conv3d VAE decode is the default generator decode path.  Use
-`--vae-decoder simple` only when you want the older baseline for A/B.
+`--vae-decoder legacy` only when you want the older baseline for A/B.
 `scripts/compare_vae_decoders.py` compares timing, MLX active/cache/peak
 memory, sampled luma stats, contact-sheet diff, and full-motion
 side-by-side MP4 on a saved latent.
@@ -1144,7 +1144,7 @@ machine, direct 1024×576×481 auto-selects `128/8`.
 Custom controls for middle-ground tests:
 
 ```bash
---vae-decoder native-conv3d \
+--vae-decoder native \
 --vae-tiling custom \
 --vae-temporal-tile-frames 128 \
 --vae-temporal-overlap-frames 8
@@ -1256,7 +1256,7 @@ results on bakery 512×288×481:
 | No tiling               | 23.5-26.2s / 32.1 GB | 29.4-36.4s / 10.4 GB |
 
 End-to-end bakery AV smoke with warm caches, `r16` resident-group compile,
-FF pretranspose, attn pretranspose, `--vae-decoder native-conv3d`,
+FF pretranspose, attn pretranspose, `--vae-decoder native`,
 `--vae-tiling off`: denoise RUN 7m08s avg 53.4 s/it; total 8m07s.  Native
 Conv3d at 512×288 with no tiling is the fastest decode mode measured.
 

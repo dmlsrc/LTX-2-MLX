@@ -405,7 +405,7 @@ def build_vae_tiling_config(
     height: int,
     width: int,
     num_frames: int,
-    decoder_backend: str = "simple",
+    decoder_backend: str = "legacy",
     force_tiled: bool = False,
     temporal_tile_frames: int | None = None,
     temporal_overlap_frames: int = 24,
@@ -2441,7 +2441,7 @@ def generate_video(
     gemma_path: str | None = None,
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
-    vae_decoder_backend: str = "native-conv3d",
+    vae_decoder_backend: str = "native",
     vae_spatial_padding: str = "zero",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
@@ -2826,10 +2826,10 @@ def generate_video(
         print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
     if skip_vae:
         print(f"VAE decoding: SKIPPED")
-    elif vae_decoder_backend == "native-conv3d":
+    elif vae_decoder_backend == "native":
         print("VAE decoder: native Conv3d")
     else:
-        print("VAE decoder: simple slice-conv baseline")
+        print("VAE decoder: legacy slice-conv baseline")
     if not skip_vae and vae_spatial_padding == "zero":
         print("VAE spatial padding: zero (boundary-flicker mitigation)")
     elif not skip_vae:
@@ -3363,7 +3363,7 @@ def generate_video(
         if decoder_blocks:
             print(f"  VAE config: {len(decoder_blocks)} blocks, base_ch={base_channels}, timestep={timestep_cond}")
 
-        if vae_decoder_backend == "native-conv3d":
+        if vae_decoder_backend == "native":
             vae_decoder = NativeConv3dVideoDecoder(
                 decoder_blocks=decoder_blocks,
                 base_channels=base_channels,
@@ -3371,7 +3371,7 @@ def generate_video(
                 compute_dtype=compute_dtype,
                 spatial_padding_mode=vae_spatial_padding,
             )
-        elif vae_decoder_backend == "simple":
+        elif vae_decoder_backend == "legacy":
             vae_decoder = SimpleVideoDecoder(
                 decoder_blocks=decoder_blocks,
                 base_channels=base_channels,
@@ -3382,7 +3382,7 @@ def generate_video(
         else:
             raise ValueError(f"Unsupported VAE decoder backend: {vae_decoder_backend}")
         if video_vae_load_path and not use_placeholder:
-            if vae_decoder_backend == "native-conv3d":
+            if vae_decoder_backend == "native":
                 load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
             else:
                 load_vae_decoder_weights(vae_decoder, video_vae_load_path)
@@ -4663,12 +4663,12 @@ def main():
     )
     parser.add_argument(
         "--vae-decoder",
-        choices=["simple", "native-conv3d"],
-        default="native-conv3d",
+        choices=["native", "legacy"],
+        default="native",
         help=(
-            "Video VAE decoder backend. native-conv3d is the default lower-memory "
-            "MLX Conv3d decoder; simple keeps the PyTorch-layout slice-conv baseline "
-            "for A/B testing."
+            "Video VAE decoder backend.  native (default) is the MLX-native "
+            "Conv3d decoder.  legacy is the PyTorch-layout slice-conv "
+            "baseline kept for A/B testing."
         ),
     )
     parser.add_argument(

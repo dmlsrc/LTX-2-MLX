@@ -241,12 +241,12 @@ Precision exceptions are intentionally narrow:
 Video decode defaults to the native Conv3d VAE decoder with
 `--vae-spatial-padding zero` and `--vae-tiling auto`. That keeps the common
 command short while using the RAM-aware native tiling planner. Use
-`--vae-decoder simple` or `--vae-spatial-padding reflect` only when you want an
+`--vae-decoder legacy` or `--vae-spatial-padding reflect` only when you want an
 A/B baseline against the older decode path:
 
 ```bash
 python scripts/generate.py "Your prompt" \
-    --vae-decoder simple \
+    --vae-decoder legacy \
     --vae-spatial-padding reflect
 ```
 
