@@ -15,23 +15,35 @@ Usage
 
     # Video path: skip VAE; VSR an existing clip.
     scripts/vsr_harness.py --video clip.mp4 \
-        --output-dir outputs/vsr/run2 --quality balanced
+        --output-dir outputs/vsr/run2 --spatial-mode balanced
 
-Quality / scale combinations (VideoToolbox enforces these pairings)
--------------------------------------------------------------------
-    fast      VTLowLatencySuperResolutionScalerConfiguration.
-              scale=2 only, input must fit between 96x96 and 960x960.
-              Per-frame, no temporal context.
+Spatial modes (VideoToolbox-imposed; scale is implied by the mode)
+------------------------------------------------------------------
+    fast      VTLowLatencySuperResolutionScalerConfiguration.  Scale 2x.
+              Input must fit between 96x96 and 960x960.  Per-frame,
+              no temporal context.
     balanced  VTSuperResolutionScalerConfiguration, InputType=Video.
-              scale=4 only. Downloadable model (auto-fetched on first use).
-              Uses previous source + previous output for temporal coherence;
-              the recommended mode for video.
-    high      VTSuperResolutionScalerConfiguration, InputType=Image. scale=4
-              only. Per-frame run of the HQ model; no temporal context.
-              Intended for stills, not video.
+              Scale 4x.  Downloadable model (auto-fetched on first use).
+              Uses previous source + previous output frames to inform the
+              upscale.  Default for video.  Tends to be slightly crisper
+              on motion at the cost of slightly higher frame-to-frame
+              variation than image mode.
+    image     VTSuperResolutionScalerConfiguration, InputType=Image.  Scale 4x.
+              Per-frame deterministic upscale, no prev-frame feedback.
+              Apple documents this as for stills, but on real video it's a
+              legitimate alternative — slightly softer per-frame detail
+              than balanced but measurably smoother frame-to-frame (lower
+              temporal second-difference).  Use scripts/compare_video_shimmer.py
+              to A/B the two modes on your own content.
+
+Temporal modes (only relevant when --target-fps is set)
+-------------------------------------------------------
+    normal    Default.  Fast and adequate for ~2x rate-up.
+    high      VTFrameRateConversion's QualityPrioritizationQuality — more
+              compute per interpolated frame, cleaner motion.
 
 The VAE decoder defaults track scripts/generate.py's happy path
-(native-conv3d + zero spatial padding) via the encode_modes_harness
+(native backend + zero spatial padding) via the encode_modes_harness
 helpers. Chunks are cast to fp16 RGBA inside MLX so the full bf16
 precision is preserved through to VSR's RGBAHalf source format —
 quantization happens at the destination (either CIContext rendering
@@ -39,11 +51,11 @@ to NV12 for LL, or AVAssetWriter encoding to HEVC for HQ).
 
 Known limitation for `--video` on edited footage
 ------------------------------------------------
-`--quality balanced` chains previous-frame state through VSR for temporal
-coherence. Across a hard cut that's the wrong context and can produce
-ghosting around the cut frame. LTX latents are single-shot generations
-so this is moot for `--latent`. For edited MP4s, enable `--cut-detect`
-to reset the chain at hard cuts.
+`--spatial-mode balanced` chains previous-frame state through VSR for
+temporal coherence. Across a hard cut that's the wrong context and can
+produce ghosting around the cut frame. LTX latents are single-shot
+generations so this is moot for `--latent`. For edited MP4s, enable
+`--cut-detect` to reset the chain at hard cuts.
 """
 
 from __future__ import annotations
@@ -345,13 +357,13 @@ def _decode_audio_track(audio_latent: Any, weights: str, compute_dtype: Any) -> 
 # HEVC profile selection
 # ---------------------------------------------------------------------------
 
-def _pick_hevc_profile(quality: str, encode_chroma: str) -> str:
-    """auto picks 4:2:2 for HQ (RGBAHalf preserves chroma), 4:2:0 for LL."""
+def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
+    """auto picks 4:2:2 for HQ modes (RGBAHalf preserves chroma), 4:2:0 for fast (LL/NV12)."""
     if encode_chroma == "420":
         return HEVC_PROFILE_MAIN10
     if encode_chroma == "422":
         return HEVC_PROFILE_MAIN422_10
-    return HEVC_PROFILE_MAIN422_10 if quality in ("balanced", "high") else HEVC_PROFILE_MAIN10
+    return HEVC_PROFILE_MAIN422_10 if spatial_mode in ("balanced", "image") else HEVC_PROFILE_MAIN10
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +421,7 @@ def run(args: argparse.Namespace) -> None:
         )
         print(f"[setup] video VAE loaded in {time.perf_counter() - t:.2f}s")
         total_frames, in_h, in_w = latent_dims(latent)
-        source_fps = args.fps
+        source_fps = args.source_fps
 
         if args.vae_tiling == "off":
             vae_cfg, n_vae_chunks, vae_tiling_desc = None, 1, "off (forced single-shot decode)"
@@ -436,8 +448,10 @@ def run(args: argparse.Namespace) -> None:
         n_vae_chunks = None  # no VAE on --video path
 
     # ---- Output geometry + encoder settings --------------------------------
-    out_w, out_h = in_w * args.scale, in_h * args.scale
-    profile = _pick_hevc_profile(args.quality, args.encode_chroma)
+    from LTX_2_MLX.videotoolbox.vsr import scale_for_mode
+    spatial_scale = scale_for_mode(args.spatial_mode)
+    out_w, out_h = in_w * spatial_scale, in_h * spatial_scale
+    profile = _pick_hevc_profile(args.spatial_mode, args.encode_chroma)
     target_fps = args.target_fps if args.target_fps is not None else source_fps
     do_temporal = abs(target_fps - source_fps) > 1e-6
 
@@ -447,25 +461,26 @@ def run(args: argparse.Namespace) -> None:
         f"fps: {source_fps:.3f}"
     )
     print(
-        f"Target: {out_w}x{out_h}, fps: {target_fps:.3f}"
+        f"Target: {out_w}x{out_h} (spatial {spatial_scale}x), "
+        f"fps: {target_fps:.3f}"
         f"{' (temporal upscale)' if do_temporal else ''}, "
-        f"scale={args.scale}, quality={args.quality}"
+        f"spatial-mode={args.spatial_mode}"
     )
     print(
-        f"Encoder: HEVC profile={profile} q={args.quality_setting} "
+        f"Encoder: HEVC profile={profile} q={args.encode_quality} "
         f"audio={args.audio_codec if audio_track else 'none'}"
     )
 
     # ---- Sessions + writers ------------------------------------------------
     session = VsrSession(
-        in_w, in_h, scale=args.scale, quality=args.quality, fps=source_fps,
+        in_w, in_h, mode=args.spatial_mode, fps=source_fps,
     )
     vtfrc: VtfrcSession | None = None
     if do_temporal:
         vtfrc = VtfrcSession(
             out_w, out_h,
             source_fps=source_fps, target_fps=target_fps,
-            quality=args.temporal_quality,
+            mode=args.temporal_mode,
         )
 
     audio_kwargs: dict[str, Any] = {}
@@ -473,7 +488,7 @@ def run(args: argparse.Namespace) -> None:
         audio_kwargs = {"audio_track": audio_track, "audio_codec": args.audio_codec}
 
     post_writer: AVWriter | None = None
-    if not args.no_post_mp4:
+    if not args.skip_post_mp4:
         post_writer = AVWriter(
             out_root / f"{stem}_post.mp4",
             width=out_w, height=out_h, fps=target_fps,
@@ -481,7 +496,7 @@ def run(args: argparse.Namespace) -> None:
                 vtfrc.dst_attrs if vtfrc is not None else session.dst_attrs
             ),
             profile=profile,
-            quality=args.quality_setting,
+            quality=args.encode_quality,
             label="post",
             **audio_kwargs,
         )
@@ -498,7 +513,7 @@ def run(args: argparse.Namespace) -> None:
             width=2 * out_w, height=out_h, fps=target_fps,
             source_pixel_format=_pb.PIX_BGRA,
             profile=profile,
-            quality=args.quality_setting,
+            quality=args.encode_quality,
             label="comparison",
             **audio_kwargs,
         )
@@ -622,7 +637,7 @@ def run(args: argparse.Namespace) -> None:
                             )
                             # Pre half uses the source frame (not temporal-
                             # interpolated post) so before/after is honest.
-                            render_comparison(src_frame, out_pb, args.scale, comp_pb)
+                            render_comparison(src_frame, out_pb, spatial_scale, comp_pb)
                             comparison_writer.append(comp_pb)
                             del comp_pb
                         del out_pb
@@ -702,8 +717,12 @@ def main() -> None:
         "--vae-dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16",
     )
     parser.add_argument(
-        "--vae-decoder-backend", choices=["native-conv3d", "simple"], default="native-conv3d",
-        help="VAE decoder backend. native-conv3d matches generate.py's default.",
+        "--vae-decoder-backend", choices=["native", "legacy"], default="native",
+        help=(
+            "VAE decoder backend.  Both do 3D convolution. "
+            "native (default, matches generate.py) uses MLX-native nn.Conv3d. "
+            "legacy is the older slice-based Conv3d emulation, kept for A/B comparison."
+        ),
     )
     parser.add_argument(
         "--vae-spatial-padding", choices=["zero", "reflect"], default="zero",
@@ -723,11 +742,12 @@ def main() -> None:
         help="Filename prefix for the timestamped outputs (matches generate.py).",
     )
     parser.add_argument(
-        "--fps", type=float, default=NATIVE_FPS,
+        "--source-fps", type=float, default=NATIVE_FPS,
         help=(
-            f"Playback fps for --latent (latents don't carry an fps; default "
-            f"{NATIVE_FPS} matches generate.py). Ignored for --video — the "
-            f"input file's r_frame_rate is honored instead."
+            f"Source frame rate for --latent (latents don't carry an fps; "
+            f"default {NATIVE_FPS} matches generate.py). Ignored for --video — "
+            f"the input file's r_frame_rate is honored instead. Pair with "
+            f"--target-fps to drive temporal frame-rate conversion."
         ),
     )
     parser.add_argument(
@@ -742,33 +762,39 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--temporal-quality", choices=["normal", "high"], default="normal",
-        help="VTFrameRateConversion quality. high uses more compute for cleaner motion.",
-    )
-    parser.add_argument(
-        "--scale", type=int, choices=[2, 4], default=None,
+        "--temporal-mode", choices=["normal", "high"], default="normal",
         help=(
-            "Upscale factor. If omitted, inferred from --quality: 2 for fast, "
-            "4 for balanced/high. VideoToolbox enforces (scale, quality) pairing."
+            "VTFrameRateConversion mode. Only active when --target-fps is set. "
+            "normal (default) = fast and adequate for 2x rate-up; "
+            "high = QualityPrioritizationQuality, more compute for cleaner motion."
         ),
     )
     parser.add_argument(
-        "--quality", choices=["fast", "balanced", "high"], default="balanced",
+        "--spatial-mode", choices=["fast", "balanced", "image"], default="balanced",
         help=(
-            "balanced (recommended) = HQ Video mode, scale=4, temporal coherence. "
-            "fast = LowLatency scale=2 per-frame. "
-            "high = HQ Image mode, scale=4 per-frame, no temporal coherence."
+            "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
+            "balanced=4x, image=4x). "
+            "balanced (default) = HQ Video mode; uses prev source + prev output "
+            "frames to inform the upscale.  Tends to produce crisper motion edges "
+            "at the cost of slightly more frame-to-frame variation in detail. "
+            "fast = VTLowLatency 2x scaler.  Per-frame, no temporal context.  "
+            "Input must be 96x96 to 960x960. "
+            "image = HQ Image mode.  Per-frame deterministic upscale with no "
+            "prev-frame feedback.  Slightly softer per-frame detail than balanced, "
+            "but measurably smoother frame-to-frame (lower temporal second-difference). "
+            "Apple documents this as for stills; on video it's a legitimate "
+            "alternative to balanced if you prefer the smoother trade-off."
         ),
     )
     parser.add_argument(
-        "--quality-setting", type=float, default=0.65,
-        help="AVVideoQualityKey (0..1) for the HEVC encoder. 0.65 matches default tier.",
+        "--encode-quality", type=float, default=0.65,
+        help="AVVideoQualityKey (0..1) for the HEVC encoder. 0.65 matches the default tier.",
     )
     parser.add_argument(
         "--encode-chroma", choices=["auto", "420", "422"], default="auto",
         help=(
             "HEVC profile chroma subsampling. auto = 4:2:2 (Main42210) for "
-            "balanced/high, 4:2:0 (Main10) for fast. 420 forces Main10 for "
+            "balanced/image modes, 4:2:0 (Main10) for fast. 420 forces Main10 for "
             "generate.py-tier parity."
         ),
     )
@@ -789,7 +815,8 @@ def main() -> None:
         help=(
             "Reset VSR's prev-frame chain at hard cuts. off = never reset "
             "(correct for single-shot LTX latents). Only meaningful for "
-            "edited --video input in balanced/high modes."
+            "edited --video input under --spatial-mode balanced (which "
+            "chains prev-frame state); a no-op under fast/image modes."
         ),
     )
     parser.add_argument("--cut-threshold", type=float, default=0.25)
@@ -804,7 +831,10 @@ def main() -> None:
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--save-pre-frames", action="store_true")
     parser.add_argument("--save-post-frames", action="store_true")
-    parser.add_argument("--no-post-mp4", action="store_true")
+    parser.add_argument(
+        "--skip-post-mp4", action="store_true",
+        help="Skip writing the upscaled _post.mp4 (e.g. when you only want frame dumps).",
+    )
     parser.add_argument(
         "--comparison", action="store_true",
         help="Also write a side-by-side <stem>_comparison.mp4 "
@@ -814,8 +844,6 @@ def main() -> None:
 
     if args.latent and not args.weights:
         parser.error("--latent requires --weights")
-    if args.scale is None:
-        args.scale = 2 if args.quality == "fast" else 4
 
     require_pyobjc()
     run(args)

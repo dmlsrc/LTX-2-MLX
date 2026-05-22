@@ -18,15 +18,29 @@ from ._compat import CoreMedia, vt, require_pyobjc
 from . import pixel_buffers as _pb
 
 
-def _validate_combination(width: int, height: int, scale: int, quality: str) -> None:
-    """Check the (input size, scale, quality) combo is something VT supports.
+def scale_for_mode(mode: str) -> int:
+    """Map a VSR spatial mode to its forced scale factor.
+
+    VideoToolbox couples the spatial-mode choice to the scale: LowLatency
+    is 2x-only, the HQ classes are 4x-only.  Centralized here so call sites
+    don't reinvent the mapping.
+    """
+    if mode == "fast":
+        return 2
+    if mode in ("balanced", "image"):
+        return 4
+    raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
+
+
+def _validate_combination(width: int, height: int, scale: int, mode: str) -> None:
+    """Check the (input size, scale, mode) combo is something VT supports.
 
     VSR's HQ and LL classes each only support specific scale factors (and LL
     additionally restricts input size to <= 960x960). Failing fast here gives
     a clear error message instead of an opaque init/startSession failure.
     """
     require_pyobjc()
-    if quality == "fast":
+    if mode == "fast":
         cls = vt.VTLowLatencySuperResolutionScalerConfiguration
         if not cls.isSupported():
             raise SystemExit("LowLatency VSR not supported on this device.")
@@ -35,13 +49,13 @@ def _validate_combination(width: int, height: int, scale: int, quality: str) -> 
             mn = cls.minimumDimensions()
             mx = cls.maximumDimensions()
             raise SystemExit(
-                f"--quality fast does not support {width}x{height} input. "
+                f"--spatial-mode fast does not support {width}x{height} input. "
                 f"Allowed: {mn.width}x{mn.height} to {mx.width}x{mx.height}."
             )
         if float(scale) not in [float(s) for s in ok]:
             raise SystemExit(
-                f"--quality fast at {width}x{height} supports scale={ok}, "
-                f"got --scale {scale}."
+                f"--spatial-mode fast at {width}x{height} supports scale={ok}, "
+                f"requested scale={scale}."
             )
     else:
         cls = vt.VTSuperResolutionScalerConfiguration
@@ -50,8 +64,8 @@ def _validate_combination(width: int, height: int, scale: int, quality: str) -> 
         ok = [int(s) for s in cls.supportedScaleFactors()]
         if scale not in ok:
             raise SystemExit(
-                f"--quality {quality} supports scale={ok}, got --scale {scale}. "
-                f"Use --quality fast for scale=2."
+                f"--spatial-mode {mode} supports scale={ok}, requested scale={scale}. "
+                f"Use --spatial-mode fast for 2x."
             )
 
 
@@ -85,14 +99,20 @@ def _wait_for_model_download(config: Any) -> None:
 class VsrSession:
     """Per-frame VSR processor with prev-frame chain for temporal coherence.
 
-    Quality modes:
+    Spatial modes:
       "fast"      VTLowLatencySuperResolutionScalerConfiguration. scale=2,
                   input <= 960x960. NV12 source. Per-frame, no temporal context.
       "balanced"  VTSuperResolutionScalerConfiguration InputType=Video.
-                  scale=4. RGBAHalf source. Uses prev source + prev output for
-                  temporal coherence.
-      "high"      VTSuperResolutionScalerConfiguration InputType=Image. scale=4.
-                  RGBAHalf source. Per-frame, intended for stills.
+                  scale=4. RGBAHalf source. Uses prev source + prev output to
+                  inform the per-frame upscale.  Default for video; slightly
+                  crisper motion edges at the cost of slightly more
+                  frame-to-frame variation than image mode.
+      "image"     VTSuperResolutionScalerConfiguration InputType=Image. scale=4.
+                  RGBAHalf source. Per-frame deterministic upscale, no
+                  prev-frame feedback.  Apple documents this as for stills,
+                  but on real video it produces measurably lower temporal
+                  second-difference than balanced — a legitimate alternative
+                  if you prefer the smoother / less-edge-boosted trade-off.
 
     The previous-frame state can be reset at hard cuts via
     `reset_temporal_context()` — useful for `--video` input that may contain
@@ -100,15 +120,17 @@ class VsrSession:
     `--latent`.
     """
 
-    def __init__(self, in_w: int, in_h: int, scale: int, quality: str, fps: float = 24.0):
+    def __init__(self, in_w: int, in_h: int, mode: str, fps: float = 24.0):
         require_pyobjc()
-        _validate_combination(in_w, in_h, scale, quality)
+        scale = scale_for_mode(mode)
+        _validate_combination(in_w, in_h, scale, mode)
         self.in_w, self.in_h = in_w, in_h
+        self.scale = scale
         self.out_w, self.out_h = in_w * scale, in_h * scale
-        self.quality = quality
+        self.mode = mode
         self.fps = float(fps)
 
-        if quality == "fast":
+        if mode == "fast":
             self.config = vt.VTLowLatencySuperResolutionScalerConfiguration.alloc(
             ).initWithFrameWidth_frameHeight_scaleFactor_(in_w, in_h, float(scale))
             if self.config is None:
@@ -116,7 +138,7 @@ class VsrSession:
         else:
             input_type = (
                 vt.VTSuperResolutionScalerConfigurationInputTypeVideo
-                if quality == "balanced"
+                if mode == "balanced"
                 else vt.VTSuperResolutionScalerConfigurationInputTypeImage
             )
             cls = vt.VTSuperResolutionScalerConfiguration
@@ -139,7 +161,7 @@ class VsrSession:
         self.src_attrs = dict(self.config.sourcePixelBufferAttributes() or {})
         self.dst_attrs = dict(self.config.destinationPixelBufferAttributes() or {})
         print(
-            f"VSR session ready ({quality}, {in_w}x{in_h} -> {self.out_w}x{self.out_h}, "
+            f"VSR session ready (mode={mode}, {in_w}x{in_h} -> {self.out_w}x{self.out_h}, "
             f"src fmt {_pb.resolve_pixel_format(self.src_attrs):#x}, "
             f"dst fmt {_pb.resolve_pixel_format(self.dst_attrs):#x})"
         )
@@ -219,11 +241,11 @@ class VsrSession:
             dst_pb, pts,
         )
 
-        if self.quality == "fast":
+        if self.mode == "fast":
             params = vt.VTLowLatencySuperResolutionScalerParameters.alloc(
             ).initWithSourceFrame_destinationFrame_(src_frame, dst_frame)
         else:
-            use_temporal = self.quality == "balanced"
+            use_temporal = self.mode == "balanced"
             params = vt.VTSuperResolutionScalerParameters.alloc(
             ).initWithSourceFrame_previousFrame_previousOutputFrame_opticalFlow_submissionMode_destinationFrame_(
                 src_frame,

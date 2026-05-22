@@ -68,12 +68,12 @@ def make_video_decoder(
     weights_path: str,
     compute_dtype: Any,
     *,
-    backend: str = "native-conv3d",
+    backend: str = "native",
     spatial_padding_mode: str = "zero",
 ):
     """Build a VAE decoder matching scripts/generate.py's happy-path defaults.
 
-    Defaults: native-conv3d backend + zero spatial padding. Both match the
+    Defaults: native backend + zero spatial padding. Both match the
     `generate.py` CLI defaults so output matches a normal generate.py run.
     The other combinations exist only for A/B testing.
     """
@@ -96,7 +96,7 @@ def make_video_decoder(
         f"base_ch={base_channels}, timestep={timestep_conditioning}"
     )
 
-    if backend == "native-conv3d":
+    if backend == "native":
         decoder = NativeConv3dVideoDecoder(
             decoder_blocks=decoder_blocks,
             base_channels=base_channels,
@@ -105,7 +105,7 @@ def make_video_decoder(
             spatial_padding_mode=spatial_padding_mode,
         )
         load_native_vae_decoder_weights(decoder, weights_path)
-    elif backend == "simple":
+    elif backend == "legacy":
         decoder = SimpleVideoDecoder(
             decoder_blocks=decoder_blocks,
             base_channels=base_channels,
@@ -326,11 +326,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--vae-decoder-backend",
-        choices=["native-conv3d", "simple"],
-        default="native-conv3d",
+        choices=["native", "legacy"],
+        default="native",
         help=(
-            "VAE decoder backend. native-conv3d matches scripts/generate.py's "
-            "happy-path default; simple is the slice-conv baseline kept for A/B."
+            "VAE decoder backend. Both do 3D convolution. "
+            "native (default, matches scripts/generate.py's happy path) uses "
+            "MLX-native nn.Conv3d. legacy is the older slice-based Conv3d "
+            "emulation, kept as the A/B baseline."
         ),
     )
     parser.add_argument(
@@ -438,7 +440,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print("NPZ has no audio latent; encoding video-only.")
 
     # Resolve tiling the same way scripts/generate.py does. With the
-    # native-conv3d backend `TilingConfig.auto` may return None (no tiling
+    # native backend `TilingConfig.auto` may return None (no tiling
     # needed) and the decode runs as a single pass through decode_latent —
     # NO spatial seams. The legacy simple-decoder branch always splits
     # spatially for width > 512, which is what was creating edge artifacts.

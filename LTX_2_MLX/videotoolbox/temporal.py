@@ -30,9 +30,9 @@ class VtfrcSession:
     """Per-pair temporal interpolator with arbitrary source/target fps.
 
     Construction takes frame dimensions, source fps, target fps, and a
-    quality setting (Normal or Quality). The session buffers one source
-    frame at a time and emits all output frames that fall in the gap when
-    the next source frame arrives.
+    mode setting (Normal or Quality prioritization). The session buffers
+    one source frame at a time and emits all output frames that fall in
+    the gap when the next source frame arrives.
 
     Usage:
         session = VtfrcSession(width, height, source_fps=24, target_fps=60)
@@ -49,9 +49,9 @@ class VtfrcSession:
     `drain()` emits the last source frame if it falls on a target PTS.
     """
 
-    # quality enum
-    QUALITY_NORMAL = "normal"
-    QUALITY_HIGH = "high"
+    # mode enum (rate-conversion quality prioritization)
+    MODE_NORMAL = "normal"
+    MODE_HIGH = "high"
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class VtfrcSession:
         source_fps: float,
         target_fps: float,
         *,
-        quality: str = QUALITY_NORMAL,
+        mode: str = MODE_NORMAL,
     ):
         require_pyobjc()
         if source_fps <= 0 or target_fps <= 0:
@@ -73,11 +73,11 @@ class VtfrcSession:
         self.in_w, self.in_h = in_w, in_h
         self.source_fps = float(source_fps)
         self.target_fps = float(target_fps)
-        self.quality = quality
+        self.mode = mode
 
         q = (
             vt.VTFrameRateConversionConfigurationQualityPrioritizationQuality
-            if quality == self.QUALITY_HIGH
+            if mode == self.MODE_HIGH
             else vt.VTFrameRateConversionConfigurationQualityPrioritizationNormal
         )
         cls = vt.VTFrameRateConversionConfiguration
@@ -98,7 +98,7 @@ class VtfrcSession:
         self.dst_attrs = dict(self.config.destinationPixelBufferAttributes() or {})
         print(
             f"Temporal session ready ({source_fps:.3f}fps -> {target_fps:.3f}fps "
-            f"@ {in_w}x{in_h}, quality={quality}, "
+            f"@ {in_w}x{in_h}, mode={mode}, "
             f"src fmt {_pb.resolve_pixel_format(self.src_attrs):#x}, "
             f"dst fmt {_pb.resolve_pixel_format(self.dst_attrs):#x})"
         )
