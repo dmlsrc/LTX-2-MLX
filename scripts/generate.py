@@ -1357,8 +1357,9 @@ def encode_with_gemma(
     # Without template: 0.71 correlation for blue vs red (good)
     # With template: 0.98 correlation (bad - template tokens dominate)
     print(f"  Tokenizing prompt...")
+    # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace before tokenizing.
     encoding = tokenizer(
-        prompt,  # Use raw prompt, not chat template
+        (prompt or "").strip(),  # Use raw prompt, not chat template
         return_tensors="np",
         padding="max_length",
         truncation=True,
@@ -1524,19 +1525,23 @@ def encode_av_gemma_batch(
     gemma = Gemma3Model(config)
     load_gemma3_weights(gemma, gemma_path)
 
-    # LTX_PAD_PROMPT_TO_MAX=1 restores the legacy padding-to-max behavior for
-    # debugging.  Default skips it — running Gemma on a 1024-token padded
-    # sequence when the real prompt is only a few tokens wastes O(N^2) attention
-    # work that's discarded by the post-forward trim below.
-    pad_to_max = bool(os.environ.get("LTX_PAD_PROMPT_TO_MAX"))
+    # Default: pad to max_length=1024 before Gemma, matching stock LTX-2's
+    # LTXVGemmaTokenizer behavior.  Real tokens are still trimmed out of the
+    # hidden states after the forward pass, but running Gemma on the padded
+    # 1024-token sequence reproduces stock numerics exactly.  Set
+    # LTX_PAD_PROMPT_TO_MAX=0 to skip padding (faster on short prompts, but
+    # introduces small bf16 drift relative to stock — see docs).
+    pad_to_max = os.environ.get("LTX_PAD_PROMPT_TO_MAX", "1") != "0"
 
     gemma_outputs = []
     for i, prompt in enumerate(prompts):
         label = prompt_label(i, len(prompts))
         print(f"  Tokenizing {label}...")
+        # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace before tokenizing.
+        prompt_text = (prompt or "").strip()
         if pad_to_max:
             encoding = tokenizer(
-                prompt,
+                prompt_text,
                 return_tensors="np",
                 padding="max_length",
                 truncation=True,
@@ -1544,7 +1549,7 @@ def encode_av_gemma_batch(
             )
         else:
             encoding = tokenizer(
-                prompt,
+                prompt_text,
                 return_tensors="np",
                 padding=False,
                 truncation=True,

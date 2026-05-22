@@ -381,7 +381,7 @@ def run(args: argparse.Namespace) -> None:
 
         print(f"[setup] VAE-decoding latent: {args.latent}")
         t = time.perf_counter()
-        latent, audio_latent = load_latents(args.latent, mx, "auto")
+        latent, audio_latent = load_latents(args.latent, mx, "auto", stage=args.latent_stage)
         compute_dtype = parse_dtype(mx, args.vae_dtype)
         print(
             f"[setup] load_latents done in {time.perf_counter() - t:.2f}s "
@@ -536,7 +536,7 @@ def run(args: argparse.Namespace) -> None:
     )
     out_pbar = bars.add(
         total=pbar_total,
-        desc="output frames" if do_temporal else "VSR frames",
+        desc="OUT frames" if do_temporal else "VSR frames",
         unit="frame",
     )
 
@@ -686,6 +686,17 @@ def main() -> None:
     src.add_argument("--latent", help="--save-latents NPZ sidecar (VAE-decoded first).")
     src.add_argument("--video", help="Already-decoded video file (mp4/mov/...).")
 
+    parser.add_argument(
+        "--latent-stage",
+        choices=["final", "stage1", "stage2"],
+        default="final",
+        help=(
+            "Which latent to decode from a distilled-two-stage sidecar. "
+            "'final' (default) = final_video_latent = stage 2 (the upscaled+refined result). "
+            "'stage1' = pre-upscaler half-resolution latent. "
+            "'stage2' = explicit stage 2 (same content as 'final' on distilled two-stage)."
+        ),
+    )
     parser.add_argument("--weights", help="LTX-2 .safetensors path (required with --latent).")
     parser.add_argument(
         "--vae-dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16",

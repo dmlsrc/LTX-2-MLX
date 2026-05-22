@@ -115,28 +115,70 @@ def parse_dtype(mx_mod: Any, name: str):
     raise ValueError(f"Unknown dtype: {name}")
 
 
-def load_latents(path: str, mx_mod: Any, latent_dtype: str = "auto"):
+def load_latents(
+    path: str,
+    mx_mod: Any,
+    latent_dtype: str = "auto",
+    stage: str = "final",
+):
+    """Load video (and optionally audio) latent from a --save-latents sidecar.
+
+    Args:
+        path: NPZ sidecar path.
+        mx_mod: imported mlx.core module.
+        latent_dtype: cast target ("auto" reads the stored mlx_dtype; or one of
+            "bfloat16"/"float16"/"float32"/"none").
+        stage: which latent to grab. "final" (default) reads ``final_video_latent``
+            (= stage 2 on distilled two-stage sidecars). "stage1" grabs the
+            pre-upscaler latent (half-resolution); "stage2" explicitly grabs the
+            post-refinement latent (same content as "final" on distilled
+            two-stage, but errors out on non-two-stage sidecars).
+    """
+    if stage == "final":
+        video_key, dtype_key = "final_video_latent", "final_video_latent_mlx_dtype"
+        audio_key, audio_dtype_key = "final_audio_latent", "final_audio_latent_mlx_dtype"
+        missing_hint = "not a --save-latents sidecar"
+    elif stage == "stage1":
+        video_key, dtype_key = "stage_1_video_latent", "stage_1_video_latent_mlx_dtype"
+        audio_key, audio_dtype_key = "stage_1_audio_latent", "stage_1_audio_latent_mlx_dtype"
+        missing_hint = "not a distilled-two-stage sidecar (need --save-latents on a distilled two-stage run)"
+    elif stage == "stage2":
+        video_key, dtype_key = "stage_2_video_latent", "stage_2_video_latent_mlx_dtype"
+        audio_key, audio_dtype_key = "stage_2_audio_latent", "stage_2_audio_latent_mlx_dtype"
+        missing_hint = "not a distilled-two-stage sidecar"
+    else:
+        raise ValueError(f"unknown stage {stage!r}; expected 'final', 'stage1', or 'stage2'")
+
     with np.load(path) as data:
         keys = sorted(data.files)
-        if "final_video_latent" not in data:
-            raise KeyError(f"{path} does not contain final_video_latent; keys={keys}")
-        if "final_video_latent_mlx_dtype" not in data:
+        if video_key not in data:
             raise KeyError(
-                f"{path} is not a --save-latents sidecar: missing final_video_latent_mlx_dtype; "
-                f"keys={keys}"
+                f"{path} does not contain {video_key} (stage={stage!r}, {missing_hint}); keys={keys}"
+            )
+        if dtype_key not in data:
+            raise KeyError(
+                f"{path} is missing {dtype_key} (stage={stage!r}); keys={keys}"
             )
 
-        latent_np = data["final_video_latent"]
-        stored_dtype = str(data["final_video_latent_mlx_dtype"])
-        has_audio = "final_audio_latent" in data
-        audio_np = data["final_audio_latent"] if has_audio else None
+        latent_np = data[video_key]
+        stored_dtype = str(data[dtype_key])
+        has_audio = audio_key in data
+        audio_np = data[audio_key] if has_audio else None
         audio_shape = audio_np.shape if audio_np is not None else None
-        audio_dtype = str(data["final_audio_latent_mlx_dtype"]) if "final_audio_latent_mlx_dtype" in data else None
+        audio_dtype = str(data[audio_dtype_key]) if audio_dtype_key in data else None
 
     print(f"NPZ keys: {', '.join(keys)}")
+    print(f"Stage:    {stage} (video_key={video_key!r}, audio_key={audio_key!r})")
     print(f"Loaded video latent: shape={latent_np.shape}, numpy_dtype={latent_np.dtype}, mlx_dtype={stored_dtype or 'unknown'}")
     if has_audio:
-        print(f"Found audio latent: shape={audio_shape}, mlx_dtype={audio_dtype or 'unknown'}")
+        print(f"Found audio latent (key={audio_key!r}): shape={audio_shape}, mlx_dtype={audio_dtype or 'unknown'}")
+    elif audio_key in keys:
+        # Defensive: shouldn't happen because we checked `audio_key in data`, but
+        # if a future code path strips the key after the with-block, surface it.
+        print(f"Audio key {audio_key!r} present but not loaded — check load_latents logic.")
+    else:
+        # Explicitly state we looked for the matching-stage audio and found none.
+        print(f"No audio latent at key {audio_key!r} — video-only output.")
 
     resolved = parse_dtype(mx_mod, latent_dtype)
     if resolved == "auto":

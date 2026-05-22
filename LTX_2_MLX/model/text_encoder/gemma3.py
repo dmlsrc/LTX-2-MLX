@@ -120,23 +120,29 @@ def apply_rotary_pos_emb(
     cos: mx.array,
     sin: mx.array,
 ) -> Tuple[mx.array, mx.array]:
-    """Apply rotary position embeddings to query and key tensors."""
+    """Apply rotary position embeddings to query and key tensors.
+
+    Matches HF Gemma3's `apply_rotary_pos_emb`: keep cos/sin in FP32, let the
+    multiply promote Q/K to FP32, then downcast the result back to the input
+    dtype before SDPA (so SDPA still picks its BF16 kernel — propagating FP32
+    activations to attention compiles a pure-FP32 steel kernel that's ~2x
+    slower).  This closes the precision gap vs HF, where running the rotate
+    in BF16 was costing ~0.0003 cos sim per layer of accumulated drift.
+    """
     # q, k: [batch, num_heads, seq_len, head_dim]
     # cos, sin: [seq_len, head_dim/2]
+    in_dtype = q.dtype
 
     # Split into two halves
     q1, q2 = mx.split(q, 2, axis=-1)
     k1, k2 = mx.split(k, 2, axis=-1)
 
-    # Keep the rotary multiply in the activation dtype. The tables are computed
-    # in FP32 for angle precision, but leaving them FP32 promotes Q/K and the
-    # whole attention path; mlx-vlm's nn.RoPE preserves BF16 activations here.
-    cos = cos.astype(q.dtype)[None, None, :, :]
-    sin = sin.astype(q.dtype)[None, None, :, :]
+    cos = cos[None, None, :, :]  # stays FP32 — promotes the multiplies below
+    sin = sin[None, None, :, :]
 
-    # Apply rotation
-    q_embed = mx.concatenate([q1 * cos - q2 * sin, q2 * cos + q1 * sin], axis=-1)
-    k_embed = mx.concatenate([k1 * cos - k2 * sin, k2 * cos + k1 * sin], axis=-1)
+    # Apply rotation (FP32 because cos/sin are FP32) and downcast back to BF16.
+    q_embed = mx.concatenate([q1 * cos - q2 * sin, q2 * cos + q1 * sin], axis=-1).astype(in_dtype)
+    k_embed = mx.concatenate([k1 * cos - k2 * sin, k2 * cos + k1 * sin], axis=-1).astype(in_dtype)
 
     return q_embed, k_embed
 
