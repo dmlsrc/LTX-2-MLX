@@ -1090,6 +1090,7 @@ class OneStagePipeline:
         latent_save_path: Optional[str] = None,
         stage_1_sigmas: Optional[Sequence[float]] = None,
         stage_2_sigmas: Optional[Sequence[float]] = None,
+        decode_video: bool = True,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate with the distilled AV checkpoint in two stages.
@@ -1097,6 +1098,19 @@ class OneStagePipeline:
         Stage 1 denoises at half spatial resolution with the official distilled
         sigmas, then stage 2 spatially upscales and refines with the stage-2
         distilled sigmas. There is intentionally no CFG in either stage.
+
+        When `decode_video=True` (default) the pipeline runs VAE decode
+        internally and returns `(video, audio_waveform)` where `video` is the
+        fully decoded `(B, 3, T, H, W)` float tensor in [-1, 1].
+
+        When `decode_video=False` the pipeline skips the internal VAE decode +
+        chunk concatenation and returns `(final_video_latent, audio_waveform)`
+        instead.  The caller is responsible for running decode (typically via
+        `LTX_2_MLX.pipelines.streaming.decode_video_chunks_streaming`) and
+        consuming chunks as they arrive — useful for streaming-encoder paths
+        that can start encoding chunk 1 while chunk 2 is still in the VAE,
+        and for high-resolution clips where the full decoded tensor would
+        otherwise consume gigabytes of unified memory.
         """
         call_start = time.perf_counter()
         self.last_timing_sections = []
@@ -1387,24 +1401,33 @@ class OneStagePipeline:
 
         effective_tiling = config._get_tiling_config()
         post_denoise_elapsed = time.perf_counter() - post_denoise_start
-        decoder_name = self.video_decoder.__class__.__name__
-        tiling_desc = "tiled" if effective_tiling else "not tiled"
-        print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
-        decode_start = time.perf_counter()
-        if effective_tiling:
-            print("  Using tiled VAE decoding (preventing GPU watchdog timeout)")
-            video = None
-            for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
-                video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                mx.eval(video)
-                del chunk
-                gc.collect()
-                mx.clear_cache()
+        if decode_video:
+            decoder_name = self.video_decoder.__class__.__name__
+            tiling_desc = "tiled" if effective_tiling else "not tiled"
+            print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+            decode_start = time.perf_counter()
+            if effective_tiling:
+                print("  Using tiled VAE decoding (preventing GPU watchdog timeout)")
+                video = None
+                for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                    mx.eval(video)
+                    del chunk
+                    gc.collect()
+                    mx.clear_cache()
+            else:
+                video = decode_latent(final_video_latent, self.video_decoder)
+            mx.eval(video)
+            decode_elapsed = time.perf_counter() - decode_start
+            print(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
-            video = decode_latent(final_video_latent, self.video_decoder)
-        mx.eval(video)
-        decode_elapsed = time.perf_counter() - decode_start
-        print(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            # Streaming-decode path: caller will run VAE decode on the
+            # latent.  Return the latent so the caller can iterate chunks
+            # straight into the downstream consumer (typically an
+            # AVAssetWriter+VSR streaming sink) without ever materializing
+            # the full decoded video tensor.
+            video = final_video_latent
+            decode_elapsed = 0.0
 
         audio_waveform = None
         if final_audio_latent is not None:
@@ -1420,8 +1443,9 @@ class OneStagePipeline:
             ("spatial upscale", upscale_elapsed),
             ("distilled stage 2 denoise", stage_2_elapsed),
             ("post-denoise prep", post_denoise_elapsed),
-            ("vae decode", decode_elapsed),
         ]
+        if decode_video:
+            self.last_timing_sections.append(("vae decode", decode_elapsed))
         if audio_decode_elapsed:
             self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
 
@@ -1441,6 +1465,7 @@ class OneStagePipeline:
         positive_audio_encoding: Optional[mx.array] = None,
         latent_save_path: Optional[str] = None,
         burn_stage1_rng: bool = True,
+        decode_video: bool = True,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Resume the distilled two-stage pipeline from saved stage-1 latents.
@@ -1449,6 +1474,11 @@ class OneStagePipeline:
         `_save_distilled_two_stage_latents`. By default the method burns the
         stage-1 video/audio RNG draws before stage-2 noising so a same-seed
         harness run can match a full two-stage run's stage-2 noise stream.
+
+        `decode_video` mirrors the same kwarg on `generate_distilled_two_stage`:
+        when False, the pipeline skips the internal VAE decode and returns
+        `(final_video_latent, audio_waveform)` so the caller can stream
+        chunks into a downstream encoder.
         """
         call_start = time.perf_counter()
         self.last_timing_sections = []
@@ -1659,24 +1689,31 @@ class OneStagePipeline:
 
         effective_tiling = config._get_tiling_config()
         post_denoise_elapsed = time.perf_counter() - post_denoise_start
-        decoder_name = self.video_decoder.__class__.__name__
-        tiling_desc = "tiled" if effective_tiling else "not tiled"
-        print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
-        decode_start = time.perf_counter()
-        if effective_tiling:
-            print("  Using tiled VAE decoding (preventing GPU watchdog timeout)")
-            video = None
-            for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
-                video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                mx.eval(video)
-                del chunk
-                gc.collect()
-                mx.clear_cache()
+        if decode_video:
+            decoder_name = self.video_decoder.__class__.__name__
+            tiling_desc = "tiled" if effective_tiling else "not tiled"
+            print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+            decode_start = time.perf_counter()
+            if effective_tiling:
+                print("  Using tiled VAE decoding (preventing GPU watchdog timeout)")
+                video = None
+                for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                    mx.eval(video)
+                    del chunk
+                    gc.collect()
+                    mx.clear_cache()
+            else:
+                video = decode_latent(final_video_latent, self.video_decoder)
+            mx.eval(video)
+            decode_elapsed = time.perf_counter() - decode_start
+            print(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
-            video = decode_latent(final_video_latent, self.video_decoder)
-        mx.eval(video)
-        decode_elapsed = time.perf_counter() - decode_start
-        print(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            # Streaming-decode path: see generate_distilled_two_stage's
+            # decode_video=False docstring.  Returning the latent lets the
+            # caller iterate VAE chunks straight into a streaming encoder.
+            video = final_video_latent
+            decode_elapsed = 0.0
 
         audio_waveform = None
         if final_audio_latent is not None:
@@ -1691,8 +1728,9 @@ class OneStagePipeline:
             ("spatial upscale", upscale_elapsed),
             ("distilled stage 2 denoise", stage_2_elapsed),
             ("post-denoise prep", post_denoise_elapsed),
-            ("vae decode", decode_elapsed),
         ]
+        if decode_video:
+            self.last_timing_sections.append(("vae decode", decode_elapsed))
         if audio_decode_elapsed:
             self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
 
@@ -1717,9 +1755,14 @@ class OneStagePipeline:
         cross_attn_scale: float = 1.0,
         cross_attn_start_block: int = 40,
         latent_save_path: Optional[str] = None,
+        decode_video: bool = True,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate video (and optionally audio) using single-stage CFG pipeline.
+
+        When `decode_video=False`, returns `(final_video_latent, audio_waveform)`
+        instead of decoding inside the pipeline — see
+        `generate_distilled_two_stage` for the streaming-decode rationale.
 
         Args:
             positive_encoding: Encoded positive prompt for video [B, T, D].
@@ -2045,24 +2088,30 @@ class OneStagePipeline:
             raise ValueError("Video decoder required for VAE decode.")
         effective_tiling = config._get_tiling_config()
         post_denoise_elapsed = time.perf_counter() - post_denoise_start
-        decoder_name = self.video_decoder.__class__.__name__
-        tiling_desc = "tiled" if effective_tiling else "not tiled"
-        print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
-        decode_start = time.perf_counter()
-        if effective_tiling:
-            print(f"  Using tiled VAE decoding (preventing GPU watchdog timeout)")
-            video = None
-            for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
-                video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                mx.eval(video)
-                del chunk
-                gc.collect()
-                mx.clear_cache()
+        if decode_video:
+            decoder_name = self.video_decoder.__class__.__name__
+            tiling_desc = "tiled" if effective_tiling else "not tiled"
+            print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+            decode_start = time.perf_counter()
+            if effective_tiling:
+                print(f"  Using tiled VAE decoding (preventing GPU watchdog timeout)")
+                video = None
+                for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                    mx.eval(video)
+                    del chunk
+                    gc.collect()
+                    mx.clear_cache()
+            else:
+                video = decode_latent(final_video_latent, self.video_decoder)
+            mx.eval(video)
+            decode_elapsed = time.perf_counter() - decode_start
+            print(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
-            video = decode_latent(final_video_latent, self.video_decoder)
-        mx.eval(video)
-        decode_elapsed = time.perf_counter() - decode_start
-        print(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            # Streaming-decode path: see generate_distilled_two_stage's
+            # decode_video=False docstring.
+            video = final_video_latent
+            decode_elapsed = 0.0
 
         # Decode audio if enabled
         audio_waveform = None
@@ -2077,8 +2126,9 @@ class OneStagePipeline:
             ("pipeline setup", denoise_start - call_start),
             ("denoise", denoise_elapsed),
             ("post-denoise prep", post_denoise_elapsed),
-            ("vae decode", decode_elapsed),
         ]
+        if decode_video:
+            self.last_timing_sections.append(("vae decode", decode_elapsed))
         if audio_decode_elapsed:
             self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
 

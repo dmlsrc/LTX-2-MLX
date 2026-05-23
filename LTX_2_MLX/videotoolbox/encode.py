@@ -34,6 +34,8 @@ consumed lazily so a streaming source doesn't have to materialize.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import itertools
 import time
 from pathlib import Path
@@ -150,6 +152,8 @@ def encode_video_videotoolbox(
     vsr_temporal_mode: str = "normal",
     encode_quality: float = 0.65,
     encode_chroma: str = "auto",
+    n_source_frames: int | None = None,
+    progress_stack: StackedPhaseBars | None = None,
     audio_codec: str = "alac",
     verbose: bool = True,
 ) -> Path:
@@ -182,7 +186,12 @@ def encode_video_videotoolbox(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ---- Peek first frame to learn dimensions + dtype ---------------------
-    first, frame_iter, n_source_frames = _peek_frames(frames)
+    first, frame_iter, peeked_total = _peek_frames(frames)
+    # Explicit caller-supplied total wins over the peeked one (lets
+    # streaming-decode callers pass the known frame count even though
+    # they hand the encoder an unsized iterator).
+    if n_source_frames is None:
+        n_source_frames = peeked_total
     if first.ndim != 3:
         raise ValueError(
             f"frame must be (H,W,C); got shape {first.shape}, dtype {first.dtype}"
@@ -205,99 +214,124 @@ def encode_video_videotoolbox(
 
     profile = _pick_hevc_profile(vsr_spatial_mode, encode_chroma)
 
-    # ---- VSR session ------------------------------------------------------
-    vsr: VsrSession | None = None
-    if do_vsr:
-        vsr = VsrSession(in_w, in_h, mode=vsr_spatial_mode, fps=fps)
-
-    # ---- VTFRC session ----------------------------------------------------
-    vtfrc: VtfrcSession | None = None
-    if do_temporal:
-        vtfrc = VtfrcSession(
-            out_w, out_h,
-            source_fps=fps, target_fps=target_fps,
-            mode=vsr_temporal_mode,
-        )
-
-    # ---- Audio track ------------------------------------------------------
-    audio_track: AudioTrack | None = None
-    if audio_waveform is not None:
-        if audio_sample_rate is None:
-            raise ValueError(
-                "audio_sample_rate is required when audio_waveform is provided"
-            )
-        arr = _normalize_audio_for_track(audio_waveform)
-        audio_track = AudioTrack(arr, sample_rate=int(audio_sample_rate))
-
-    # ---- Pick writer source format ----------------------------------------
-    # When VSR or VTFRC is active, the writer source = the last stage's dst.
-    # When neither is active, the writer source = NV12 and we upload through
-    # CoreImage. NV12 keeps the encoder's RGB->YUV cost in one place.
-    if vtfrc is not None:
-        writer_src_fmt = _pb.resolve_pixel_format(vtfrc.dst_attrs)
-    elif vsr is not None:
-        writer_src_fmt = _pb.resolve_pixel_format(vsr.dst_attrs)
+    # ---- Setup phase ------------------------------------------------------
+    # VsrSession / VtfrcSession / AVWriter constructors each print to stdout
+    # unconditionally ("VSR session ready ...", "Temporal session ready ...",
+    # "[encode] AVAssetWriter -> ..."), plus we add the chain description
+    # and the optional audio sidecar line.  When `progress_stack` is alive
+    # (the caller is showing a "VAE chunks" bar above us), those raw prints
+    # would stomp on the bar row.  Redirect them through a StringIO and
+    # emit the captured block via `progress_stack.write()` so the lines
+    # land cleanly above the bars (tqdm.write-style); when no stack is
+    # supplied, the prints flow normally to stdout.
+    _setup_buf: io.StringIO | None = None
+    if progress_stack is not None:
+        _setup_buf = io.StringIO()
+        _setup_ctx = contextlib.redirect_stdout(_setup_buf)
     else:
-        writer_src_fmt = _pb.PIX_NV12
+        _setup_ctx = contextlib.nullcontext()
 
-    # ---- Writer + pool wiring --------------------------------------------
-    writer = AVWriter(
-        output_path,
-        width=out_w, height=out_h, fps=target_fps,
-        source_pixel_format=writer_src_fmt,
-        profile=profile,
-        quality=encode_quality,
-        label="encode",
-        audio_track=audio_track,
-        audio_codec=audio_codec,
-    )
+    with _setup_ctx:
+        # VSR session
+        vsr: VsrSession | None = None
+        if do_vsr:
+            vsr = VsrSession(in_w, in_h, mode=vsr_spatial_mode, fps=fps)
 
-    # Zero-copy hookups: VTFRC writes into the writer's adaptor pool when
-    # active, VSR writes into VTFRC's source pool (or directly into the
-    # writer's adaptor pool when there's no VTFRC).
-    if vtfrc is not None:
-        vtfrc.use_dst_pool(writer.adaptor.pixelBufferPool())
-        if vsr is not None:
-            # VSR's dst is VTFRC's src — but VTFRC owns its own src pool.
-            # We don't wire those together; VSR's _dst_pool stays its own
-            # pool and the VT call between VSR.dst and VTFRC.feed copies
-            # the buffer reference, not the pixels.
-            pass
-    elif vsr is not None:
-        vsr.use_dst_pool(writer.adaptor.pixelBufferPool())
-
-    # ---- Sidecar WAV (optional) ------------------------------------------
-    sidecar_path: Path | None = None
-    if audio_track is not None and save_audio_sidecar:
-        sidecar_path = output_path.with_suffix(".wav")
-        audio_track.save_wav(sidecar_path)
-        if verbose:
-            print(
-                f"  audio sidecar: {sidecar_path}  "
-                f"({audio_bit_depth}, {audio_track.sample_rate} Hz)"
+        # VTFRC session
+        vtfrc: VtfrcSession | None = None
+        if do_temporal:
+            vtfrc = VtfrcSession(
+                out_w, out_h,
+                source_fps=fps, target_fps=target_fps,
+                mode=vsr_temporal_mode,
             )
 
-    # ---- Stream frames through the chain ---------------------------------
-    # Chain description goes ABOVE the progress bar so the user sees what
-    # the encode is doing while it runs (the writer.__init__ already
-    # printed its own AVAssetWriter line above this).
-    stages: list[str] = []
-    if vsr is not None:
-        stages.append(f"VSR={vsr_spatial_mode}({scale}x)")
-    if vtfrc is not None:
-        stages.append(f"VTFRC={fps:g}->{target_fps:g}fps")
-    chain = " + ".join(stages) if stages else "passthrough"
-    if verbose:
-        print(f"  encode (videotoolbox): {chain} -> HEVC {profile}")
-        print(f"  -> {output_path}")
+        # Audio track
+        audio_track: AudioTrack | None = None
+        if audio_waveform is not None:
+            if audio_sample_rate is None:
+                raise ValueError(
+                    "audio_sample_rate is required when audio_waveform is provided"
+                )
+            arr = _normalize_audio_for_track(audio_waveform)
+            audio_track = AudioTrack(arr, sample_rate=int(audio_sample_rate))
+
+        # Pick writer source format.  When VSR or VTFRC is active, the
+        # writer source = the last stage's dst.  When neither is active,
+        # the writer source = NV12 and we upload through CoreImage (keeps
+        # the encoder's RGB->YUV cost in one place).
+        if vtfrc is not None:
+            writer_src_fmt = _pb.resolve_pixel_format(vtfrc.dst_attrs)
+        elif vsr is not None:
+            writer_src_fmt = _pb.resolve_pixel_format(vsr.dst_attrs)
+        else:
+            writer_src_fmt = _pb.PIX_NV12
+
+        # Writer + pool wiring.  Zero-copy hookups: VTFRC writes into the
+        # writer's adaptor pool when active; VSR writes into its own dst
+        # pool when VTFRC is between (a copy at the VT call boundary), or
+        # directly into the writer's adaptor pool when there is no VTFRC.
+        writer = AVWriter(
+            output_path,
+            width=out_w, height=out_h, fps=target_fps,
+            source_pixel_format=writer_src_fmt,
+            profile=profile,
+            quality=encode_quality,
+            label="encode",
+            audio_track=audio_track,
+            audio_codec=audio_codec,
+        )
+        if vtfrc is not None:
+            vtfrc.use_dst_pool(writer.adaptor.pixelBufferPool())
+        elif vsr is not None:
+            vsr.use_dst_pool(writer.adaptor.pixelBufferPool())
+
+        # Optional audio sidecar WAV.
+        sidecar_path: Path | None = None
+        if audio_track is not None and save_audio_sidecar:
+            sidecar_path = output_path.with_suffix(".wav")
+            audio_track.save_wav(sidecar_path)
+            if verbose:
+                print(
+                    f"  audio sidecar: {sidecar_path}  "
+                    f"({audio_bit_depth}, {audio_track.sample_rate} Hz)"
+                )
+
+        # Chain description (above the encode bar so users see what's running).
+        stages: list[str] = []
+        if vsr is not None:
+            stages.append(f"VSR={vsr_spatial_mode}({scale}x)")
+        if vtfrc is not None:
+            stages.append(f"VTFRC={fps:g}->{target_fps:g}fps")
+        chain = " + ".join(stages) if stages else "passthrough"
+        if verbose:
+            print(f"  encode (videotoolbox): {chain} -> HEVC {profile}")
+            print(f"  -> {output_path}")
+
+    # If we captured the setup output, route it above the caller's bar
+    # stack now — single bars.write() call so the bars stay coherent.
+    if _setup_buf is not None:
+        _setup_msg = _setup_buf.getvalue().rstrip("\n")
+        if _setup_msg:
+            progress_stack.write(_setup_msg)
 
     # PhaseBar gives a stable, fixed-column progress display.  Total is
     # known for list / ndarray inputs; iterators get an indeterminate bar
     # (count-only, no ETA).  Suppress entirely when verbose=False.
+    #
+    # When `progress_stack` is provided, the encoder shares the caller's
+    # stack — useful when generate.py wants a "VAE chunks" bar above the
+    # encoder's "VT encode" bar, both rendered in one cohesive display.
+    # The caller owns close() in that mode; we just add our row.
     bars: StackedPhaseBars | None = None
+    owns_bars = False
     pbar = None
     if verbose:
-        bars = StackedPhaseBars()
+        if progress_stack is not None:
+            bars = progress_stack
+        else:
+            bars = StackedPhaseBars()
+            owns_bars = True
         pbar = bars.add(
             total=n_source_frames,
             desc="VT encode",
@@ -342,7 +376,7 @@ def encode_video_videotoolbox(
                 n_out += 1
                 del out_pb
     finally:
-        if bars is not None:
+        if bars is not None and owns_bars:
             bars.close()
         writer.finish()
         if vtfrc is not None:
@@ -353,10 +387,18 @@ def encode_video_videotoolbox(
     if verbose:
         elapsed = time.perf_counter() - started
         size = output_path.stat().st_size
-        print(
+        done_msg = (
             f"  done: {_human_size(size)} in {elapsed:.1f}s "
             f"({n_in} src frame{'s' if n_in != 1 else ''}, "
             f"{n_out} written)"
         )
+        # In caller-managed-stack mode the bars are still alive at this
+        # point (the caller closes them after we return), so a raw print
+        # would stomp on the bottom bar's row.  Route through bars.write()
+        # which clears the bar rows, prints above them, and redraws.
+        if progress_stack is not None and not owns_bars:
+            progress_stack.write(done_msg)
+        else:
+            print(done_msg)
 
     return output_path

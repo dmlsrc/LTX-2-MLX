@@ -145,12 +145,21 @@ def encode_video_dispatch(
     vsr_temporal_mode: str = "normal",
     vsr_encode_quality: float = 0.65,
     vsr_audio_codec: str = "alac",
+    n_source_frames: int | None = None,
+    progress_stack=None,
 ):
     """Route an encode call to ffmpeg or AVAssetWriter.
 
     The signature mirrors the ffmpeg `encode_video(...)` plus the VT-only
     knobs; resolve_output_backend() picks the backend. Returns the
     encoded output path (extension may be normalized).
+
+    `n_source_frames` is the explicit frame count when `frames` is an
+    iterator (the streaming-decode path knows its length from the
+    latent shape but the iterator itself doesn't expose it).  Used
+    only by the videotoolbox backend's progress bar; ffmpeg ignores
+    it since the ffmpeg encoder collects frames eagerly into a list
+    before piping anyway.
     """
     backend = resolve_output_backend(
         output_backend, tier,
@@ -170,6 +179,8 @@ def encode_video_dispatch(
             vsr_temporal_mode=vsr_temporal_mode,
             encode_quality=vsr_encode_quality,
             audio_codec=vsr_audio_codec,
+            n_source_frames=n_source_frames,
+            progress_stack=progress_stack,
         )
     return encode_video(
         frames, output_path,
@@ -4078,6 +4089,17 @@ def generate_video(
                 else:
                     print(message, flush=True)
 
+            # Resolve the backend up front so the pipeline can skip the
+            # internal VAE decode + concat when we're going to stream
+            # chunks straight into the AVAssetWriter sink.  Eager (ffmpeg)
+            # path still gets the fully decoded video tensor it expects.
+            _resolved_backend = resolve_output_backend(
+                output_backend, output_tier,
+                vsr_spatial_mode=vsr_spatial_mode,
+                vsr_target_fps=vsr_target_fps,
+            )
+            _stream_decode = _resolved_backend == "videotoolbox"
+
             video, audio_waveform = av_pipeline.generate_distilled_two_stage(
                 positive_encoding=text_encoding,
                 config=av_config,
@@ -4087,6 +4109,7 @@ def generate_video(
                 progress_message=distilled_progress_message,
                 positive_audio_encoding=text_audio_encoding,
                 latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
+                decode_video=not _stream_decode,
             )
             if stage_progress is not None:
                 stage_progress.finish()
@@ -4100,6 +4123,13 @@ def generate_video(
                 if step >= total:
                     denoise_progress.finish()
 
+            _resolved_backend = resolve_output_backend(
+                output_backend, output_tier,
+                vsr_spatial_mode=vsr_spatial_mode,
+                vsr_target_fps=vsr_target_fps,
+            )
+            _stream_decode = _resolved_backend == "videotoolbox"
+
             video, audio_waveform = av_pipeline(
                 positive_encoding=text_encoding,
                 negative_encoding=null_encoding,
@@ -4109,6 +4139,7 @@ def generate_video(
                 positive_audio_encoding=text_audio_encoding,
                 negative_audio_encoding=null_audio_encoding,
                 latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
+                decode_video=not _stream_decode,
             )
             denoise_progress.finish()
         pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
@@ -4117,41 +4148,119 @@ def generate_video(
         else:
             timings.mark("generation + decode")
 
-        # Convert decoded video to per-frame list for encode_video
-        video_np = np.array(video)
-        print(f"  Raw video shape: {video_np.shape}, dtype: {video_np.dtype}")
-        # Squeeze any singleton dimensions
-        video_np = np.squeeze(video_np)
-        # Handle (C, T, H, W) format — C=3 is always smallest dim
-        if video_np.ndim == 4 and video_np.shape[0] == 3:
-            video_np = np.transpose(video_np, (1, 2, 3, 0))  # (T, H, W, C)
-        # Convert float32 [-1,1] to uint8 [0,255] (VAE output range is [-1, 1])
-        if video_np.dtype != np.uint8:
-            video_np = np.clip((video_np + 1) / 2 * 255.0, 0, 255).astype(np.uint8)
-        frames = [video_np[t] for t in range(video_np.shape[0])]
-        print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
+        if _stream_decode:
+            # Streaming path: `video` is the final_video_latent.  Build a
+            # chunk-by-chunk frame iterator that runs VAE decode on demand
+            # and hand it to the AVAssetWriter sink; no full-decoded video
+            # tensor is ever materialized in unified memory.
+            #
+            # The bar stack is owned here (not by the encoder) so we can
+            # stack a "VAE chunks" bar above the encoder's "VT encode"
+            # frames bar — same UX as scripts/vsr_harness.py.
+            from LTX_2_MLX.pipelines.streaming import (
+                iter_decoded_chunks, latent_dims, plan_vae_tiling,
+            )
+            from LTX_2_MLX.videotoolbox import StackedPhaseBars
 
-        if audio_waveform is not None:
-            print(f"  Generated audio: {audio_waveform.shape}")
-        timings.mark("frame conversion")
+            final_video_latent = video
+            effective_tiling = av_config._get_tiling_config()
+            n_total_frames, latent_h, latent_w = latent_dims(final_video_latent)
+            n_vae_chunks, tiling_desc = plan_vae_tiling(
+                final_video_latent, effective_tiling,
+            )
+            decoder_name = av_pipeline.video_decoder.__class__.__name__
+            print(
+                f"  Streaming VAE decode -> encoder: latent shape "
+                f"{tuple(final_video_latent.shape)} -> {latent_w}x{latent_h}, "
+                f"{n_total_frames} frames"
+            )
+            print(
+                f"  VAE decoder: {decoder_name} ({tiling_desc}, "
+                f"{n_vae_chunks} chunk{'s' if n_vae_chunks != 1 else ''})"
+            )
+            if audio_waveform is not None:
+                print(f"  Generated audio: {audio_waveform.shape}")
+            timings.mark("post-pipeline prep")
 
-        # Save video with audio
-        print(f"\nSaving video to {output_path}...")
-        final_path = encode_video_dispatch(
-            frames, output_path,
-            tier=output_tier, fps=output_fps,
-            audio_waveform=audio_waveform if audio_waveform is not None else None,
-            audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
-            save_audio_sidecar=save_audio_sidecar,
-            output_backend=output_backend,
-            vsr_spatial_mode=vsr_spatial_mode,
-            vsr_target_fps=vsr_target_fps,
-            vsr_temporal_mode=vsr_temporal_mode,
-            vsr_encode_quality=vsr_encode_quality,
-            vsr_audio_codec=vsr_audio_codec,
-        )
-        print(f"Done! Video saved to {final_path}")
-        timings.mark("output save")
+            print(f"\nSaving video to {output_path}...")
+
+            with StackedPhaseBars() as _stream_bars:
+                vae_pbar = _stream_bars.add(
+                    total=n_vae_chunks,
+                    desc="VAE chunks",
+                    unit="chunk",
+                )
+
+                def _chunk_aware_frames():
+                    """Yield per-frame ndarrays AND tick the VAE chunks
+                    bar on each chunk boundary.  Lets the user watch
+                    VAE chunk progress in lockstep with VT encode frame
+                    progress (the encoder adds its own bar to the same
+                    stack via the progress_stack kwarg below).
+                    """
+                    for chunk_frames in iter_decoded_chunks(
+                        final_video_latent, av_pipeline.video_decoder,
+                        tiling=effective_tiling,
+                        output_format="fp16_rgba",
+                    ):
+                        vae_pbar.update(1)
+                        while chunk_frames:
+                            yield chunk_frames.pop(0)
+
+                final_path = encode_video_dispatch(
+                    _chunk_aware_frames(), output_path,
+                    tier=output_tier, fps=output_fps,
+                    audio_waveform=audio_waveform if audio_waveform is not None else None,
+                    audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
+                    save_audio_sidecar=save_audio_sidecar,
+                    output_backend=output_backend,
+                    vsr_spatial_mode=vsr_spatial_mode,
+                    vsr_target_fps=vsr_target_fps,
+                    vsr_temporal_mode=vsr_temporal_mode,
+                    vsr_encode_quality=vsr_encode_quality,
+                    vsr_audio_codec=vsr_audio_codec,
+                    n_source_frames=n_total_frames,
+                    progress_stack=_stream_bars,
+                )
+            print(f"Done! Video saved to {final_path}")
+            timings.mark("output save")
+        else:
+            # Eager path: pipeline produced a fully decoded video tensor.
+            # Convert to per-frame uint8 list for the ffmpeg encoder.
+            video_np = np.array(video)
+            print(f"  Raw video shape: {video_np.shape}, dtype: {video_np.dtype}")
+            # Squeeze any singleton dimensions
+            video_np = np.squeeze(video_np)
+            # Handle (C, T, H, W) format — C=3 is always smallest dim
+            if video_np.ndim == 4 and video_np.shape[0] == 3:
+                video_np = np.transpose(video_np, (1, 2, 3, 0))  # (T, H, W, C)
+            # Convert float32 [-1,1] to uint8 [0,255] (VAE output range is [-1, 1])
+            if video_np.dtype != np.uint8:
+                video_np = np.clip((video_np + 1) / 2 * 255.0, 0, 255).astype(np.uint8)
+            frames = [video_np[t] for t in range(video_np.shape[0])]
+            print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
+
+            if audio_waveform is not None:
+                print(f"  Generated audio: {audio_waveform.shape}")
+            timings.mark("frame conversion")
+
+            # Save video with audio
+            print(f"\nSaving video to {output_path}...")
+            final_path = encode_video_dispatch(
+                frames, output_path,
+                tier=output_tier, fps=output_fps,
+                audio_waveform=audio_waveform if audio_waveform is not None else None,
+                audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
+                save_audio_sidecar=save_audio_sidecar,
+                output_backend=output_backend,
+                vsr_spatial_mode=vsr_spatial_mode,
+                vsr_target_fps=vsr_target_fps,
+                vsr_temporal_mode=vsr_temporal_mode,
+                vsr_encode_quality=vsr_encode_quality,
+                vsr_audio_codec=vsr_audio_codec,
+            )
+            print(f"Done! Video saved to {final_path}")
+            timings.mark("output save")
         if save_run_log and run_metadata is not None:
             save_run_log_sidecar(
                 run_log_sidecar_path(output_path),

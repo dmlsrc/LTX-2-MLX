@@ -74,19 +74,30 @@ def _fmt_duration(seconds: float) -> str:
     return f"--:--:{s:02d}"
 
 
-def _fmt_pace(seconds_per_step: float, unit: str) -> str:
+def _fmt_pace(seconds_per_step: float, unit: str, number_width: int = 6) -> str:
     """Slow → ` X.X s/<unit>`, fast → ` XX.X <unit>/s`.
 
-    Both forms are exactly `9 + len(unit)` chars wide: a 6-char number
-    via `:>6.1f`, a 1-char separator space, then either `s/<unit>` or
-    `<unit>/s` — both 2 + len(unit) chars. Per-bar pace width is
-    constant; across bars with different unit names the column width
-    differs by the difference in unit-name length, but that's stable
-    once the bars are constructed (unit is fixed per bar).
+    The number is right-justified in a `number_width`-char slot via
+    `:>{number_width}.1f`.  The default 6 fits values up to 9999.9.
+    When stacked with other bars, the caller passes the stack's
+    shared pace number width so the right edges of the numbers line
+    up across bars even when one bar's pace overflows the default
+    slot (e.g. a 38339.1 chunk/s pace alongside a 79.7 frame/s pace).
+
+    Per-bar total width is `3 + number_width + len(unit)` chars: the
+    number, a 1-char separator, then either `s/<unit>` or `<unit>/s`
+    — both 2 + len(unit) chars.
     """
     if seconds_per_step >= 1.0:
-        return f"{seconds_per_step:>6.1f} s/{unit}"
-    return f"{1.0 / seconds_per_step:>6.1f} {unit}/s"
+        return f"{seconds_per_step:>{number_width}.1f} s/{unit}"
+    return f"{1.0 / seconds_per_step:>{number_width}.1f} {unit}/s"
+
+
+def _natural_pace_number_width(seconds_per_step: float) -> int:
+    """Width the pace number would consume without padding."""
+    if seconds_per_step >= 1.0:
+        return len(f"{seconds_per_step:.1f}")
+    return len(f"{1.0 / seconds_per_step:.1f}")
 
 
 # ---------------------------------------------------------------------------
@@ -107,28 +118,46 @@ class _StackState:
       when `count_width` grows.
     """
 
-    __slots__ = ("total", "count_width", "bars")
+    __slots__ = ("total", "count_width", "label_width", "pace_number_width", "bars")
 
     def __init__(self) -> None:
         self.total: int = 0
         self.count_width: int = 7  # n_width=3 floor → 2*3+1 = 7
+        # Label slot width is grown to the longest registered bar's
+        # `desc` so the `[` opening every bar's progress segment lines
+        # up vertically across the stack ("VAE chunks [...]" and
+        # "VT encode  [...]" instead of mis-aligned brackets).
+        self.label_width: int = 0
+        # Pace-number slot width — grown lazily during render when a
+        # bar's natural pace formatting needs more digits than the
+        # current slot.  Default 6 fits values up to 9999.9; bumps to
+        # 7+ for high-throughput bars (38339.1 chunk/s, etc.).  When
+        # the slot grows, every previously-rendered bar in the stack
+        # is force-redrawn so all pace numbers right-align to the
+        # same column across rows.
+        self.pace_number_width: int = 6
         self.bars: list["PhaseBar"] = []
 
     def register(self, bar: "PhaseBar") -> int:
-        """Add a bar, expand `count_width` if needed, and re-render any
-        previously-registered bars so their count column matches the
-        new width. Returns the bar's row index."""
+        """Add a bar, expand `count_width` / `label_width` if needed, and
+        re-render any previously-registered bars so their columns match
+        the new widths. Returns the bar's row index."""
         row = self.total
         self.total += 1
-        natural = bar._natural_count_width()
-        widened = natural > self.count_width
-        if widened:
-            self.count_width = natural
+        natural_count = bar._natural_count_width()
+        natural_label = len(bar._desc_label)
+        widened = False
+        if natural_count > self.count_width:
+            self.count_width = natural_count
+            widened = True
+        if natural_label > self.label_width:
+            self.label_width = natural_label
+            widened = True
         self.bars.append(bar)
         if widened:
             # Re-render every bar registered BEFORE this one so their
-            # count slot uses the new (wider) width. The new bar's own
-            # initial render happens after register() returns.
+            # count / label slots use the new (wider) widths. The new
+            # bar's own initial render happens after register() returns.
             for b in self.bars[:-1]:
                 b._render(force=True)
         return row
@@ -155,6 +184,7 @@ class PhaseBar:
         bar_width: int = 28,
         mininterval: float = 1.0,
         indent: str = "  ",
+        show_step1: bool = False,
         _stack: Optional[_StackState] = None,
     ):
         self._total = total
@@ -163,10 +193,18 @@ class PhaseBar:
         self._bar_width = bar_width
         self._mininterval = mininterval
         self._indent = indent
+        self._show_step1 = show_step1
 
         # Timing state.
         self._t_origin: float = time.perf_counter()
         self._t_last: Optional[float] = None  # None until first update()
+        # Time of the first update(), captured once.  When `show_step1`
+        # is enabled, the STEP1 column reports `_t_first_update - _t_origin`
+        # — the wall-clock cost of the first unit of work.  Useful for
+        # denoise-style bars where the first step is often warmup-heavy
+        # (compile cache miss, first kernel dispatch, etc.) and worth
+        # surfacing separately from the running pace.
+        self._t_first_update: Optional[float] = None
         self._n: int = 0
 
         # Render bookkeeping.
@@ -199,7 +237,12 @@ class PhaseBar:
     def update(self, n: int = 1) -> None:
         """Advance by `n` units. Pace and ETA are derived from `self._n`
         divided by `self._t_last - self._t_origin` at render time."""
-        self._t_last = time.perf_counter()
+        now = time.perf_counter()
+        self._t_last = now
+        if self._t_first_update is None:
+            # Captured once; STEP1 column reads (this - origin) when
+            # show_step1=True is set on the bar.
+            self._t_first_update = now
         self._n += n
         self._render(force=False)
 
@@ -258,15 +301,52 @@ class PhaseBar:
                 eta_str = f"{_fmt_duration(max(0, total - n) * sec_per_unit):>8}"
             else:
                 eta_str = "      --"
-            pace_str = _fmt_pace(sec_per_unit, self._unit)
+            # Grow the stack's shared pace-number slot if this bar's
+            # natural pace formatting needs more chars than the
+            # current slot.  Force-redraw the OTHER bars (not self —
+            # we're about to render below) so their pace numbers
+            # right-align in the new wider column.
+            natural_pw = _natural_pace_number_width(sec_per_unit)
+            if natural_pw > self._stack.pace_number_width:
+                self._stack.pace_number_width = natural_pw
+                for b in self._stack.bars:
+                    if b is not self:
+                        b._render(force=True)
+            pace_str = _fmt_pace(
+                sec_per_unit, self._unit,
+                number_width=self._stack.pace_number_width,
+            )
         else:
             run_str = "      --"
             eta_str = "      --"
             pace_str = "measuring"
 
+        # Pad the label to the stack's max so the `[` opening lines up
+        # across bars (e.g. "VAE chunks" (10) and "VT encode " (9) both
+        # render in a 10-char slot when stacked together).  Standalone
+        # bars use their own natural width.
+        label_width = max(self._stack.label_width, len(self._desc_label))
+        padded_label = f"{self._desc_label:<{label_width}}"
+
+        # Optional STEP1 column: wall-clock cost of the first update
+        # (origin -> first update timestamp).  Matches the DenoiseProgress
+        # surface in scripts/generate.py so a PhaseBar can drop-in
+        # replace it for denoise-style runs where the first step is
+        # typically warmup-heavy.  Same 8-char `_fmt_duration` format
+        # as RUN / ETA.
+        if self._show_step1:
+            if self._t_first_update is not None:
+                step1_dur = max(0.0, self._t_first_update - self._t_origin)
+                step1_str = f" | STEP1 {_fmt_duration(step1_dur):>8}"
+            else:
+                step1_str = " | STEP1       --"
+        else:
+            step1_str = ""
+
         return (
-            f"{self._indent}{self._desc_label} [{bar}] "
-            f"{count_str} | {pct_str} | RUN {run_str} | ETA {eta_str} | {pace_str}"
+            f"{self._indent}{padded_label} [{bar}] "
+            f"{count_str} | {pct_str}{step1_str} "
+            f"| RUN {run_str} | ETA {eta_str} | {pace_str}"
         )
 
     def _render(self, *, force: bool) -> None:
@@ -355,23 +435,47 @@ class StackedPhaseBars:
         sys.stderr.write(message)
         if not message.endswith("\n"):
             sys.stderr.write("\n")
-        # Reserve n_bars fresh rows for the bars so the cursor is back at
-        # "one line below the bottom bar" — the invariant render() relies on.
-        sys.stderr.write("\n" * n_bars)
+        # Re-emit the bars inline (each line followed by \n), so the cursor
+        # naturally advances row-by-row and the final \n parks it one row
+        # below the bottom bar — restoring the render-invariant column.
+        #
+        # Earlier this method reserved rows via `\n * n_bars` and then
+        # re-rendered each bar with the cursor-up-then-content-then-cursor-
+        # down dance.  In a live terminal that's equivalent, but file
+        # captures that don't fully interpret every ANSI escape end up
+        # showing the blank reserved row AND the bar's content as separate
+        # lines (the bar appears twice).  Direct inline writes here avoid
+        # the dance entirely.
+        for i, bar in enumerate(self._bars):
+            line = bar._build_line()
+            pad = " " * max(0, bar._last_line_len - len(line))
+            sys.stderr.write(line + pad)
+            bar._last_line_len = len(line)
+            bar._last_render_t = time.perf_counter()
+            if i < n_bars - 1:
+                sys.stderr.write("\n")
+        # One final \n so the cursor parks at col 0 of the row immediately
+        # below the bottom bar — same invariant render() relies on.
+        sys.stderr.write("\n")
         sys.stderr.flush()
-        # Force-redraw each bar at its (now-shifted) row.
-        for bar in self._bars:
-            bar._render(force=True)
 
     def close(self) -> None:
-        """Close all bars and leave the cursor immediately below the stack.
+        """Close all bars and leave the cursor at column 0 of the parked row.
 
         During the run the logical cursor sits one row below the bottom
         bar (the row reserved by the final `\\n` printed when the last
-        bar was added).  close() doesn't print another newline, so the
-        next caller-side `print()` writes onto that already-reserved
-        row, giving tight visual coupling between the final bar render
-        and any "done: ..." / "Processed: ..." summary line.
+        bar was added), but at whatever column the most recent render
+        left it — `_render` uses `\\033[<n>B` to return the cursor to
+        the parked row after writing, which preserves the *column*
+        position, leaving the cursor at column `len(line+pad)` rather
+        than column 0.
+
+        Without a carriage return here, the next caller-side `print()`
+        would append to the parked row at that column, producing output
+        like "<bar line>                <padding>done: 11.1 MiB ...".
+        We emit `\\r` to move the cursor to column 0 of the parked row;
+        the caller's next `print()` then writes on a clean line tightly
+        below the bar.
 
         Idempotent.
         """
@@ -380,6 +484,8 @@ class StackedPhaseBars:
         for bar in self._bars:
             bar.close()
         self._bars.clear()
+        sys.stderr.write("\r")
+        sys.stderr.flush()
 
     def __enter__(self) -> "StackedPhaseBars":
         return self
