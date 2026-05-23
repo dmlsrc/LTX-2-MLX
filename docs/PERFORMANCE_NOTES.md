@@ -709,13 +709,28 @@ SDPA path).  So the relative ordering flipped.
 **Verdict:** mxfp8 is structurally a net regression on M1 Max -- not
 fixable by tuning, only by either:
 
-- (a) A from-scratch native-INT8 kernel using M1's `dot4I8Packed`
-  intrinsics (~21 TFlops/s theoretical INT8 peak).  Same multi-week
-  kernel-writing effort class as the FA-2 hypothesis.  Apple, MLX, and
-  Draw Things have all independently chosen NOT to do this for Apple7
-  -- the engineering cost doesn't justify the win, and on M1 even a
-  perfect INT8 kernel would only modestly beat BF16 because Apple
-  didn't invest in INT8 throughput improvements until M3.
+- (a) **DEAD — no INT8 hardware path exists on M1.**  Earlier text said
+  "a from-scratch native-INT8 kernel using M1's `dot4I8Packed` intrinsics
+  (~21 TFlops/s theoretical INT8 peak)" could maybe win.  That claim was
+  wrong; verified empirically 2026-05-23 via
+  `scripts/bench_int8_alu.py`.  Findings:
+  * **Metal Shading Language has no `dot(char4, char4)` intrinsic** —
+    compile error.  Anyone wanting packed INT8 dot must manually unroll
+    4 scalar mul+add ops.
+  * **`simdgroup_matrix<T>` (M1's tensor accelerator) accepts only
+    `half`/`bfloat`/`float`, not `char`** — per Apple's MSL spec section
+    2.4.  No INT8 path through the GEMM accelerator.
+  * **Microbench result** (32k threads × 1M MACs each on M1 Max):
+    FP16 scalar fma = 0.76 TOps/s, INT8 scalar mac = 0.63 TOps/s, INT8
+    4-way unrolled "dot" = 0.80 TOps/s (which is 4 ops/iter at 3.8×
+    slower per iter than FP16 single MAC — per-MAC throughput equal,
+    no advantage).
+  * **`mpp::tensor_ops::matmul2d` (Metal 4 cooperative-tensor with
+    INT8 support) is M5+ only** — confirmed via Cider
+    (https://github.com/Mininglamp-AI/cider), explicitly skips C++
+    build on M4 and below.
+  Net: M1's INT8 lives on the same scalar ALU as FP16/INT32.  No path
+  to INT8 > BF16 throughput exists on Apple7 silicon.
 - (b) M3+ hardware where Apple-tuned INT8 kernels start to beat BF16
   (Draw Things' Int8 attention claims 1.19-1.76× e2e on M3+, which
   arithmetically requires INT8 GEMM > BF16 GEMM).

@@ -72,7 +72,7 @@ have been exhausted via microbench evidence (full reasoning in
 
 | Previous candidate | Status | Evidence |
 |---|---|---|
-| **mxfp8 quant on `project_*`** | **DEAD** — +10-45 % SLOWER post-AdaLN-fix | `bench_ff_microbench.py quant_matmul`: `mx.quantized_matmul` is structurally a BF16 matmul with on-the-fly dequant (`fp_quantized.h:139`, `:663`) -- never reaches M1 INT8 instruction throughput.  Hits 4.7 TFlops/s vs steel_gemm's 7.95.  Will always lose on M1; flips on M3+/M5 hardware. |
+| **mxfp8 quant on `project_*`** | **DEAD** — +10-45 % SLOWER post-AdaLN-fix | `bench_ff_microbench.py quant_matmul`: `mx.quantized_matmul` is structurally a BF16 matmul with on-the-fly dequant (`fp_quantized.h:139`, `:663`).  Hits 4.7 TFlops/s vs steel_gemm's 7.95.  Will always lose on M1; flips on M3+/M5 hardware.  Empirically verified 2026-05-23 via `scripts/bench_int8_alu.py`: **no INT8 hardware path exists on Apple7**.  Metal has no `dot(char4,char4)` intrinsic, `simdgroup_matrix` accepts only `half/bfloat/float`, and `mpp::tensor_ops::matmul2d` (Metal 4 cooperative-tensor with INT8 inputs) is M5+ only.  Microbench: INT8 4-way unrolled "dot" achieves 0.80 TOps/s vs FP16 scalar fma 0.76 TOps/s — per-MAC tied, no advantage.  The "21 TFlops/s theoretical INT8 peak" claim in prior PERFORMANCE_NOTES was wishful. |
 | **Q+K+V fusion into one matmul** | **DEAD** — −1.2 % regression | `bench_ff_microbench.py qkv`: 3 separate (111.75 ms) is faster than 1 packed (113.10 ms).  Bandwidth saving on input dominated by larger output's tile-alignment + post-split overhead. |
 | **Custom FlashAttention-2 Metal kernel** | **ABANDONED** — D-sweep refuted tile-size hypothesis | `bench_ff_microbench.py sdpa_d_sweep`: D=120 (MLX bk=32) achieves 5.66 TFlops/s vs D=128 (MLX bk=16) 5.95 TFlops/s -- MLX's small-tile choice is CORRECT.  MLX SDPA already at 75 % of steel_gemm ceiling; theoretical max FA-2 lift is ~1.34× per call ≈ ~5.5 % end-to-end.  Not worth 2-5 days of kernel work. |
 | **Custom fused / streamed BF16 FFN kernel** | **ABANDONED** — feasibility bench shows 3.8-7.5 % per-call ceiling | `bench_ff_microbench.py fused`: stock FF runs at 91-95 % of `steel_gemm` ceiling.  Conservative recoverable wall (vs both-matmuls-chained-no-GELU floor) = +12 ms = +3.8 % per call.  Optimistic recoverable wall (vs a perfect tiled fused kernel that elides hidden HBM round-trip AND retains GEMM efficiency) = +24 ms = +7.5 %.  Per-step ceiling: +1.3-2.6 % of 45.5 s.  Streamed-FFN sketch (per-chunk inner-dim streaming on top of MLX) additionally pays an output-accumulation tax and many-small-GEMMs efficiency loss; would not clear the bar.  See `PERFORMANCE_NOTES.md` Archive "Custom fused / streamed BF16 FFN kernel". |
@@ -88,8 +88,11 @@ floor on M1 Max for this shape with MLX 0.31.2.  Further wins require:
   `--transformer-cache-quantize` flags become positive levers on
   M5+ once NAX routes `fp_quantized_nax.metal`.
 - (b) **Upstream MLX kernel improvements** — VAE int-overflow fix
-  (already pending), possible SDPA tile retuning, future native INT8
-  GEMM kernel using `dot4I8Packed`.
+  (already pending), possible SDPA tile retuning.  (Earlier text
+  mentioned a future "native INT8 GEMM kernel using `dot4I8Packed`";
+  empirically refuted on 2026-05-23 — Apple7 has no INT8 hardware
+  path.  See `scripts/bench_int8_alu.py` + `PERFORMANCE_NOTES.md`
+  mxfp8 entry.)
 
 See "2026-05-17 follow-up" session below for the per-parent rollup and
 the original detailed analysis that drove this hunt.
