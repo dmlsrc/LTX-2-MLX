@@ -583,6 +583,35 @@ class LTXModel(nn.Module):
         object.__setattr__(self, "_compiled_transformer_block_groups", {})
         self._transformer_block_compile_disabled = False
         self.cross_attention_adaln = cross_attention_adaln
+
+        # Radial Attention path-a quality probe.  Set via `set_radial_attention()`.
+        # When None, behavior is unchanged.  Tuple of (decay_factor, dense_blocks,
+        # dense_steps).  `_radial_step` is the per-pipeline step counter consumed
+        # by dense_steps; reset by `reset_radial_step_counter()`.
+        self._radial_attention: Optional[Tuple[float, int, int]] = None
+        self._radial_step: int = 0
+
+        # AdaSpa: Adaptive Sparse Attention.  Set via `set_adaspa()`.  Tuple
+        # of (sparsity, warmup_steps, refresh_steps_tuple).  See
+        # `adaspa_mask.py`.  `_adaspa_step` increments per forward; current
+        # phase is derived from counter vs warmup/refresh schedule.
+        self._adaspa_config: Optional[Tuple[float, int, Tuple[int, ...]]] = None
+        self._adaspa_step: int = 0
+
+        # First Block Cache (FBCache): adaptive whole-step skip based on the
+        # residual delta after the first transformer block.  Set via
+        # `set_fbcache(threshold, warmup)`.  Doesn't change attention math —
+        # just bypasses blocks 1..N-1 when block 0's output is close to the
+        # cached one from the prior step.  See arXiv:2411.19108 + the
+        # ChengZeyi/ParaAttention implementation.
+        self._fbcache_config: Optional[Tuple[float, int]] = None
+        self._fbcache_step: int = 0
+        self._fbcache_prev_block0_vx: Optional[mx.array] = None
+        self._fbcache_prev_block0_ax: Optional[mx.array] = None
+        self._fbcache_prev_residual_vx: Optional[mx.array] = None
+        self._fbcache_prev_residual_ax: Optional[mx.array] = None
+        self._fbcache_prev_seq_len: Optional[int] = None
+        self._fbcache_skip_count: int = 0
         
         # Eval frequency setup
         if fast_mode:
@@ -1055,6 +1084,400 @@ class LTXModel(nn.Module):
                 print(f"    {name:<24} {seconds:7.2f}s  {pct:5.1f}%")
             print(f"    {'profiled total':<24} {total:7.2f}s")
 
+    def set_radial_attention(
+        self,
+        decay_factor: Optional[float],
+        dense_blocks: int = 0,
+        dense_steps: int = 0,
+    ) -> None:
+        """Enable / disable Radial Attention for video self-attn.
+
+        Args:
+            decay_factor: Radial decay factor (typical 0.25–2.0).  Pass None to
+                disable.  Sparsity is largely insensitive to this at LTX stage 1's
+                small token_per_frame=144; it's a real knob at stage 2 (tpf=576).
+            dense_blocks: First M transformer blocks (idx < M) run dense (no
+                mask), the rest run with the radial mask.  Default 0 = all
+                blocks radial.
+            dense_steps: First N denoise steps run dense (no mask).  Counter is
+                model-wide and reset via `reset_radial_step_counter()` or
+                another `set_radial_attention()` call.  Important for distilled
+                pipelines where early steps are high-noise and sparsity errors
+                compound — Radial paper runs ~half the steps dense.
+
+        See `LTX_2_MLX/model/transformer/radial_mask.py` for the algorithm.
+        """
+        if decay_factor is None:
+            self._radial_attention = None
+        else:
+            self._radial_attention = (
+                float(decay_factor), int(dense_blocks), int(dense_steps),
+            )
+        self._radial_step = 0
+
+    def reset_radial_step_counter(self) -> None:
+        """Reset the per-pipeline denoise-step counter consumed by `dense_steps`.
+
+        Pipelines should call this once at the start of each generation if
+        running multiple generations in a single process; CLI invocations of
+        `scripts/generate.py` don't need to — the counter is reset implicitly
+        when `set_radial_attention()` is called after model load.
+        """
+        self._radial_step = 0
+
+    def set_adaspa(
+        self,
+        sparsity: Optional[float],
+        warmup_steps: int = 1,
+        refresh_steps: Tuple[int, ...] = (),
+    ) -> None:
+        """Enable / disable AdaSpa for video self-attn.
+
+        Args:
+            sparsity: fraction of K-blocks to mask out per Q-block (0.0–0.95).
+                Pass None to disable.  Paper default 0.8; we'll start lower
+                (0.5) for LTX distilled and tune up.
+            warmup_steps: number of dense forward passes before the first
+                search.  Paper default 10 on 50-step models — for LTX
+                distilled (11 total steps) we recommend 1 or 2.  The
+                `warmup_steps`-th forward is the SEARCH step (dense + capture
+                mask).  Subsequent forwards use the cached sparse mask.
+            refresh_steps: tuple of additional step indices at which to
+                re-search.  Empty by default (single search at warmup_steps).
+
+        Also resets cached masks on every Attention instance.
+        """
+        if sparsity is None:
+            self._adaspa_config = None
+        else:
+            sparsity = float(sparsity)
+            if not 0.0 <= sparsity < 1.0:
+                raise ValueError(
+                    f"adaspa sparsity must be in [0.0, 1.0); got {sparsity}"
+                )
+            warmup_steps = max(1, int(warmup_steps))
+            refresh_steps = tuple(int(r) for r in refresh_steps)
+            self._adaspa_config = (sparsity, warmup_steps, refresh_steps)
+        self._adaspa_step = 0
+        # Reset per-Attention cached masks.
+        self._reset_adaspa_caches()
+
+    def _reset_adaspa_caches(self) -> None:
+        """Walk transformer blocks and call attn1.reset_adaspa_state() on each."""
+        for block in self.transformer_blocks:
+            for attr in ("attn1", "audio_attn1", "attn2", "audio_attn2"):
+                module = getattr(block, attr, None)
+                if module is not None and hasattr(module, "reset_adaspa_state"):
+                    module.reset_adaspa_state()
+
+    def _maybe_attach_adaspa_state(
+        self,
+        video_args: Optional[TransformerArgs],
+        video: Optional[Modality],
+    ) -> Optional[TransformerArgs]:
+        """Compute the per-forward AdaSpa phase + attach to video_args.
+
+        Phase derivation:
+        - step < warmup_steps - 1     → 'dense'  (pure warmup)
+        - step == warmup_steps - 1 OR step in refresh_steps → 'search'
+                                       (dense + capture mask)
+        - step > warmup_steps - 1 and not refresh → 'sparse'
+                                       (use cached mask)
+
+        Counter increments after each call so subsequent forwards see the
+        next step.  Block size is auto-aligned to token_per_frame.
+        """
+        if (
+            self._adaspa_config is None
+            or video_args is None
+            or video is None
+            or video.positions is None
+            or video.positions.size == 0
+        ):
+            return video_args
+
+        sparsity, warmup_steps, refresh_steps = self._adaspa_config
+        current_step = self._adaspa_step
+        self._adaspa_step = current_step + 1
+        seq_len = int(video_args.x.shape[1])
+
+        # Stage transition: when seq_len changes from the prior forward, the
+        # cached per-block masks no longer match the new shape.  Force a fresh
+        # search at the first forward of the new stage so stage 2 gets its own
+        # mask without the user having to specify refresh_steps explicitly.
+        prev_seq_len = getattr(self, "_adaspa_prev_seq_len", None)
+        shape_changed = prev_seq_len is not None and prev_seq_len != seq_len
+        self._adaspa_prev_seq_len = seq_len
+
+        # Phase decision (counter is 0-indexed; warmup_steps=2 means
+        # step 0 is dense warmup, step 1 is search, step 2+ is sparse).
+        if current_step < warmup_steps - 1:
+            phase = "dense"
+        elif current_step == warmup_steps - 1 or current_step in refresh_steps or shape_changed:
+            phase = "search"
+        else:
+            phase = "sparse"
+        if video.positions.ndim != 4 or video.positions.shape[1] < 1:
+            return video_args
+        temporal = video.positions[0, 0, :, 0]
+        changed = (temporal[1:] != temporal[:-1]).astype(mx.int32)
+        num_frame = int(changed.sum().item()) + 1
+        if num_frame < 2 or seq_len % num_frame != 0:
+            return video_args
+        from LTX_2_MLX.model.transformer.adaspa_mask import choose_adaspa_block_size
+        tpf = seq_len // num_frame
+        block_size = choose_adaspa_block_size(tpf, max_size=64)
+
+        adaspa_state = {
+            "phase": phase,
+            "block_size": block_size,
+            "sparsity": sparsity,
+        }
+        # One-time log per (phase, shape) so the user can see what's happening.
+        log_key = (current_step, phase, seq_len, block_size)
+        if getattr(self, "_adaspa_logged_step", None) != log_key:
+            print(
+                f"  [adaspa] step={current_step}/{warmup_steps} "
+                f"phase={phase} seq_len={seq_len} num_frame={num_frame} "
+                f"tpf={tpf} block_size={block_size} sparsity={sparsity}"
+            )
+            self._adaspa_logged_step = log_key
+        return video_args.replace(adaspa_state=adaspa_state)
+
+    def _maybe_attach_radial_mask(
+        self,
+        video_args: Optional[TransformerArgs],
+        video: Optional[Modality],
+    ) -> Optional[TransformerArgs]:
+        """Attach the radial self-attn mask to video_args if configured.
+
+        Called once per forward, after preprocessing.  num_frame is derived
+        from `video.positions[0, 0, :, 0]` — the per-token temporal coordinate
+        (time-in-seconds at patchifier.fps).  Under the patchifier's
+        (frame, h_lat, w_lat) flattening, consecutive `token_per_frame` tokens
+        share the same temporal coord, so num_frame = count of distinct
+        temporal values.  Cached per (seq_len, num_frame, decay_factor)
+        inside radial_mask.
+        """
+        if (
+            self._radial_attention is None
+            or video_args is None
+            or video is None
+            or video.positions is None
+            or video.positions.size == 0
+        ):
+            return video_args
+
+        decay_factor, dense_blocks, dense_steps = self._radial_attention
+        # Per-step gating: first `dense_steps` denoise forward passes run dense.
+        # Counter increments here so subsequent calls (within the same pipeline
+        # run) see the next step.  We increment regardless of whether the mask
+        # ends up attached, so the counter consistently tracks forward count.
+        current_step = self._radial_step
+        self._radial_step = current_step + 1
+        if dense_steps > 0 and current_step < dense_steps:
+            return video_args
+
+        # Lazy import — keeps the no-radial path off the import graph.
+        from LTX_2_MLX.model.transformer.radial_mask import radial_mask
+
+        seq_len = int(video_args.x.shape[1])
+        # positions shape: (B, 3, T, 2) where axis 1 is (frame, h, w) and last
+        # is [start, end].  positions[0, 0, :, 0] = per-token temporal start
+        # (in seconds for video).
+        if video.positions.ndim != 4 or video.positions.shape[1] < 1:
+            return video_args
+        temporal = video.positions[0, 0, :, 0]
+        # Under the (frame, h_lat, w_lat) flattening, consecutive tokens of one
+        # frame share the same temporal coord, so num_frame = 1 + number of
+        # places where the value changes between adjacent tokens.
+        changed = (temporal[1:] != temporal[:-1]).astype(mx.int32)
+        num_frame = int(changed.sum().item()) + 1
+        if num_frame < 2 or seq_len % num_frame != 0:
+            # Layout doesn't match (frame, h, w) flattening expected — silently
+            # disable for this call rather than fail mid-forward.
+            return video_args
+        # Pick a frame-aligned block_size: largest divisor of token_per_frame
+        # that's <= 128.  LTX's small tpf (144/240/576) doesn't divide 128
+        # evenly — the original 128 caused boundary-straddling blocks where
+        # "bottom of frame N" and "top of frame N+1" got coupled into one
+        # attention unit, producing periodic top/bottom multicolored flash
+        # artifacts every ~8 latent frames (verified on bakery2s @ 384×640).
+        # Frame-aligned block_size eliminates the straddling.
+        tpf = seq_len // num_frame
+        block_size = 128
+        while block_size > 1 and tpf % block_size != 0:
+            block_size -= 1
+        mask = radial_mask(
+            seq_len=seq_len,
+            num_frame=num_frame,
+            decay_factor=decay_factor,
+            block_size=block_size,
+            model_type="ltx",
+        )
+        # One-time density report so the user can verify the mask is in the hot path
+        # without needing trace tools.  Suppress repeats for the same shape.
+        shape_key = (seq_len, num_frame, decay_factor)
+        if getattr(self, "_radial_mask_logged_shape", None) != shape_key:
+            kept = float(mask.astype(mx.float32).sum().item())
+            density = kept / float(mask.size)
+            warmup_note = (
+                f" (first {dense_steps} step{'s' if dense_steps != 1 else ''} were dense)"
+                if dense_steps > 0
+                else ""
+            )
+            print(
+                f"  [radial] mask built: seq_len={seq_len} num_frame={num_frame} "
+                f"tpf={seq_len // num_frame} density={density:.2%} "
+                f"(masked-out fraction {1-density:.2%}){warmup_note}"
+            )
+            self._radial_mask_logged_shape = shape_key
+        return video_args.replace(
+            radial_self_attn_mask=mask,
+            radial_dense_blocks=dense_blocks,
+        )
+
+    def set_fbcache(
+        self,
+        threshold: Optional[float],
+        warmup: int = 1,
+    ) -> None:
+        """Enable / disable First Block Cache.
+
+        Args:
+            threshold: absmean(block0_now - block0_prev) below which the rest
+                of the transformer is skipped and the prior step's whole-
+                transformer residual is reused.  Pass None to disable.
+                Typical values 0.03-0.10 (lower = stricter, less skipping;
+                higher = more skipping, more divergence from baseline).
+            warmup: number of initial forwards to always run dense.  Default
+                1 — the first forward has no cache so we run it dense, build
+                the cache, and check the criterion from forward 2 onward.
+
+        Auto-invalidates the cache on shape change (e.g. stage 1→2 of the
+        two-stage distilled pipeline).
+
+        Implementation note: FBCache forces the simple eager per-block loop;
+        it's mutually exclusive with block-streaming and compile-group
+        machinery.  For LTX 2.3 distilled bakery (the primary target), that's
+        already the default path.
+        """
+        if threshold is None:
+            self._fbcache_config = None
+        else:
+            self._fbcache_config = (float(threshold), int(max(1, warmup)))
+        self._fbcache_step = 0
+        self._fbcache_skip_count = 0
+        self._fbcache_prev_block0_vx = None
+        self._fbcache_prev_block0_ax = None
+        self._fbcache_prev_residual_vx = None
+        self._fbcache_prev_residual_ax = None
+        self._fbcache_prev_seq_len = None
+
+    def _process_transformer_blocks_fbcache(
+        self,
+        video_args: Optional[TransformerArgs],
+        audio_args: Optional[TransformerArgs],
+        perturbations,
+    ) -> Tuple[Optional[TransformerArgs], Optional[TransformerArgs]]:
+        """FBCache-specific block stack pass.
+
+        Runs block 0, checks the absmean residual delta against the cached
+        block-0 output from the prior step.  If under threshold, skips
+        blocks 1..N-1 and applies the cached whole-transformer residual to
+        the current input.  Otherwise runs the full stack and refreshes
+        the cache.
+        """
+        assert self._fbcache_config is not None
+        threshold, warmup = self._fbcache_config
+        step = self._fbcache_step
+        self._fbcache_step = step + 1
+
+        # Capture inputs for residual computation.
+        v_active = video_args is not None and video_args.enabled
+        a_active = (
+            audio_args is not None
+            and audio_args.enabled
+            and audio_args.x is not None
+            and audio_args.x.size > 0
+        )
+        input_vx = video_args.x if v_active else None
+        input_ax = audio_args.x if a_active else None
+
+        # Shape-change cache invalidation (stage 1→2 boundary in two-stage
+        # pipelines).
+        seq_len = int(input_vx.shape[1]) if input_vx is not None else 0
+        if self._fbcache_prev_seq_len != seq_len:
+            self._fbcache_prev_block0_vx = None
+            self._fbcache_prev_block0_ax = None
+            self._fbcache_prev_residual_vx = None
+            self._fbcache_prev_residual_ax = None
+            self._fbcache_prev_seq_len = seq_len
+
+        # Run block 0.
+        block0 = self.transformer_blocks[0]
+        video_args, audio_args = block0(
+            video_args, audio_args, perturbations=perturbations,
+        )
+        block0_vx = video_args.x if v_active else None
+        block0_ax = audio_args.x if a_active else None
+
+        # Skip criterion.
+        skip = False
+        delta_val: Optional[float] = None
+        if (
+            step >= warmup
+            and self._fbcache_prev_block0_vx is not None
+            and self._fbcache_prev_residual_vx is not None
+            and block0_vx is not None
+            and input_vx is not None
+        ):
+            delta_arr = mx.abs(
+                block0_vx - self._fbcache_prev_block0_vx
+            ).astype(mx.float32).mean()
+            mx.eval(delta_arr)
+            delta_val = float(delta_arr.item())
+            if delta_val < threshold:
+                skip = True
+
+        if skip:
+            # Apply cached residual to current input.
+            new_vx = input_vx + self._fbcache_prev_residual_vx
+            video_args = video_args.replace(x=new_vx)
+            if input_ax is not None and self._fbcache_prev_residual_ax is not None:
+                new_ax = input_ax + self._fbcache_prev_residual_ax
+                audio_args = audio_args.replace(x=new_ax)
+            self._fbcache_skip_count += 1
+            print(
+                f"  [fbcache] step={step} SKIP "
+                f"(delta={delta_val:.5f} < {threshold}; skipped so far={self._fbcache_skip_count})"
+            )
+            return video_args, audio_args
+
+        # Full pass: run blocks 1..N-1.
+        for block in self.transformer_blocks[1:]:
+            video_args, audio_args = block(
+                video_args, audio_args, perturbations=perturbations,
+            )
+
+        # Refresh cache.
+        self._fbcache_prev_block0_vx = block0_vx
+        if input_vx is not None and v_active:
+            self._fbcache_prev_residual_vx = video_args.x - input_vx
+        if block0_ax is not None:
+            self._fbcache_prev_block0_ax = block0_ax
+        if input_ax is not None and a_active:
+            self._fbcache_prev_residual_ax = audio_args.x - input_ax
+
+        if delta_val is not None:
+            print(
+                f"  [fbcache] step={step} RUN "
+                f"(delta={delta_val:.5f} >= {threshold})"
+            )
+        else:
+            print(f"  [fbcache] step={step} RUN (warmup; building cache)")
+        return video_args, audio_args
+
     def _process_transformer_blocks(
         self,
         video_args: Optional[TransformerArgs] = None,
@@ -1064,6 +1487,13 @@ class LTXModel(nn.Module):
         profile_block_traces: Optional[List[Tuple[int, List[Tuple[str, float]]]]] = None,
     ) -> Tuple[Optional[TransformerArgs], Optional[TransformerArgs]]:
         """Process transformer blocks."""
+        # FBCache dispatch: takes priority over compile-group / streaming
+        # machinery; uses a dedicated simple eager loop.  Compatible with
+        # the bakery default flag stack (no streaming, no compile groups).
+        if self._fbcache_config is not None and not profile_block_traces:
+            return self._process_transformer_blocks_fbcache(
+                video_args, audio_args, perturbations,
+            )
         capture = (
             self._audio_layer_debug_dir is not None
             and not self._audio_layer_debug_done
@@ -1418,6 +1848,8 @@ class LTXModel(nn.Module):
             if video is None:
                 raise ValueError("Video modality required for video-enabled model")
             video_args = self._video_args_preprocessor.prepare(video, audio)
+            video_args = self._maybe_attach_radial_mask(video_args, video)
+            video_args = self._maybe_attach_adaspa_state(video_args, video)
 
         audio_args = None
         if self.model_type.is_audio_enabled():

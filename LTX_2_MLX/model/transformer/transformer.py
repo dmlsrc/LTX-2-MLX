@@ -88,6 +88,19 @@ class TransformerArgs:
     # V2 cross-attention AdaLN: prompt_timestep for KV modulation
     prompt_timestep: Optional[mx.array] = None  # Shape: (B, T, 2, D) from prompt_adaln_single
 
+    # Radial Attention (path-a quality probe).  When `radial_self_attn_mask`
+    # is set, it's passed as the `mask=` arg to video self-attn SDPA on every
+    # block whose `idx >= radial_dense_blocks`.  See
+    # `LTX_2_MLX/model/transformer/radial_mask.py`.
+    radial_self_attn_mask: Optional[mx.array] = None
+    radial_dense_blocks: int = 0
+
+    # AdaSpa (Adaptive Sparse Attention).  When `adaspa_state` is set, the
+    # video self-attn dispatches through Attention._adaspa_attention which
+    # implements dense/search/sparse phase logic.  See
+    # `LTX_2_MLX/model/transformer/adaspa_mask.py`.
+    adaspa_state: Optional[dict] = None
+
     def replace(self, **kwargs) -> "TransformerArgs":
         """Return a new TransformerArgs with specified fields replaced."""
         return TransformerArgs(
@@ -102,6 +115,9 @@ class TransformerArgs:
             cross_gate_timestep=kwargs.get("cross_gate_timestep", self.cross_gate_timestep),
             enabled=kwargs.get("enabled", self.enabled),
             prompt_timestep=kwargs.get("prompt_timestep", self.prompt_timestep),
+            radial_self_attn_mask=kwargs.get("radial_self_attn_mask", self.radial_self_attn_mask),
+            radial_dense_blocks=kwargs.get("radial_dense_blocks", self.radial_dense_blocks),
+            adaspa_state=kwargs.get("adaspa_state", self.adaspa_state),
         )
 
 
@@ -562,6 +578,16 @@ class BasicAVTransformerBlock(nn.Module):
             # Video self-attention with compiled AdaLN and residual gate
             # Skip self-attention if perturbation is enabled for all samples in batch
             if not skip_video_self:
+                # Radial-Attention mask (path-a quality probe): applied only on
+                # blocks past the dense warm-up.  See radial_mask.py / docs/PERFORMANCE.md.
+                radial_mask = (
+                    video.radial_self_attn_mask
+                    if video.radial_self_attn_mask is not None
+                    and self.idx >= video.radial_dense_blocks
+                    else None
+                )
+                # AdaSpa state: when set, hijacks the SDPA step in Attention.
+                adaspa_state = video.adaspa_state
                 with _signpost("video_self_attn"):
                     norm_vx = _compiled_adaln_forward(vx, scale_msa, shift_msa, self.norm_eps)
                     if profile_events is not None:
@@ -570,10 +596,14 @@ class BasicAVTransformerBlock(nn.Module):
                             norm_vx,
                             "video self-attn",
                             mark_profile,
+                            mask=radial_mask,
                             pe=video.positional_embeddings,
                         )
                     else:
-                        attn_out = self.attn1(norm_vx, pe=video.positional_embeddings)
+                        attn_out = self.attn1(
+                            norm_vx, mask=radial_mask, pe=video.positional_embeddings,
+                            adaspa_state=adaspa_state,
+                        )
                     vx = _compiled_residual_gate(vx, attn_out, gate_msa)
                     mark_profile("video self-attn residual", vx)
                     _sp_barrier(vx)

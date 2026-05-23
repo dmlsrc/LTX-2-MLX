@@ -796,6 +796,135 @@ def parse_video_attn_layout_specs(value: str | None) -> tuple[tuple[str, str], .
     return tuple(specs)
 
 
+def parse_fbcache(value: str | None) -> tuple[float, int] | None:
+    """Parse --fbcache THRESHOLD[,WARMUP]."""
+    if not value:
+        return None
+    parts = [p.strip() for p in value.split(",")]
+    if not parts or not parts[0]:
+        return None
+    try:
+        threshold = float(parts[0])
+    except ValueError as exc:
+        raise ValueError(
+            f"--fbcache: threshold '{parts[0]}' is not a float"
+        ) from exc
+    if threshold <= 0:
+        raise ValueError(f"--fbcache: threshold must be > 0, got {threshold}")
+    warmup = 1
+    if len(parts) >= 2 and parts[1]:
+        try:
+            warmup = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                f"--fbcache: warmup '{parts[1]}' is not an int"
+            ) from exc
+        if warmup < 1:
+            raise ValueError(f"--fbcache: warmup must be >= 1, got {warmup}")
+    if len(parts) > 2:
+        raise ValueError(
+            f"--fbcache: expected THRESHOLD[,WARMUP], got '{value}'"
+        )
+    return threshold, warmup
+
+
+def parse_adaspa(
+    value: str | None,
+) -> tuple[float, int, tuple[int, ...]] | None:
+    """Parse --adaspa SPARSITY[,WARMUP[,REFRESH_STEPS]].
+
+    REFRESH_STEPS is a `+`-separated list (e.g., "0.5,2,5+8") meaning refresh
+    the mask at forward indices 5 and 8.  Empty by default.
+    """
+    if not value:
+        return None
+    parts = [p.strip() for p in value.split(",")]
+    if not parts or not parts[0]:
+        return None
+    try:
+        sparsity = float(parts[0])
+    except ValueError as exc:
+        raise ValueError(
+            f"--adaspa: sparsity '{parts[0]}' is not a float"
+        ) from exc
+    if not 0.0 <= sparsity < 1.0:
+        raise ValueError(f"--adaspa: sparsity must be in [0, 1); got {sparsity}")
+    warmup = 1
+    if len(parts) >= 2 and parts[1]:
+        try:
+            warmup = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                f"--adaspa: warmup '{parts[1]}' is not an int"
+            ) from exc
+        if warmup < 1:
+            raise ValueError(f"--adaspa: warmup must be >= 1, got {warmup}")
+    refresh: tuple[int, ...] = ()
+    if len(parts) >= 3 and parts[2]:
+        try:
+            refresh = tuple(int(x) for x in parts[2].split("+") if x)
+        except ValueError as exc:
+            raise ValueError(
+                f"--adaspa: refresh '{parts[2]}' is not a +-separated int list"
+            ) from exc
+    if len(parts) > 3:
+        raise ValueError(
+            f"--adaspa: expected SPARSITY[,WARMUP[,REFRESH]], got '{value}'"
+        )
+    return sparsity, warmup, refresh
+
+
+def parse_radial_attention(
+    value: str | None,
+) -> tuple[float, int, int] | None:
+    """Parse --radial-attention DECAY[,DENSE_BLOCKS[,DENSE_STEPS]].
+
+    Returns (decay, dense_blocks, dense_steps), or None when value is None/empty.
+    """
+    if not value:
+        return None
+    parts = [p.strip() for p in value.split(",")]
+    if not parts or not parts[0]:
+        return None
+    try:
+        decay = float(parts[0])
+    except ValueError as exc:
+        raise ValueError(
+            f"--radial-attention: decay '{parts[0]}' is not a float"
+        ) from exc
+    if decay <= 0:
+        raise ValueError(f"--radial-attention: decay must be > 0, got {decay}")
+    dense_blocks = 0
+    if len(parts) >= 2 and parts[1]:
+        try:
+            dense_blocks = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                f"--radial-attention: dense_blocks '{parts[1]}' is not an int"
+            ) from exc
+        if dense_blocks < 0:
+            raise ValueError(
+                f"--radial-attention: dense_blocks must be >= 0, got {dense_blocks}"
+            )
+    dense_steps = 0
+    if len(parts) >= 3 and parts[2]:
+        try:
+            dense_steps = int(parts[2])
+        except ValueError as exc:
+            raise ValueError(
+                f"--radial-attention: dense_steps '{parts[2]}' is not an int"
+            ) from exc
+        if dense_steps < 0:
+            raise ValueError(
+                f"--radial-attention: dense_steps must be >= 0, got {dense_steps}"
+            )
+    if len(parts) > 3:
+        raise ValueError(
+            f"--radial-attention: expected DECAY[,DENSE_BLOCKS[,DENSE_STEPS]], got '{value}'"
+        )
+    return decay, dense_blocks, dense_steps
+
+
 def compute_dtype_name(dtype: mx.Dtype) -> str:
     if dtype == mx.bfloat16:
         return "BF16"
@@ -2480,6 +2609,9 @@ def generate_video(
     early_layers_only: bool = False,
     enhance_prompt_flag: bool = False,
     cross_attn_scale: float = 1.0,
+    radial_attention: tuple[float, int, int] | None = None,
+    adaspa: tuple[float, int, tuple[int, ...]] | None = None,
+    fbcache: tuple[float, int] | None = None,
     distilled_lora: str = None,
     distilled_lora_scale: float = 1.0,
     stg_scale: float = 0.0,
@@ -3248,6 +3380,24 @@ def generate_video(
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
             )
+            if radial_attention is not None and model is not None:
+                decay, dense_blocks, dense_steps = radial_attention
+                model.set_radial_attention(decay, dense_blocks, dense_steps)
+                print(
+                    f"  Radial Attention: decay={decay}, dense_blocks={dense_blocks}, "
+                    f"dense_steps={dense_steps} "
+                    "(video self-attn only; SDPA still dense — quality probe)"
+                )
+            if adaspa is not None and model is not None:
+                sp, wu, rf = adaspa
+                model.set_adaspa(sp, wu, rf)
+                print(
+                    f"  AdaSpa: sparsity={sp}, warmup={wu}, refresh={rf or '(none)'}"
+                )
+            if fbcache is not None and model is not None:
+                thr, wu = fbcache
+                model.set_fbcache(thr, wu)
+                print(f"  FBCache: threshold={thr}, warmup={wu}")
         else:
             model = None
             print("  Skipping model load (placeholder mode)")
@@ -3281,6 +3431,25 @@ def generate_video(
             if cross_attn_scale != 1.0:
                 velocity_model.set_cross_attn_scale(cross_attn_scale, start_layer=40)
                 print(f"  Applied cross-attention scale {cross_attn_scale}x for layers 40-47")
+
+            if radial_attention is not None:
+                decay, dense_blocks, dense_steps = radial_attention
+                velocity_model.set_radial_attention(decay, dense_blocks, dense_steps)
+                print(
+                    f"  Radial Attention: decay={decay}, dense_blocks={dense_blocks}, "
+                    f"dense_steps={dense_steps} "
+                    "(video self-attn only; SDPA still dense — quality probe)"
+                )
+            if adaspa is not None:
+                sp, wu, rf = adaspa
+                velocity_model.set_adaspa(sp, wu, rf)
+                print(
+                    f"  AdaSpa: sparsity={sp}, warmup={wu}, refresh={rf or '(none)'}"
+                )
+            if fbcache is not None:
+                thr, wu = fbcache
+                velocity_model.set_fbcache(thr, wu)
+                print(f"  FBCache: threshold={thr}, warmup={wu}")
 
             # Wrap in X0Model to convert velocity predictions to denoised (X0)
             # The raw LTXModel outputs velocity, but denoising expects X0 predictions
@@ -5034,6 +5203,61 @@ def main():
              "the GPU is already fully utilized, so this typically doesn't help."
     )
     parser.add_argument(
+        "--fbcache",
+        type=str,
+        default=None,
+        metavar="THRESHOLD[,WARMUP]",
+        help=(
+            "First Block Cache: skip blocks 1..47 of the transformer when "
+            "block 0's output residual is within THRESHOLD (absmean) of the "
+            "prior denoise step's. Doesn't change attention math; adaptive "
+            "whole-step skipping based on output stability. Typical values "
+            "0.03-0.10 (lower = stricter, less skipping; higher = more "
+            "skipping, more divergence from baseline). WARMUP (default 1) is "
+            "the number of forwards always run dense before the skip "
+            "criterion engages. Auto-invalidates cache on shape change "
+            "(stage 1 to 2). Per-step decision, atomic; survives the "
+            "few-step distilled regime that killed radial and adaspa."
+        ),
+    )
+    parser.add_argument(
+        "--adaspa",
+        type=str,
+        default=None,
+        metavar="SPARSITY[,WARMUP[,REFRESH]]",
+        help=(
+            "Experimental: AdaSpa adaptive sparse attention (arXiv:2502.21079) "
+            "for video self-attention.  SPARSITY in [0, 1) is the fraction of "
+            "K-blocks to MASK OUT per Q-block (e.g., 0.5 keeps top half).  WARMUP "
+            "(default 1) is the number of dense forward passes before the SEARCH "
+            "step that captures the per-block mask.  REFRESH is a '+'-separated "
+            "list of additional forward indices at which to re-search (e.g., "
+            "'0.5,2,5+8' = sparsity 0.5, search at step 2, refresh at 5 and 8).  "
+            "Unlike --radial-attention this derives sparsity from actual attention "
+            "statistics rather than a fixed geometric pattern; expected to handle "
+            "distilled few-step regime better than radial."
+        ),
+    )
+    parser.add_argument(
+        "--radial-attention",
+        type=str,
+        default=None,
+        metavar="DECAY[,DENSE_BLOCKS[,DENSE_STEPS]]",
+        help=(
+            "Experimental quality-probe: apply Radial Attention (arXiv:2506.19852) "
+            "to video self-attention.  DECAY ∈ {0.25,0.5,1.0,2.0} controls window "
+            "width (sparsity is mostly insensitive at LTX stage 1 tpf=144; meaningful "
+            "at stage 2 tpf=576).  DENSE_BLOCKS (default 0) runs the first M "
+            "transformer blocks without the mask.  DENSE_STEPS (default 0) runs the "
+            "first N denoise steps without the mask — important for distilled "
+            "pipelines where early steps are high-noise.  Path-a quality probe "
+            "only — MLX SDPA still computes full QK^T then masks, so there's NO "
+            "speed win from this flag.  Use it to validate that the radial mask "
+            "preserves output quality before investing in a gather-based "
+            "sparse-attention port (path b)."
+        ),
+    )
+    parser.add_argument(
         "--profile-transformer-once",
         action="store_true",
         help="Diagnostic: profile the first denoise transformer call with forced eval checkpoints. "
@@ -5482,6 +5706,9 @@ def main():
         early_layers_only=args.early_layers_only,
         enhance_prompt_flag=args.enhance_prompt,
         cross_attn_scale=args.cross_attn_scale,
+        radial_attention=parse_radial_attention(args.radial_attention),
+        adaspa=parse_adaspa(args.adaspa),
+        fbcache=parse_fbcache(args.fbcache),
         # Two-stage pipeline parameters
         steps_stage1=args.steps_stage1,
         steps_stage2=args.steps_stage2,

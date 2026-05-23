@@ -27,9 +27,10 @@ and failed experiments worth remembering.  This is the working notebook;
 
 ## Open
 
-_(empty — investigation converged 2026-05-18; no actionable hypotheses
-remain.  See Promoted section below for what landed in
-`PERFORMANCE.md`, and Archive section for what was tested and dropped.)_
+_(empty as of 2026-05-23 — sparse-attention and step-caching experiments
+all explored; see Archive section "2026-05-23 perf-sparse-attn-experiments
+branch" for full results.  Queued: `dot4I8Packed` Metal kernel feasibility,
+which is a separate angle (compute-throughput, not attention-redundancy).)_
 
 ---
 
@@ -75,6 +76,126 @@ brutal-efficiency targets" table.
 ## Archive
 
 (Abandoned investigations kept for negative-result evidence.)
+
+### 2026-05-23: Sparse attention + step caching exploration on distilled LTX 2.3 `[ABANDONED, branch preserved]`
+
+**Bottom line**: tried Radial Attention, AdaSpa, and FBCache as inference-
+time accelerations for LTX 2.3 distilled.  All three produce
+*coherent-but-divergent-from-baseline* output at speedups too modest
+(~3-5%) to justify the same-seed divergence.  The fundamental issue is
+the distilled 11-step pipeline (8 stage 1 + 3 stage 2): every step
+carries too much per-step information for inference-time approximations
+to be invisible.
+
+Full experiment code preserved on branch
+`perf/sparse-attn-experiments`.  Files:
+- `LTX_2_MLX/model/transformer/radial_mask.py` (block-sparse mask construction)
+- `LTX_2_MLX/model/transformer/radial_sparse.py` (gather-based block-sparse SDPA, bit-exact)
+- `LTX_2_MLX/model/transformer/adaspa_mask.py` (LSE-cached search)
+- Model integration via `LTXModel.set_radial_attention()`, `set_adaspa()`, `set_fbcache()`
+- CLI flags: `--radial-attention`, `--adaspa`, `--fbcache`
+- Tests: `scripts/test_radial_mask.py`, `scripts/test_radial_sparse.py`, `scripts/compare_radial_latents.py`
+- Standalone research file: `/Users/Shared/huggingface/LTX2_PERF_RESEARCH_2026-05-23.md`
+
+**Bool-mask cast bug found and fixed on the branch**:
+`_attention_core_inline_with_mask` was unconditionally `mask.astype(q.dtype)`
+which turned bool masks into 0/1 BF16 — MLX SDPA then interprets that as a
+*soft additive bias* (~2.72× preference factor), not a hard mask.  Not yet
+exercised on main since no caller passes bool, but flagged for any future
+work.
+
+**Results table** (bakery 384×640×20s, seed 124, two-stage distilled,
+audio on, fast-mode):
+
+| Config | Wall | Δ vs baseline | Latent cos sim | Visual |
+|---|---|---|---|---|
+| Baseline | 8m 27s | — | 1.000 | reference |
+| Radial misaligned (block=128) ds=8 | 9m 02s | +6.9% | 0.685 | edge-mosaic artifacts, period 2.75s |
+| Radial frame-aligned (block=120) ds=8 | 8m 02s | −4.9% | 0.727 | coherent, but identity drift / scene morphing |
+| AdaSpa 0.2,warmup=4 | 13m 31s | +60% | 0.657 | worse drift, no win |
+| FBCache 0.05 | 8m 09s | −3.5% | 0.647 | coherent + temporally stable; different content vs baseline (same seed) |
+
+**Key empirical lessons** (preserved for any future inference-time perf
+work on distilled LTX 2.3):
+
+1. **The Radial Attention paper's 12-step dense warmup requirement is
+   fundamental, not tuning.**  arXiv:2506.19852 §5 explicitly: "dense
+   attention during the first 12 steps as a warm-up phase".  LTX 2.3
+   distilled has 11 total steps.  No knob recovers this.  Same applies
+   to AdaSpa (paper used t_w=10 on 50-step models).
+
+2. **CalibAtt (arXiv:2603.05503, Apple+Tel Aviv, Mar 2026) names the
+   regime explicitly**: *"when distillation compresses 50 steps into 1–4
+   steps, this redundancy vanishes and existing sparse attention schemes
+   degrade sharply under sub-10 step setups."*
+
+3. **Block-boundary alignment is a real, separate concern even for
+   non-distilled cases**.  At LTX's tpf=144 (stage 1) or tpf=240 (384×640
+   stage 2), the Radial paper's default `block_size=128` doesn't divide
+   tpf — blocks straddle frame boundaries, coupling "bottom of frame N +
+   top of frame N+1" into one masking unit.  Manifests as periodic
+   top/bottom multicolor edge flashes every ~8 latent frames (matching
+   the radial mask's `split_factor=8` at temporal dist 4-7).  Fixed by
+   picking `block_size` as the largest divisor of tpf ≤ 128 (giving
+   72, 120, or 96 at LTX shapes).  This is a structural insight, not
+   tuning — any future block-sparse method on LTX needs frame-aligned
+   block_size.
+
+4. **Three kinds of "alignment" matter for sparse attention on video
+   DiTs** — not just one:
+   - *Structural* (block_size vs tpf divisibility) — we fixed this
+   - *Pattern* (sparsity pattern vs model's actual attention map) —
+     radial's static pattern fails LTX; CalibAtt-style adaptive
+     calibration would address this but is multi-day work and gated on
+     the distilled-warmup issue above
+   - *Positional* (RoPE phase across sink-to-target gap) — Deep Sink
+     (arXiv:2512.05081) `Δsink = stail − ssink` realignment is the
+     published fix for the autoregressive case; bidirectional LTX
+     has the same RoPE issue in principle
+
+5. **Path-b sparse SDPA crossover is density-dependent and capped by
+   Python-loop dispatch tax**.  `scripts/test_radial_sparse.py` benchmarks:
+   T=2304 → 0.55× (slower at any density); T=8784 → 1.08× at 33%;
+   T=14640 → 1.16× at 30%.  At low sparsity (≤20%), nearly-dense compute
+   + per-Q-block dispatch tax makes sparse paths SLOWER than dense.
+   Implication: for any future inference-time block-sparse work to win
+   on M1 Max, the dispatch overhead must be eliminated via a real Metal
+   kernel (path-c, multi-week).
+
+6. **FBCache (whole-step skip via residual delta) works in stage 1 but
+   not stage 2 for distilled LTX**.  Stage 2 has only 3 forwards, the
+   shape change at stage 1→2 forces a cache rebuild, and only 2 forwards
+   are left for caching with high deltas (0.22, 0.28) so no skips fire.
+   Net stage 1 saving (2 of 8 skipped, −32s) is partly offset by stage 2
+   overhead with no payoff (+11s), giving 3.5% off bakery total.
+
+7. **Latent cosine similarity is the wrong metric for whole-step
+   caching**.  FBCache produces visually-coherent but content-divergent
+   output at cos=0.647-0.748 — same regime as radial which has visible
+   artifacts.  Need pixel-space or VBench-style perceptual evaluation
+   to compare these methods fairly.  Cos sim only tells you "the latent
+   moved"; doesn't tell you "the latent moved in a perceptually-bad
+   direction".
+
+**Decision**: shelf all three methods for distilled LTX 2.3.  Branch
+`perf/sparse-attn-experiments` preserves the code as opt-in CLI flags
+(`--radial-attention`, `--adaspa`, `--fbcache`) plus the standalone
+research file with the full alternatives-explored history.  None of this
+lands on main because the deterministic-output property of baseline is
+worth more than 3-5% wall savings for the user's iterative-prompt-tuning
+workflow.
+
+**Remaining angles not yet explored**:
+- TaylorSeerCache (Taylor extrapolation rather than residual reuse;
+  could preserve more fidelity than FBCache)
+- PAB (Pyramid Attention Broadcast; caches attention outputs per
+  attention-type at configurable intervals)
+- Custom Metal block-sparse SDPA kernel (path-c, shifts the dispatch-tax
+  ceiling to where low-sparsity wins are possible — but multi-week and
+  risk class same as the FA-2 dead-end)
+- **`dot4I8Packed` Metal kernel feasibility** (different angle entirely
+  — compute throughput, not attention redundancy; could re-open
+  quantization as a positive lever on M1).  NEXT.
 
 ### 2026-05-18: Consolidated quiet-machine microbench sweep -- RoPE has the only marginal remaining lever `[ABANDONED]`
 

@@ -63,8 +63,14 @@ def _attention_core_inline_with_mask(
     elif mask.ndim == 3:
         mask = mask[:, None, :, :]
 
-    # Ensure mask dtype matches query dtype for scaled_dot_product_attention
-    mask = mask.astype(q.dtype)
+    # Boolean masks pass through unchanged — MLX SDPA handles them natively
+    # (True = attend, False = mask out, equivalent to additive -inf at False).
+    # Additive masks (e.g., context_mask with -inf at padding) must match q dtype.
+    # The previous unconditional .astype(q.dtype) converted bool to 0/1 BF16,
+    # which becomes a soft +1.0 score bias rather than a hard mask — a real bug
+    # for any caller passing bool.
+    if mask.dtype != mx.bool_:
+        mask = mask.astype(q.dtype)
 
     # Compute attention using Flash Attention
     scale = 1.0 / (dim_head ** 0.5)
@@ -329,6 +335,7 @@ class Attention(nn.Module):
         mask: Optional[mx.array] = None,
         pe: Optional[tuple] = None,
         k_pe: Optional[tuple] = None,
+        adaspa_state: Optional[dict] = None,
     ) -> mx.array:
         """
         Forward pass.
@@ -383,7 +390,11 @@ class Attention(nn.Module):
 
         with _signpost("attn_sdpa"):
             # 5) Attention core (compiled or inline depending on env toggle).
-            out = _attention_core(q, k, v, self.heads, self.dim_head, mask)
+            #    AdaSpa dispatch hijacks this step when adaspa_state is set.
+            if adaspa_state is not None:
+                out = self._adaspa_attention(q, k, v, adaspa_state)
+            else:
+                out = _attention_core(q, k, v, self.heads, self.dim_head, mask)
             _sp_barrier(out)
 
         with _signpost("attn_out"):
@@ -398,6 +409,111 @@ class Attention(nn.Module):
             out = self._to_out(out)
             _sp_barrier(out)
         return out
+
+    def _adaspa_attention(
+        self,
+        q: mx.array,
+        k: mx.array,
+        v: mx.array,
+        adaspa_state: dict,
+    ) -> mx.array:
+        """AdaSpa SDPA dispatch.
+
+        adaspa_state keys:
+          phase: 'dense', 'search', or 'sparse'
+          block_size: int (used at search step)
+          sparsity: float (fraction of K-blocks to mask out per Q-block; used at search)
+
+        Cached state on self:
+          self._adaspa_cached_mask: (n_qb, n_kb) bool, set at 'search' step,
+              read at 'sparse' steps.  Reset via reset_adaspa_state().
+        """
+        from LTX_2_MLX.model.transformer.adaspa_mask import adaspa_search
+        from LTX_2_MLX.model.transformer.radial_sparse import (
+            radial_sparse_attention,
+            _active_kblocks_per_row,
+        )
+
+        phase = adaspa_state["phase"]
+        b, t_q, _ = q.shape
+        _, t_k, _ = k.shape
+        # Reshape (B, T, H*D) -> (B, H, T, D) for both branches.
+        q4 = q.reshape(b, t_q, self.heads, self.dim_head).transpose(0, 2, 1, 3)
+        k4 = k.reshape(b, t_k, self.heads, self.dim_head).transpose(0, 2, 1, 3)
+        v4 = v.reshape(b, t_k, self.heads, self.dim_head).transpose(0, 2, 1, 3)
+        scale = 1.0 / (self.dim_head ** 0.5)
+
+        if phase == "dense":
+            out = mx.fast.scaled_dot_product_attention(q4, k4, v4, scale=scale)
+        elif phase == "search":
+            block_size = int(adaspa_state["block_size"])
+            sparsity = float(adaspa_state["sparsity"])
+            # Trim to block-aligned length; tail (if any) is attended densely
+            # alongside (matches radial_sparse_attention's tail handling).
+            t_aligned = (t_q // block_size) * block_size
+            if t_aligned == t_q:
+                out, mask = adaspa_search(
+                    q4, k4, v4, scale=scale, block_size=block_size, sparsity=sparsity,
+                )
+            else:
+                # Aligned head + dense tail
+                q_main = q4[:, :, :t_aligned, :]
+                k_main = k4[:, :, :t_aligned, :]
+                v_main = v4[:, :, :t_aligned, :]
+                out_main, mask = adaspa_search(
+                    q_main, k_main, v_main, scale=scale,
+                    block_size=block_size, sparsity=sparsity,
+                )
+                # Re-attach tail via dense SDPA against ALL K/V
+                q_tail = q4[:, :, t_aligned:, :]
+                out_tail = mx.fast.scaled_dot_product_attention(
+                    q_tail, k4, v4, scale=scale
+                )
+                out = mx.concatenate([out_main, out_tail], axis=2)
+            # Cache the block-level mask + the precomputed active-K-block lists
+            # for the sparse phase (avoid recomputing per-call).
+            active = _active_kblocks_per_row(mask)
+            object.__setattr__(self, "_adaspa_cached_mask", mask)
+            object.__setattr__(self, "_adaspa_cached_active", active)
+            object.__setattr__(self, "_adaspa_cached_block_size", block_size)
+        elif phase == "sparse":
+            mask = getattr(self, "_adaspa_cached_mask", None)
+            active = getattr(self, "_adaspa_cached_active", None)
+            block_size = getattr(self, "_adaspa_cached_block_size", None)
+            # Shape guard: the cached mask was built for a particular seq_len.
+            # If the model entered a new stage with a different T (e.g. stage 1
+            # T=3660 → stage 2 T=14640), the mask is invalid — fall back to
+            # dense.  The caller can add the stage-boundary step to
+            # refresh_steps to capture a stage-2-specific mask explicitly.
+            shape_ok = (
+                mask is not None
+                and active is not None
+                and block_size is not None
+                and mask.shape[0] * block_size <= q4.shape[2]
+                and len(active) == (q4.shape[2] // block_size)
+            )
+            if not shape_ok:
+                out = mx.fast.scaled_dot_product_attention(q4, k4, v4, scale=scale)
+            else:
+                out = radial_sparse_attention(
+                    q4, k4, v4, scale=scale,
+                    block_mask=mask, active_per_qblock=active,
+                    block_size=block_size,
+                )
+        else:
+            raise ValueError(f"Unknown adaspa phase: {phase!r}")
+
+        # Reshape (B, H, T, D) -> (B, T, H*D)
+        out = out.transpose(0, 2, 1, 3).reshape(b, t_q, self.heads * self.dim_head)
+        return out
+
+    def reset_adaspa_state(self) -> None:
+        """Drop cached AdaSpa mask + active lists.  Called when a new
+        generation starts so stale per-block masks don't leak across runs."""
+        for name in ("_adaspa_cached_mask", "_adaspa_cached_active",
+                    "_adaspa_cached_block_size"):
+            if hasattr(self, name):
+                object.__delattr__(self, name)
 
     def profile(
         self,
