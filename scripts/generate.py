@@ -7,7 +7,6 @@ import json
 import os
 import math
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +73,7 @@ from LTX_2_MLX.model.video_vae.tiling import (
     TilingConfig,
 )
 from LTX_2_MLX.core_utils import to_velocity
+from LTX_2_MLX.progress import PhaseBar, StackedPhaseBars
 from LTX_2_MLX.video_encoder import encode_video, TIERS
 
 
@@ -930,16 +930,6 @@ def format_duration(seconds: float) -> str:
     return f"{seconds:.2f}s"
 
 
-def format_progress_duration(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    minutes = int(seconds // 60)
-    whole_seconds = int(round(seconds - minutes * 60))
-    if whole_seconds == 60:
-        minutes += 1
-        whole_seconds = 0
-    return f"{minutes}m {whole_seconds:02d}s"
-
-
 class RunTimings:
     def __init__(self):
         self.started_at = time.perf_counter()
@@ -978,131 +968,6 @@ class RunTimings:
             "total_seconds": total,
         }
 
-
-class DenoiseProgress:
-    """Step-driven progress line for the denoise loop.  See PERFORMANCE.md
-    section "Throttle terminal redraws" for the design rationale."""
-
-    def __init__(self, label: str = "Denoising", width: int = 28, total: int | None = None):
-        self.label = label
-        self.width = width
-        self.started_at = time.perf_counter()
-        self.denoise_started_at: float | None = None
-        self._last_step_at: float | None = None
-        self._step_durations: list[float] = []
-        self.step = 0
-        self.total = total or 0
-        self._lock = threading.Lock()
-        self._output_lock = threading.Lock()
-        self._rendered = False
-        self._finished = False
-        self._newline_printed = False
-        self._last_line = ""
-        self._last_line_len = 0
-
-    def start(self) -> None:
-        self.started_at = time.perf_counter()
-        self.denoise_started_at = None
-        self._last_step_at = None
-        self._step_durations = []
-        self.step = 0
-        self._render()
-
-    def update(self, step: int, total: int) -> None:
-        now = time.perf_counter()
-        with self._lock:
-            if self._finished:
-                return
-            self.total = total
-            step = max(0, min(step, total))
-            if step == 0:
-                self.denoise_started_at = now
-                self._last_step_at = now
-                self._step_durations = []
-            elif step > self.step:
-                if self.denoise_started_at is None:
-                    # Older callers may not send the step-0 "denoise started" marker.
-                    self.denoise_started_at = self.started_at
-                    self._last_step_at = self.started_at
-                previous = self._last_step_at or self.denoise_started_at
-                self._step_durations.append(max(0.0, now - previous))
-                self._last_step_at = now
-            self.step = step
-        self._render()
-
-    def _render(self, final: bool = False) -> None:
-        with self._lock:
-            if self._finished and not final:
-                return
-            step = self.step
-            total = self.total
-            denoise_started_at = self.denoise_started_at
-            step_durations = list(self._step_durations)
-
-        now = time.perf_counter()
-        run_start = denoise_started_at or now
-        run_elapsed = max(0.0, now - run_start) if denoise_started_at is not None else 0.0
-        progress = step / total if total else 1.0
-        filled = min(self.width, int(round(progress * self.width)))
-        bar = "#" * filled + "-" * (self.width - filled)
-        first_step_text = (
-            format_progress_duration(step_durations[0])
-            if step_durations
-            else "--"
-        )
-        if step_durations and total:
-            seconds_per_step = sum(step_durations) / len(step_durations)
-            eta_text = format_progress_duration(seconds_per_step * max(0, total - step))
-            if seconds_per_step >= 1.0:
-                pace = f"{seconds_per_step:.1f}s/it"
-            else:
-                pace = f"{1.0 / seconds_per_step:.2f}it/s"
-        else:
-            eta_text = "--"
-            pace = "measuring"
-
-        line = (
-            f"  {self.label} [{bar}] {step:>3}/{total:<3} "
-            f"{progress * 100:5.1f}% | STEP1 {first_step_text} "
-            f"| RUN {format_progress_duration(run_elapsed)} "
-            f"| ETA {eta_text} | {pace}"
-        )
-        with self._output_lock:
-            # Skip the syscall + GPU repaint if nothing visible changed.
-            if line == self._last_line and not final:
-                return
-            pad = " " * max(0, self._last_line_len - len(line))
-            print("\r" + line + pad, end="", flush=True)
-            self._last_line = line
-            self._last_line_len = len(line)
-            self._rendered = True
-
-    def log(self, message: str) -> None:
-        """Print a status message without merging it into the progress row."""
-        with self._output_lock:
-            if self._finished or not self._rendered or self._newline_printed:
-                print(message, flush=True)
-                return
-            pad = " " * max(0, self._last_line_len - len(message))
-            print("\r" + message + pad, flush=True)
-            self._last_line = ""
-            self._last_line_len = 0
-            self._rendered = False
-
-    def finish(self) -> None:
-        with self._lock:
-            already_finished = self._finished
-            self._finished = True
-            needs_newline = self._rendered and not self._newline_printed
-
-        if not already_finished:
-            self._render(final=True)
-
-        if needs_newline:
-            with self._output_lock:
-                print(flush=True)
-            with self._lock:
-                self._newline_printed = True
 
 
 def batched_cfg_forward(
@@ -4061,33 +3926,10 @@ def generate_video(
                 f"{len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1} steps)..."
             )
 
-            stage_progress = None
-            active_stage = None
             stage_labels = {
                 "stage_1": "Stage 1 denoising",
                 "stage_2": "Stage 2 denoising",
             }
-
-            def stage_progress_callback(stage_name: str, step: int, total: int):
-                nonlocal stage_progress, active_stage
-                if active_stage != stage_name:
-                    if stage_progress is not None:
-                        stage_progress.finish()
-                    active_stage = stage_name
-                    stage_progress = DenoiseProgress(
-                        label=stage_labels.get(stage_name, stage_name),
-                        total=total,
-                    )
-                    stage_progress.start()
-                stage_progress.update(step, total)
-                if step >= total:
-                    stage_progress.finish()
-
-            def distilled_progress_message(message: str):
-                if stage_progress is not None:
-                    stage_progress.log(message)
-                else:
-                    print(message, flush=True)
 
             # Resolve the backend up front so the pipeline can skip the
             # internal VAE decode + concat when we're going to stream
@@ -4100,28 +3942,45 @@ def generate_video(
             )
             _stream_decode = _resolved_backend == "videotoolbox"
 
-            video, audio_waveform = av_pipeline.generate_distilled_two_stage(
-                positive_encoding=text_encoding,
-                config=av_config,
-                spatial_upscaler=spatial_upscaler,
-                images=images,
-                stage_callback=stage_progress_callback,
-                progress_message=distilled_progress_message,
-                positive_audio_encoding=text_audio_encoding,
-                latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
-                decode_video=not _stream_decode,
-            )
-            if stage_progress is not None:
-                stage_progress.finish()
+            # Stage 1 and Stage 2 share a single StackedPhaseBars so
+            # their columns (label / count / STEP1 / RUN / ETA / pace)
+            # line up; each stage's PhaseBar is lazily added on first
+            # callback for that stage.  set_n(step) lets us forward
+            # the pipeline's absolute step number directly.
+            with StackedPhaseBars() as denoise_bars:
+                stage_bars: dict[str, PhaseBar] = {}
+
+                def stage_progress_callback(stage_name: str, step: int, total: int):
+                    if stage_name not in stage_bars:
+                        stage_bars[stage_name] = denoise_bars.add(
+                            total=total,
+                            desc=stage_labels.get(stage_name, stage_name),
+                            unit="step",
+                            show_step1=True,
+                        )
+                    stage_bars[stage_name].set_n(step)
+
+                def distilled_progress_message(message: str):
+                    # Inter-stage messages ("Upsampling latent 2x...",
+                    # "Distilled stage 2: ...") land BELOW the finished
+                    # Stage 1 bar; Stage 2's bar then slots in below
+                    # them when its first callback fires.  Visual order
+                    # ends up: Stage 1 bar / messages / Stage 2 bar.
+                    denoise_bars.write(message, position="below")
+
+                video, audio_waveform = av_pipeline.generate_distilled_two_stage(
+                    positive_encoding=text_encoding,
+                    config=av_config,
+                    spatial_upscaler=spatial_upscaler,
+                    images=images,
+                    stage_callback=stage_progress_callback,
+                    progress_message=distilled_progress_message,
+                    positive_audio_encoding=text_audio_encoding,
+                    latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
+                    decode_video=not _stream_decode,
+                )
         else:
             print(f"\n[5/5] Running audio-video generation ({num_steps} steps)...")
-            denoise_progress = DenoiseProgress(total=num_steps)
-            denoise_progress.start()
-
-            def progress_callback(step: int, total: int):
-                denoise_progress.update(step, total)
-                if step >= total:
-                    denoise_progress.finish()
 
             _resolved_backend = resolve_output_backend(
                 output_backend, output_tier,
@@ -4130,18 +3989,37 @@ def generate_video(
             )
             _stream_decode = _resolved_backend == "videotoolbox"
 
-            video, audio_waveform = av_pipeline(
-                positive_encoding=text_encoding,
-                negative_encoding=null_encoding,
-                config=av_config,
-                images=images,
-                callback=progress_callback,
-                positive_audio_encoding=text_audio_encoding,
-                negative_audio_encoding=null_audio_encoding,
-                latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
-                decode_video=not _stream_decode,
-            )
-            denoise_progress.finish()
+            with StackedPhaseBars() as denoise_bars:
+                denoise_bar = denoise_bars.add(
+                    total=num_steps,
+                    desc="Denoising",
+                    unit="step",
+                    show_step1=True,
+                )
+
+                def progress_callback(step: int, total: int):
+                    denoise_bar.set_n(step)
+
+                def progress_message(message: str) -> None:
+                    # Pipeline status lines ("Saved final latents:",
+                    # "VAE decode started", etc.) land BELOW the
+                    # denoise bar via position="below" — bar stays
+                    # frozen at its row, messages stack permanently
+                    # under it as scrollback.
+                    denoise_bars.write(message, position="below")
+
+                video, audio_waveform = av_pipeline(
+                    positive_encoding=text_encoding,
+                    negative_encoding=null_encoding,
+                    config=av_config,
+                    images=images,
+                    callback=progress_callback,
+                    progress_message=progress_message,
+                    positive_audio_encoding=text_audio_encoding,
+                    negative_audio_encoding=null_audio_encoding,
+                    latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
+                    decode_video=not _stream_decode,
+                )
         pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
         if pipeline_timings:
             timings.extend(pipeline_timings)
@@ -4160,7 +4038,6 @@ def generate_video(
             from LTX_2_MLX.pipelines.streaming import (
                 iter_decoded_chunks, latent_dims, plan_vae_tiling,
             )
-            from LTX_2_MLX.videotoolbox import StackedPhaseBars
 
             final_video_latent = video
             effective_tiling = av_config._get_tiling_config()

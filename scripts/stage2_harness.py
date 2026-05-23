@@ -31,6 +31,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import generate as gen  # noqa: E402
 
+from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
+
 
 def adjacent_run_log_path(latents_path: str) -> str:
     stem = os.path.splitext(latents_path)[0]
@@ -580,39 +582,32 @@ def main() -> None:
     timings.mark("pipeline object setup")
 
     print("\n[5/5] Running stage 2 from saved latents...")
-    stage_progress = gen.DenoiseProgress(
-        label="Stage 2 denoising",
-        total=len(gen.STAGE_2_DISTILLED_SIGMA_VALUES) - 1,
-    )
-    # DenoiseProgress tracks ``_rendered`` after first start().  No ``_thread``
-    # attribute exists; the old harness check was stale.
-    stage_progress_started = False
+    with StackedPhaseBars() as denoise_bars:
+        stage_bar = denoise_bars.add(
+            total=len(gen.STAGE_2_DISTILLED_SIGMA_VALUES) - 1,
+            desc="Stage 2 denoising",
+            unit="step",
+            show_step1=True,
+        )
 
-    def stage_callback(stage_name: str, step: int, total: int) -> None:
-        nonlocal stage_progress_started
-        if not stage_progress_started:
-            stage_progress.start()
-            stage_progress_started = True
-        stage_progress.update(step, total)
-        if step >= total:
-            stage_progress.finish()
+        def stage_callback(stage_name: str, step: int, total: int) -> None:
+            stage_bar.set_n(step)
 
-    def progress_message(message: str) -> None:
-        stage_progress.log(message)
+        def progress_message(message: str) -> None:
+            denoise_bars.write(message, position="below")
 
-    video, audio_waveform = av_pipeline.generate_distilled_stage2_from_latents(
-        stage_1_video_latent=stage1_video,
-        stage_1_audio_latent=stage1_audio,
-        positive_encoding=text_encoding,
-        positive_audio_encoding=text_audio_encoding,
-        config=config,
-        spatial_upscaler=spatial_upscaler,
-        stage_callback=stage_callback,
-        progress_message=progress_message,
-        latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
-        burn_stage1_rng=not args.independent_stage2_noise,
-    )
-    stage_progress.finish()
+        video, audio_waveform = av_pipeline.generate_distilled_stage2_from_latents(
+            stage_1_video_latent=stage1_video,
+            stage_1_audio_latent=stage1_audio,
+            positive_encoding=text_encoding,
+            positive_audio_encoding=text_audio_encoding,
+            config=config,
+            spatial_upscaler=spatial_upscaler,
+            stage_callback=stage_callback,
+            progress_message=progress_message,
+            latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
+            burn_stage1_rng=not args.independent_stage2_noise,
+        )
     pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
     if pipeline_timings:
         timings.extend(pipeline_timings)

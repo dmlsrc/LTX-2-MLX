@@ -21,7 +21,9 @@ Submodules expose lower-level helpers:
 
     pixel_buffers   CVPixelBuffer create/read/write, CMTime helpers
     comparison      Side-by-side composite for `comparison.mp4`
-    progress        Phase-accurate stacked progress bars
+
+The stacked progress-bar primitives moved to `LTX_2_MLX.progress`
+(was previously re-exported here when the bars only had VSR callers).
 """
 
 from __future__ import annotations
@@ -34,7 +36,6 @@ from ._compat import autorelease_pool, require_pyobjc
 from .audio import AudioTrack
 from .cut_detect import CutDetector
 from .encode import encode_video_videotoolbox
-from .progress import PhaseBar, StackedPhaseBars
 from .vsr import VsrSession
 from .temporal import VtfrcSession
 from .writer import AVWriter
@@ -43,8 +44,6 @@ __all__ = [
     "AudioTrack",
     "AVWriter",
     "CutDetector",
-    "PhaseBar",
-    "StackedPhaseBars",
     "VsrSession",
     "VtfrcSession",
     "autorelease_pool",

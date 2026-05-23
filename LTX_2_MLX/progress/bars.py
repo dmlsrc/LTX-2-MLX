@@ -246,6 +246,24 @@ class PhaseBar:
         self._n += n
         self._render(force=False)
 
+    def set_n(self, n: int) -> None:
+        """Set the current count to `n` (absolute value).
+
+        Forwards to `update()` with the computed delta `n - self._n`,
+        so timing/pace/STEP1 capture work identically.  Useful for
+        callbacks that report progress as `(current_step, total_steps)`
+        tuples rather than per-update deltas — e.g.,
+        `scripts/generate.py`'s denoise stage callback.
+
+        Backward steps (n < self._n) are clamped to a no-op rather
+        than rewinding the count.  Backward progress would invalidate
+        the running pace and STEP1 metrics; callers that legitimately
+        need to reset a bar should construct a new one.
+        """
+        delta = n - self._n
+        if delta > 0:
+            self.update(delta)
+
     def close(self) -> None:
         """Force a final render so the displayed numbers reflect the last
         tick (not whatever was on screen at the previous mininterval
@@ -403,19 +421,43 @@ class StackedPhaseBars:
         self._bars.append(bar)
         return bar
 
-    def write(self, message: str) -> None:
-        """Print `message` above the bar stack without corrupting the bars.
+    def write(self, message: str, *, position: str = "above") -> None:
+        """Print `message` without corrupting the bars.
 
-        Same idea as tqdm.write(): erase the live bars, print the message at
-        the position they used to occupy, then redraw the bars in their new
-        position one (or more) lines further down.  The cursor invariant
-        ("one line below the bottom bar") is preserved across the call.
+        `position` controls where the message lands relative to the bars
+        in the captured / persistent terminal scrollback:
 
-        Multi-line messages are fine — each embedded newline pushes the bars
-        down by one more line.
+        - `"above"` (default, tqdm.write() semantics):
+            Erase the live bars, print the message at the position they
+            used to occupy, then redraw the bars one (or more) lines
+            further down.  Live bars stay anchored at the bottom; the
+            message scrolls up with prior terminal content.  Use this
+            for streaming-style logs that should sit alongside the bars
+            (e.g. the encoder's captured setup output during streaming).
 
-        No-op pass-through when no bars are active yet (writes to stderr
-        as-is) so callers can use this unconditionally during setup.
+        - `"below"`:
+            Treat the existing bars as frozen at their current rows
+            (static screen content) and emit the message on the parked
+            row beneath them.  The bar stack is RESET — subsequent
+            `bars.add()` calls land BELOW the message, in a fresh stack
+            that inherits column widths from the old one (so alignment
+            spans the message gap).  Use this for permanent log entries
+            that should be visually sandwiched between completed bars
+            and new ones to come (e.g. inter-stage messages in the
+            distilled two-stage denoise loop).
+
+            CONSTRAINT: callers must not call `.update()` on the
+            now-frozen bars after a `position="below"` write — their
+            row indexes no longer match the stack's cursor accounting.
+            Reaching their `total` and stopping is the expected usage.
+
+        Multi-line messages are fine — each embedded newline advances
+        the bars (above mode) or pushes the parked cursor (below mode)
+        by one more line.
+
+        No-op pass-through when no bars are active yet (writes to
+        stderr as-is) so callers can use this unconditionally during
+        setup.
         """
         if not self._bars:
             sys.stderr.write(message)
@@ -423,6 +465,30 @@ class StackedPhaseBars:
                 sys.stderr.write("\n")
             sys.stderr.flush()
             return
+
+        if position == "below":
+            # Emit at the parked cursor row.  Carriage return first
+            # because the most-recent render left the cursor at column
+            # `len(line)`, not column 0.
+            sys.stderr.write("\r" + message)
+            if not message.endswith("\n"):
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+            # Freeze the existing bars: they stay on screen as static
+            # content, and a fresh stack starts here for future
+            # `bars.add()`.  Preserve column widths so any new bars
+            # render aligned to the same columns that the old bars
+            # established.
+            self._bars = []
+            self._stack.bars = []
+            self._stack.total = 0
+            return
+
+        if position != "above":
+            raise ValueError(
+                f"StackedPhaseBars.write: position must be 'above' or "
+                f"'below', got {position!r}"
+            )
 
         n_bars = self._stack.total
         # Up to the topmost bar's row, then erase from there to end of screen.

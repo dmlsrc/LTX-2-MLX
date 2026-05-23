@@ -76,8 +76,9 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
 from LTX_2_MLX.videotoolbox import (  # noqa: E402
-    AudioTrack, AVWriter, CutDetector, StackedPhaseBars,
+    AudioTrack, AVWriter, CutDetector,
     VsrSession, VtfrcSession,
     autorelease_pool, require_pyobjc,
 )

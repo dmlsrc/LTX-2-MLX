@@ -215,8 +215,13 @@ class OneStagePipeline:
         path: str,
         video_latent: mx.array,
         audio_latent: Optional[mx.array] = None,
+        progress_message: Optional[Callable[[str], None]] = None,
     ) -> None:
-        """Save final video/audio latents as a sidecar npz file."""
+        """Save final video/audio latents as a sidecar npz file.
+
+        See `_save_distilled_two_stage_latents` for the
+        `progress_message` rationale — same fallback semantics.
+        """
         arrays = {
             "final_video_latent": cls._latent_to_numpy(video_latent),
             "final_video_latent_mlx_dtype": str(video_latent.dtype),
@@ -229,7 +234,11 @@ class OneStagePipeline:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         np.savez(path, **arrays)
-        print(f"  Saved final latents: {path}")
+        message = f"  Saved final latents: {path}"
+        if progress_message is not None:
+            progress_message(message)
+        else:
+            print(message)
 
     @classmethod
     def _save_distilled_two_stage_latents(
@@ -239,8 +248,17 @@ class OneStagePipeline:
         stage_2_video_latent: mx.array,
         stage_1_audio_latent: Optional[mx.array] = None,
         stage_2_audio_latent: Optional[mx.array] = None,
+        progress_message: Optional[Callable[[str], None]] = None,
     ) -> None:
-        """Save both distilled stages while preserving the final-latent keys."""
+        """Save both distilled stages while preserving the final-latent keys.
+
+        When `progress_message` is supplied the "Saved distilled stage
+        latents: ..." confirmation is routed through it instead of a
+        direct `print()` — necessary when the caller is rendering
+        progress bars that would otherwise be stomped by a raw stdout
+        write.  Default (no callable) falls back to `print()` for
+        callers that don't have a progress UI active.
+        """
         stage_1_video_np = cls._latent_to_numpy(stage_1_video_latent)
         stage_2_video_np = cls._latent_to_numpy(stage_2_video_latent)
         arrays = {
@@ -266,7 +284,11 @@ class OneStagePipeline:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         np.savez(path, **arrays)
-        print(f"  Saved distilled stage latents: {path}")
+        message = f"  Saved distilled stage latents: {path}"
+        if progress_message is not None:
+            progress_message(message)
+        else:
+            print(message)
 
     def _create_video_tools(
         self,
@@ -1218,14 +1240,15 @@ class OneStagePipeline:
         # Profiling helper: LTX_PROFILE_PAUSE_BEFORE_DENOISE=1 blocks on
         # stdin before stage-1 starts.  Use this to attach Instruments to
         # the running process at a precise point (after model load / prompt
-        # encoding, just before the first denoise step).
+        # encoding, just before the first denoise step).  The announcement
+        # routes through emit_progress_message so a caller with active
+        # bars doesn't get its layout stomped; `input()` then blocks until
+        # the user hits Enter.
         if os.environ.get("LTX_PROFILE_PAUSE_BEFORE_DENOISE"):
             try:
-                import sys as _sys
-                print(
+                emit_progress_message(
                     f"\n  [LTX_PROFILE_PAUSE_BEFORE_DENOISE] pid={os.getpid()}  "
-                    "attach Instruments now, then press Enter to start stage 1.",
-                    flush=True,
+                    "attach Instruments now, then press Enter to start stage 1."
                 )
                 input()
             except EOFError:
@@ -1394,6 +1417,7 @@ class OneStagePipeline:
                 stage_2_video_latent=final_video_latent,
                 stage_1_audio_latent=stage_1_audio_latent_for_save,
                 stage_2_audio_latent=final_audio_latent,
+                progress_message=progress_message,
             )
             del stage_1_video_latent_for_save, stage_1_audio_latent_for_save
             gc.collect()
@@ -1404,10 +1428,14 @@ class OneStagePipeline:
         if decode_video:
             decoder_name = self.video_decoder.__class__.__name__
             tiling_desc = "tiled" if effective_tiling else "not tiled"
-            print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+            emit_progress_message(
+                f"  VAE decode started ({decoder_name}, {tiling_desc})..."
+            )
             decode_start = time.perf_counter()
             if effective_tiling:
-                print("  Using tiled VAE decoding (preventing GPU watchdog timeout)")
+                emit_progress_message(
+                    "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                )
                 video = None
                 for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
                     video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
@@ -1419,7 +1447,7 @@ class OneStagePipeline:
                 video = decode_latent(final_video_latent, self.video_decoder)
             mx.eval(video)
             decode_elapsed = time.perf_counter() - decode_start
-            print(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
             # Streaming-decode path: caller will run VAE decode on the
             # latent.  Return the latent so the caller can iterate chunks
@@ -1682,6 +1710,7 @@ class OneStagePipeline:
                 stage_2_video_latent=final_video_latent,
                 stage_1_audio_latent=stage_1_audio_latent_for_save,
                 stage_2_audio_latent=final_audio_latent,
+                progress_message=progress_message,
             )
             del stage_1_video_latent_for_save, stage_1_audio_latent_for_save
             gc.collect()
@@ -1692,10 +1721,14 @@ class OneStagePipeline:
         if decode_video:
             decoder_name = self.video_decoder.__class__.__name__
             tiling_desc = "tiled" if effective_tiling else "not tiled"
-            print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+            emit_progress_message(
+                f"  VAE decode started ({decoder_name}, {tiling_desc})..."
+            )
             decode_start = time.perf_counter()
             if effective_tiling:
-                print("  Using tiled VAE decoding (preventing GPU watchdog timeout)")
+                emit_progress_message(
+                    "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                )
                 video = None
                 for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
                     video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
@@ -1707,7 +1740,7 @@ class OneStagePipeline:
                 video = decode_latent(final_video_latent, self.video_decoder)
             mx.eval(video)
             decode_elapsed = time.perf_counter() - decode_start
-            print(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
             # Streaming-decode path: see generate_distilled_two_stage's
             # decode_video=False docstring.  Returning the latent lets the
@@ -1743,6 +1776,7 @@ class OneStagePipeline:
         config: OneStageCFGConfig = None,
         images: Optional[List[ImageCondition]] = None,
         callback: Optional[Callable[[int, int], None]] = None,
+        progress_message: Optional[Callable[[str], None]] = None,
         positive_audio_encoding: Optional[mx.array] = None,
         negative_audio_encoding: Optional[mx.array] = None,
         stg_scale: float = 0.0,
@@ -1785,6 +1819,15 @@ class OneStagePipeline:
         call_start = time.perf_counter()
         self.last_timing_sections = []
         images = images or []
+
+        def emit_progress_message(message: str) -> None:
+            """Route a status message through `progress_message` when the
+            caller supplied one (so any live progress bars stay coherent);
+            fall back to `print()` for callers without a bar UI."""
+            if progress_message is not None:
+                progress_message(message)
+            else:
+                print(message)
 
         internal_audio_active = self.is_av_model and (config.use_internal_audio_branch or config.audio_enabled)
 
@@ -1922,7 +1965,9 @@ class OneStagePipeline:
                     blocks=stg_blocks,
                 )
                 cutoff_pct = int(stg_cutoff * 100)
-                print(f"  STG guidance: scale={stg_scale}, blocks={stg_blocks or 'all'}, cutoff={cutoff_pct}%")
+                emit_progress_message(
+                    f"  STG guidance: scale={stg_scale}, blocks={stg_blocks or 'all'}, cutoff={cutoff_pct}%"
+                )
 
             if skip_cfg and sampler != "heun" and _stg_guider is None:
                 # Fast path: no CFG, no STG, no Heun — just the positive-only
@@ -1941,7 +1986,7 @@ class OneStagePipeline:
                 )
             elif sampler == "heun":
                 heun_stepper = HeunDiffusionStep()
-                print(f"  Using Heun sampler (2x model evals per step)")
+                emit_progress_message("  Using Heun sampler (2x model evals per step)")
                 video_state, audio_state = self._denoise_loop_heun_av(
                     video_state=video_state,
                     audio_state=audio_state,
@@ -1995,12 +2040,14 @@ class OneStagePipeline:
                     blocks=stg_blocks,
                 )
                 cutoff_pct = int(stg_cutoff * 100)
-                print(f"  STG guidance: scale={stg_scale}, blocks={stg_blocks or 'all'}, cutoff={cutoff_pct}%")
+                emit_progress_message(
+                    f"  STG guidance: scale={stg_scale}, blocks={stg_blocks or 'all'}, cutoff={cutoff_pct}%"
+                )
 
             # Video-only denoising — select loop based on sampler
             if sampler == "heun":
                 heun_stepper = HeunDiffusionStep()
-                print(f"  Using Heun sampler (2x model evals per step)")
+                emit_progress_message("  Using Heun sampler (2x model evals per step)")
                 video_state = self._denoise_loop_heun(
                     video_state=video_state,
                     sigmas=sigmas,
@@ -2047,7 +2094,9 @@ class OneStagePipeline:
             if self.video_decoder is None:
                 raise ValueError("Video decoder required for temporal upscaling.")
             input_frames = final_video_latent.shape[2]
-            print(f"  Temporal upscaling: {input_frames} → {input_frames * 2 - 1} latent frames...")
+            emit_progress_message(
+                f"  Temporal upscaling: {input_frames} → {input_frames * 2 - 1} latent frames..."
+            )
             # Un-normalize latent (upscaler trained on raw latents)
             std = self.video_decoder.std_of_means.reshape(1, -1, 1, 1, 1)
             mean = self.video_decoder.mean_of_means.reshape(1, -1, 1, 1, 1)
@@ -2060,7 +2109,9 @@ class OneStagePipeline:
             mx.eval(final_video_latent)
             del latent_unnorm, latent_upscaled
             output_frames = final_video_latent.shape[2]
-            print(f"  Temporal upscale complete: {output_frames} latent frames")
+            emit_progress_message(
+                f"  Temporal upscale complete: {output_frames} latent frames"
+            )
 
         # Prepare final audio latent before unloading transformer and decoding.
         if config.audio_enabled and audio_state is not None and audio_tools is not None:
@@ -2079,6 +2130,7 @@ class OneStagePipeline:
                 latent_save_path,
                 video_latent=final_video_latent,
                 audio_latent=final_audio_latent,
+                progress_message=progress_message,
             )
             gc.collect()
             mx.clear_cache()
@@ -2091,10 +2143,14 @@ class OneStagePipeline:
         if decode_video:
             decoder_name = self.video_decoder.__class__.__name__
             tiling_desc = "tiled" if effective_tiling else "not tiled"
-            print(f"  VAE decode started ({decoder_name}, {tiling_desc})...")
+            emit_progress_message(
+                f"  VAE decode started ({decoder_name}, {tiling_desc})..."
+            )
             decode_start = time.perf_counter()
             if effective_tiling:
-                print(f"  Using tiled VAE decoding (preventing GPU watchdog timeout)")
+                emit_progress_message(
+                    "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                )
                 video = None
                 for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
                     video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
@@ -2106,7 +2162,7 @@ class OneStagePipeline:
                 video = decode_latent(final_video_latent, self.video_decoder)
             mx.eval(video)
             decode_elapsed = time.perf_counter() - decode_start
-            print(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
             # Streaming-decode path: see generate_distilled_two_stage's
             # decode_video=False docstring.

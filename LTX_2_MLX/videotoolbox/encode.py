@@ -43,10 +43,10 @@ from typing import Any, Iterable, Iterator, Sequence
 
 import numpy as np
 
+from ..progress import StackedPhaseBars
 from ._compat import autorelease_pool, require_pyobjc
 from .audio import AudioTrack
 from . import pixel_buffers as _pb
-from .progress import StackedPhaseBars
 from .temporal import VtfrcSession
 from .vsr import VsrSession, scale_for_mode
 from .writer import AVWriter, HEVC_PROFILE_MAIN10, HEVC_PROFILE_MAIN422_10

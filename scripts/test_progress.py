@@ -36,9 +36,10 @@ from typing import Optional
 # Allow running directly from the repo root without an install.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from LTX_2_MLX.videotoolbox.progress import (  # noqa: E402
-    PhaseBar, StackedPhaseBars, _fmt_duration,
+from LTX_2_MLX.progress import (  # noqa: E402
+    PhaseBar, StackedPhaseBars,
 )
+from LTX_2_MLX.progress.bars import _fmt_duration  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +642,363 @@ def test_write_handles_multiline_messages() -> None:
         )
 
 
+def test_lazy_bar_add_after_write() -> None:
+    """Mirrors `scripts/generate.py`'s distilled-two-stage flow:
+    one bar is added, ticks to completion, the caller emits
+    inter-stage messages via `bars.write()`, then a SECOND bar is
+    added lazily and runs to completion.
+
+    Regression target: when a new bar is added after bars.write(),
+    the existing bar must continue to render correctly at its row
+    while the new bar gets its own row below.  Bug class: bars.write()
+    leaving stale cursor / row state that breaks a subsequent
+    bars.add() — would manifest as overlapping bars or one bar
+    overwriting the other.
+    """
+    print("\n[15] lazy bar add after bars.write(position='below')")
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        with StackedPhaseBars() as bars:
+            s1 = bars.add(
+                total=4, desc="Stage 1", unit="step",
+                mininterval=0.0, show_step1=True,
+            )
+            for _ in range(4):
+                s1.update(1)
+            bars.write(
+                "  Upsampling latent 2x with spatial upscaler...",
+                position="below",
+            )
+            bars.write(
+                "  Distilled stage 2: 3 steps at 192x192",
+                position="below",
+            )
+            s2 = bars.add(
+                total=3, desc="Stage 2", unit="step",
+                mininterval=0.0, show_step1=True,
+            )
+            for _ in range(3):
+                s2.update(1)
+
+    check(
+        "stage 1 reached its total",
+        s1._n == 4,
+        f"s1._n={s1._n}",
+    )
+    check(
+        "stage 2 reached its total",
+        s2._n == 3,
+        f"s2._n={s2._n}",
+    )
+    check(
+        "stage 1 retained its desc through bars.write() interruptions",
+        "Stage 1" in s1._build_line(),
+        f"s1 line={s1._build_line()!r}",
+    )
+    # position="below" resets the stack; s2 starts a fresh stack at row 0.
+    check(
+        "stage 2 starts a fresh stack after position='below' resets",
+        s2._row == 0,
+        f"s2._row={s2._row}",
+    )
+
+    ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+    stripped = ansi.sub("", buf.getvalue())
+    check(
+        "first inter-stage message appears in output",
+        "Upsampling latent 2x" in stripped,
+        f"stripped[:300]={stripped[:300]!r}",
+    )
+    check(
+        "second inter-stage message appears in output",
+        "Distilled stage 2" in stripped,
+        f"stripped[:500]={stripped[:500]!r}",
+    )
+    # Visual order check: the byte offsets of key substrings in the
+    # ANSI-stripped output reflect the chronological order writes
+    # happened.  With position="below", Stage 1's bytes must precede
+    # the inter-stage messages, and Stage 2's bytes must follow.
+    # Catches a regression where position="below" accidentally falls
+    # back to "above" behavior (in which case the messages would be
+    # emitted BEFORE Stage 1's bytes).
+    s1_pos = stripped.find("Stage 1 ")
+    s2_pos = stripped.find("Stage 2 ")
+    ups_pos = stripped.find("Upsampling latent 2x")
+    msg2_pos = stripped.find("Distilled stage 2")
+    check(
+        "ordering: Stage 1 bytes < Upsampling msg < Distilled stage 2 msg < Stage 2 bytes",
+        0 <= s1_pos < ups_pos < msg2_pos < s2_pos,
+        f"s1={s1_pos}, ups={ups_pos}, st2_msg={msg2_pos}, s2={s2_pos}",
+    )
+
+
+def test_raw_print_between_bar_updates_breaks_layout() -> None:
+    """Detect when a raw `print()` lands on a bar's parked row instead
+    of going through `bars.write()`.
+
+    The pipeline historically had a few places that called `print()`
+    directly while bars were alive (e.g. the latent-save confirmation
+    inside `_save_distilled_two_stage_latents`).  Those prints land at
+    the cursor's parked row WITH a trailing newline, which:
+
+      1. Shifts the parked cursor down by one row.
+      2. Stomps the bar's content at the column where the previous
+         render left the cursor.
+      3. Causes the bar's subsequent close()-force-render to write at
+         the WRONG row (because the render math assumes the cursor is
+         still parked at row N+1, but it's actually at row N+2 now).
+
+    This test simulates exactly that pattern and asserts the symptom
+    is visible in the captured byte stream: after a raw print() the
+    bar's content appears twice in the file capture (the original
+    render PLUS the misplaced close-force-render at a different row).
+
+    The fix is to route the print through `bars.write()` so the cursor
+    bookkeeping stays consistent.  Until callers do, the test is a
+    canary: pipelines/utilities that grow new raw print() calls during
+    bar lifetime will break this assertion and prompt the author to
+    use the progress_message / bars.write() path instead.
+    """
+    print("\n[16] raw print() during bar lifetime corrupts layout (canary)")
+
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        with StackedPhaseBars() as bars:
+            bar = bars.add(
+                total=3, desc="bar", unit="step", mininterval=0.0,
+            )
+            bar.update(1)
+            bar.update(1)
+            bar.update(1)
+            # Simulate the pipeline-internal raw print bug: a print()
+            # lands on stderr while the bar is still alive.  Goes to
+            # the same stream as the bars' renders (we redirected
+            # stderr for the test), shifting the cursor's parked row.
+            sys.stderr.write("  Saved distilled stage latents: /tmp/x.npz\n")
+            # context-manager exit force-renders the bar one more time
+
+    ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+    stripped = ansi.sub("", buf.getvalue())
+    physical_lines: list[str] = []
+    for chunk in stripped.split("\n"):
+        if "\r" in chunk:
+            chunk = chunk.split("\r")[-1]
+        physical_lines.append(chunk.rstrip())
+    bar_lines = [L for L in physical_lines if "bar [" in L]
+    # The bug signature: at least one bar line has the raw print's
+    # text appended directly to its content (no `\n` between), because
+    # the print landed at column `len(bar_line)` on the parked row.
+    # That's exactly the "Saved distilled stage latents:" stomp the
+    # user observed.
+    stomped = any(
+        "bar [" in L and "Saved distilled stage latents" in L
+        for L in physical_lines
+    )
+    check(
+        "raw print() between bar updates leaves residue on the bar's "
+        "row (canary: SHOULD fail when raw print() bypasses bars.write())",
+        stomped,
+        f"bar_lines={bar_lines}, all_lines={physical_lines}",
+    )
+    check(
+        "the raw print's text appears in the captured output",
+        "Saved distilled stage latents" in stripped,
+        f"stripped[:300]={stripped[:300]!r}",
+    )
+
+
+def test_progress_message_routes_through_bars_write() -> None:
+    """Pipeline-side regression check: when the pipeline emits a
+    confirmation through `progress_message`, the message must NOT
+    corrupt the bar's row.  Compare against
+    test_raw_print_between_bar_updates_breaks_layout — using
+    bars.write(position="below") keeps the bar and the message on
+    DIFFERENT physical lines in the captured output.
+    """
+    print("\n[17] progress_message through bars.write() preserves layout")
+
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        with StackedPhaseBars() as bars:
+            bar = bars.add(
+                total=3, desc="bar", unit="step", mininterval=0.0,
+            )
+            bar.update(1)
+            bar.update(1)
+            bar.update(1)
+            # Pipeline-style: emit confirmation via bars.write() —
+            # this is what the fixed _save_distilled_two_stage_latents
+            # does when `progress_message` is supplied.
+            bars.write(
+                "  Saved distilled stage latents: /tmp/x.npz",
+                position="below",
+            )
+
+    ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+    stripped = ansi.sub("", buf.getvalue())
+    physical_lines: list[str] = []
+    for chunk in stripped.split("\n"):
+        if "\r" in chunk:
+            chunk = chunk.split("\r")[-1]
+        physical_lines.append(chunk.rstrip())
+    # No physical line should have BOTH the bar content AND the
+    # confirmation text on it — they must be on separate physical
+    # lines (because bars.write() ended the bar's row with \n before
+    # emitting the message).
+    no_stomp = not any(
+        "bar [" in L and "Saved distilled stage latents" in L
+        for L in physical_lines
+    )
+    check(
+        "progress_message-routed write does NOT stomp the bar's row",
+        no_stomp,
+        f"physical_lines={physical_lines}",
+    )
+    check(
+        "the confirmation message appears on its own physical line",
+        any("Saved distilled stage latents" in L and "bar [" not in L
+            for L in physical_lines),
+        f"physical_lines={physical_lines}",
+    )
+
+
+def test_no_raw_prints_in_progress_message_methods() -> None:
+    """Static lint: any pipeline method that takes a `progress_message`
+    callback must NOT contain raw `print()` calls inside its body —
+    those would stomp the caller's bars when a bar UI is active.
+
+    Allowlist: the documented `print(message)` fallback inside
+    `emit_progress_message` (single Name('message') argument), which
+    is the explicit path for callers that don't pass a progress
+    callable.
+
+    Caught historically: the
+    `_save_distilled_two_stage_latents` "Saved distilled stage
+    latents:" print, and the "VAE decode started/complete" prints
+    inside `generate_distilled_two_stage` /
+    `generate_distilled_stage2_from_latents`.  Both got routed through
+    `progress_message` once this lint was added.
+
+    Adding a new raw `print()` to a progress-aware method will fail
+    this test, prompting the author to route through
+    `progress_message` (or extend the allowlist if the print is
+    genuinely bar-inactive).
+    """
+    print("\n[18] no raw print() in progress_message-aware pipeline methods")
+
+    import ast
+    pipeline_root = Path(__file__).parent.parent / "LTX_2_MLX" / "pipelines"
+    # Files scanned: anything under pipelines/ that defines a method
+    # taking a `progress_message` parameter.  Currently one_stage.py;
+    # the scan is generic so future pipeline modules get covered.
+    py_files = sorted(pipeline_root.glob("*.py"))
+
+    offenders: list[tuple[str, str, int, str]] = []
+    for py in py_files:
+        try:
+            tree = ast.parse(py.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            params = [a.arg for a in node.args.args] + [
+                a.arg for a in node.args.kwonlyargs
+            ]
+            if "progress_message" not in params:
+                continue
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Call):
+                    continue
+                func = child.func
+                if not (isinstance(func, ast.Name) and func.id == "print"):
+                    continue
+                # Allowlist: `print(message)` — the documented fallback
+                # inside emit_progress_message and _save_distilled_two_stage_latents
+                # for when progress_message is None.
+                if (
+                    len(child.args) == 1
+                    and isinstance(child.args[0], ast.Name)
+                    and child.args[0].id == "message"
+                    and not child.keywords
+                ):
+                    continue
+                src = (
+                    ast.unparse(child)
+                    if hasattr(ast, "unparse")
+                    else f"print(...) at line {child.lineno}"
+                )
+                offenders.append((py.name, node.name, child.lineno, src))
+
+    check(
+        "no raw print() inside any progress_message-accepting pipeline "
+        "method (except the documented `print(message)` fallback)",
+        not offenders,
+        "offenders (file, method, line, source):\n  " + "\n  ".join(
+            f"{f}:{ln} in {m}: {s}" for (f, m, ln, s) in offenders
+        ) if offenders else "",
+    )
+
+
+def test_set_n_forwards_absolute_step() -> None:
+    """`PhaseBar.set_n(step)` must advance the bar to the absolute count
+    by computing the delta and forwarding to `update()`.  Backward steps
+    are clamped to no-ops.  Behavior matches what generate.py's denoise
+    callbacks need (they report `(current_step, total)` from the
+    pipeline)."""
+    print("\n[14] set_n() forwards absolute step counts")
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        bar = PhaseBar(
+            total=10, desc="b", unit="step",
+            mininterval=0.0, show_step1=True,
+        )
+        bar.set_n(3)
+    check(
+        "set_n(3) lands at count 3",
+        bar._n == 3,
+        f"got {bar._n}",
+    )
+    check(
+        "set_n() captured the first-update timestamp for STEP1",
+        bar._t_first_update is not None,
+        "missing _t_first_update",
+    )
+
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        bar2 = PhaseBar(total=10, desc="b2", unit="step", mininterval=0.0)
+        bar2.set_n(5)
+        bar2.set_n(8)
+    check(
+        "successive set_n() advances cumulatively (5 -> 8)",
+        bar2._n == 8,
+        f"got {bar2._n}",
+    )
+
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        bar3 = PhaseBar(total=10, desc="b3", unit="step", mininterval=0.0)
+        bar3.set_n(7)
+        bar3.set_n(4)   # backward — must clamp to no-op
+    check(
+        "backward set_n() is a no-op (does not rewind)",
+        bar3._n == 7,
+        f"got {bar3._n}",
+    )
+
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        bar4 = PhaseBar(total=10, desc="b4", unit="step", mininterval=0.0)
+        bar4.set_n(5)
+        bar4.set_n(5)   # same step — must be no-op
+    check(
+        "idempotent set_n() does not double-tick",
+        bar4._n == 5,
+        f"got {bar4._n}",
+    )
+
+
 def test_close_emits_carriage_return() -> None:
     """`StackedPhaseBars.close()` must emit `\\r` after closing each bar
     so the next caller-side `print()` lands at column 0 of the parked
@@ -750,35 +1108,59 @@ def demo_denoise_with_step1() -> None:
 
 
 def demo_denoise_stacked() -> None:
-    """Stage-1 + Stage-2 stacked denoise bars, both with STEP1.  Models
-    what `scripts/generate.py` would look like if `DenoiseProgress` were
-    replaced by `PhaseBar(show_step1=True)` — stage 1 finishes before
-    stage 2 starts, but both bars share the column layout while alive.
+    """Mirrors `scripts/generate.py`'s distilled-two-stage flow:
+    Stage 1 bar is added at start, runs to completion, then between
+    stages the pipeline emits "Upsampling latent 2x..." and "Distilled
+    stage 2: ..." messages via `bars.write()`.  Stage 2 bar is added
+    LAZILY (on first stage_2 callback) and ticks to completion.
 
     What to look for:
-      * Both bars' `[`, count, pct, STEP1, RUN, ETA, pace columns align.
+      * Both bars' `[`, count, STEP1, RUN, ETA, pace columns align.
       * Stage 1's STEP1 freezes at its first-step duration; Stage 2's
-        STEP1 captures a (different) first-step duration once its
-        first update arrives.
+        STEP1 captures a (different) first-step duration on its first
+        update.
+      * The inter-stage messages land above Stage 1's frozen bar; the
+        bar redraws cleanly below each message.
+      * When Stage 2 is added (lazy), it slots in below Stage 1 in
+        the same stack — no overlap, both bars share the layout.
     """
     _header(
-        "Stage 1 + Stage 2 denoise stacked",
-        "Two denoise bars with STEP1 columns aligned in one stack.",
+        "Stage 1 + Stage 2 denoise stacked (lazy add + interstage messages)",
+        "Mirrors generate.py: Stage 2 added on its first callback, "
+        "inter-stage messages routed through bars.write().",
     )
     with StackedPhaseBars() as bars:
         s1 = bars.add(
-            total=8, desc="Stage 1", unit="step",
+            total=8, desc="Stage 1 denoising", unit="step",
             mininterval=0.05, show_step1=True,
         )
-        s2 = bars.add(
-            total=3, desc="Stage 2 refine", unit="step",
-            mininterval=0.05, show_step1=True,
-        )
+        # Stage 1 ticks through completion.
         time.sleep(0.6)
         s1.update(1)
         for _ in range(7):
             time.sleep(0.1)
             s1.update(1)
+
+        # Inter-stage pipeline messages (same content `one_stage.py`
+        # emits via progress_message between stage 1 and stage 2).
+        # position="below" leaves Stage 1's bar frozen at its row and
+        # routes the messages BELOW it — Stage 2's bar then slots in
+        # under the messages when added next.
+        bars.write(
+            "  Upsampling latent 2x with spatial upscaler...",
+            position="below",
+        )
+        time.sleep(0.4)
+        bars.write(
+            "  Distilled stage 2: 3 steps at 192x192",
+            position="below",
+        )
+
+        # Stage 2 added lazily, as if its first callback just arrived.
+        s2 = bars.add(
+            total=3, desc="Stage 2 denoising", unit="step",
+            mininterval=0.05, show_step1=True,
+        )
         time.sleep(0.9)
         s2.update(1)
         for _ in range(2):
@@ -1002,6 +1384,11 @@ def main() -> int:
     test_step1_column_renders_first_update_duration()
     test_write_above_bars_does_not_duplicate_bar_rows()
     test_write_handles_multiline_messages()
+    test_lazy_bar_add_after_write()
+    test_raw_print_between_bar_updates_breaks_layout()
+    test_progress_message_routes_through_bars_write()
+    test_no_raw_prints_in_progress_message_methods()
+    test_set_n_forwards_absolute_step()
     test_close_emits_carriage_return()
     test_fmt_duration_covers_all_scales()
     dt = time.perf_counter() - t0
