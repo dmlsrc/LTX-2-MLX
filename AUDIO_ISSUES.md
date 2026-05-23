@@ -206,7 +206,20 @@ fix appears to have resolved the original temporal degradation along
 with the amplitude collapse.  See the Duration-Dependent Amplitude
 Bug closure note above for the empirical table.
 
-### Sequence-Start Audio Spike (OPEN — May 22, 2026)
+### Sequence-Start Audio Spike (MITIGATED — May 22, 2026)
+
+**Status:** Detect-then-trim mitigation landed in `LTX_2_MLX.audio.onset`
+and is wired into both encode backends (ffmpeg + VideoToolbox).
+Default is `--audio-onset-trim auto` — runs the two-window detector,
+zero-fills the leading 120 ms only when the click signature is
+present.  Disable with `--audio-onset-trim off`; force a specific
+duration with `--audio-onset-trim <ms>`.  Cleaned waveform feeds both
+the muxed track and the optional `.wav` sidecar so post-hoc listening
+doesn't rediscover the click.  See "Implementation" below for the
+codepath summary; the diagnostic characterization that drove the
+design follows.
+
+
 
 **Symptom:** *Some* generated clips produce a loud burst of ~65 ms of
 near-clipping audio at the very start, immediately followed by clean
@@ -324,22 +337,59 @@ nothing about why some quiet-onset clips have elevated latents too.
   one-line VERDICT (spike / clean) using a configurable threshold.
   See the script's docstring for the full design notes.
 
-**Possible mitigations** (in order of intrusiveness, none implemented).
-The dialog-vs-ambient comparison narrows the design: clips that don't
-click shouldn't be touched, so the production-grade fix is
-**detect-then-trim** rather than unconditional surgery.
+**Implementation** (landed May 22, 2026):
 
-1. **Detect-then-trim** (recommended). After audio decode, run the
-   same 50 ms-RMS-vs-global heuristic the analyzer script uses; if
-   the first window exceeds the threshold, drop the leading 100-150
-   ms of WAV before mux.  Clean clips pass through unchanged.  Trim
-   length 100-150 ms is sized to clear the click decay tail (~95 ms
-   on the diagnosed clip) plus a margin; it sits inside the
-   intentional silence the model places before the first spoken
-   word (95-250 ms on the same clip), so the cushion costs nothing.
-   Natural CLI: `--audio-onset-trim {auto, off, N_ms}`, default
-   `auto`.  Must apply in both the new VT encode helper and the
-   ffmpeg encode helper, and to the sidecar WAV writer.
+Detect-then-trim is the production-grade fix.  The dialog-vs-ambient
+comparison drove the design: clips that don't click shouldn't be
+touched, so unconditional surgery (latent zeroing, fade-in, notch)
+was rejected in favor of a content-aware gate.
+
+- **Module:** `LTX_2_MLX/audio/onset.py` — `detect_onset_spike`,
+  `trim_onset`, `mitigate_onset`, `parse_trim_mode`.
+- **Detector:** two-window check.  Fires when:
+  ```
+  first 50 ms RMS > 2.0x global RMS
+  AND mean RMS over 100-250 ms < 0.1x global RMS
+  ```
+  Both conditions must hold.  Real loud speech at t=0 sustains
+  through the 100-250 ms window, fails the second condition, and is
+  preserved untouched (AV sync safety).
+- **Trim:** zero-fills the leading **120 ms** of every channel.
+  Sample count is preserved — the audio track and the video track
+  stay aligned to the millisecond.  120 ms clears the diagnosed
+  click's ~95 ms decay tail with margin while still sitting inside
+  the intentional silence the model places before the first spoken
+  word (95-250 ms on the diagnosed clip).
+- **Where it runs:** `LTX_2_MLX.video_encoder.encode_video` (ffmpeg
+  path) and `LTX_2_MLX.videotoolbox.encode.encode_video_videotoolbox`
+  (VT path) both call `mitigate_onset` before writing the audio
+  track / WAV sidecar.  The same cleaned waveform feeds the muxed
+  track *and* the optional `--save-audio-sidecar`.
+- **CLI:** `--audio-onset-trim {auto, off, <ms>}`, default `auto`.
+  Plumbed through `generate.py` -> `encode_video_dispatch` -> both
+  backends, so the regime is consistent regardless of which encoder
+  serves the encode.
+- **Run-log:** `audio_onset_trim_mode` / `audio_onset_trim_ms` are
+  captured in the run-log sidecar JSON (`--save-run-log`) so a
+  saved output can be traced back to the regime that produced it.
+- **Latent save still raw:** the trim is applied AFTER any latent
+  save, so `--save-latents` + `scripts/analyze_audio_onset.py` can
+  still reproduce the original spike measurement.
+- **Tests:** `scripts/test_audio_onset.py` exercises the click
+  signature, ambient onset, loud-from-t=0, all-silent, and too-short
+  clip classes; verifies sample-count preservation, mode handling,
+  shape-variant support, and CLI parsing.
+- **Threshold sharing:** the constants live in `onset.py` and both
+  `scripts/analyze_audio_onset.py` and the mitigation gate read them
+  from there, so the diagnostic VERDICT line and the production
+  gate move together when either is tuned.
+
+The previous "Possible mitigations" enumeration is preserved below for
+context on the rejected alternatives.
+
+**Possible mitigations** (alternatives considered; only #1 implemented).
+
+1. **Detect-then-trim** (implemented — see above).
 2. **Linear / cosine fade-in** over 100-150 ms with the same
    detect gate.  Same protection, slightly softer if the spike ever
    overlaps real audio (the diagnosed clip has clean silence between
@@ -360,15 +410,6 @@ click shouldn't be touched, so the production-grade fix is
    dialog-vs-ambient counter-example shows the spike is content-
    dependent — there's no single stable spectrum across clips to
    notch.  Not worth pursuing.
-
-Whichever path is taken, the audio sidecar (`--save-audio-sidecar`)
-and the muxed track should both get the cleaned version so post-hoc
-listening doesn't rediscover the click.  Trim/fade should be applied
-**after** any latent save (`--save-latents` keeps the raw latent so
-the analyzer-script analysis stays reproducible).  The detect-then-
-trim heuristic can reuse the analyzer's threshold logic so a single
-constant defines both the diagnosis criterion and the mitigation
-gate.
 
 **AV sync safety** (do not get this wrong):
 
@@ -391,19 +432,22 @@ gate.
   refining the heuristic before implementing — see "more robust
   shape detector" note below.
 
-**More robust shape detector** (for future implementation): the
+**More robust shape detector** (implemented — May 22, 2026): the
 click signature is specifically *loud burst followed by silence*,
-not just *loud burst*.  A two-window check —
+not just *loud burst*.  The two-window check —
 
 ```
 window_0_rms > 2.0x global AND mean(windows in 100-250 ms) < 0.1x global
 ```
 
-— would catch the diagnosed click signature but reject any future
-clip where the loud t=0 is legitimate speech onset (which wouldn't
-be followed by silence).  The current single-window threshold in
-`scripts/analyze_audio_onset.py` is fine for diagnosis but the
-mitigation gate should use the two-window variant.
+— catches the diagnosed click signature but rejects any future clip
+where the loud t=0 is legitimate speech onset (which wouldn't be
+followed by silence).  This is what `mitigate_onset(..., mode="auto")`
+runs.  The single-window threshold in `scripts/analyze_audio_onset.py`
+remains as the (looser) diagnostic VERDICT line so it still surfaces
+elevated-but-not-clicking clips for follow-up; the script also prints
+a second line indicating whether the production two-window gate
+would fire.
 
 ### Potential Deep-Dive Areas
 - Compare audio latents (pre-VAE-decode) between MLX and ComfyUI for same seed/prompt

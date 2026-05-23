@@ -497,6 +497,33 @@ passing:
 --save-latents --save-text-embeddings --save-run-log --save-audio-sidecar
 ```
 
+### Sequence-start audio onset trim
+
+Some AV generations produce a short, near-clipping transient at t=0,
+followed by silence before the first spoken word. The default
+`--audio-onset-trim auto` runs a two-window detector (first 50 ms > 2x
+global RMS AND 100-250 ms < 0.1x global RMS) and zero-fills the leading
+120 ms only when the click signature is present; clean clips pass
+through untouched. Sample count is preserved, so audio and video stay
+in sync to the millisecond.
+
+```bash
+# Default — detect, trim leading 120 ms only when the click is present
+python scripts/generate.py "..." --generate-audio
+
+# Disable the check (e.g. when re-deriving the raw vocoder output)
+python scripts/generate.py "..." --generate-audio --audio-onset-trim off
+
+# Force a specific trim duration in milliseconds (regardless of detection)
+python scripts/generate.py "..." --generate-audio --audio-onset-trim 150
+```
+
+The cleaned waveform feeds both the muxed track and the optional
+`.wav` sidecar. The trim runs *after* any latent save, so
+`--save-latents` keeps the raw audio latent for reproduction with
+`scripts/analyze_audio_onset.py`. The chosen mode is captured in the
+run-log sidecar (`--save-run-log`) for post-hoc forensics.
+
 ## Troubleshooting
 
 ### Out of Memory

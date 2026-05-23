@@ -95,15 +95,28 @@ from pathlib import Path
 import numpy as np
 from scipy.io import wavfile
 
+# Thresholds for "is this a spike" come from the same module the encoders
+# use for the mitigation, so the diagnostic and the production gate move
+# together when either is tuned.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from LTX_2_MLX.audio.onset import (  # noqa: E402
+    DEFAULT_DETECT_THRESHOLD_RATIO,
+    DEFAULT_DETECT_WINDOW_MS,
+    detect_onset_spike,
+)
+
 
 # Default analysis parameters.  Picked to localize sub-100 ms transients
-# while staying readable as ASCII tables in a terminal.
-DEFAULT_COARSE_WINDOW_MS = 50.0
+# while staying readable as ASCII tables in a terminal.  The coarse window
+# size + spike threshold come from the shared onset module so the
+# diagnostic line in this report uses the same numbers as the encoders'
+# detect-then-trim gate.
+DEFAULT_COARSE_WINDOW_MS = DEFAULT_DETECT_WINDOW_MS
 DEFAULT_COARSE_HEAD_S = 2.0
 DEFAULT_FINE_WINDOW_MS = 5.0
 DEFAULT_FINE_HEAD_MS = 120.0
 DEFAULT_LATENT_FRAMES = 30
-DEFAULT_SPIKE_THRESHOLD = 2.0   # first-window RMS / global RMS
+DEFAULT_SPIKE_THRESHOLD = DEFAULT_DETECT_THRESHOLD_RATIO  # first-window RMS / global RMS
 
 
 # ---------------------------------------------------------------------------
@@ -360,22 +373,34 @@ def main() -> int:
         )
 
     # Verdict ---------------------------------------------------------------
+    # Diagnostic verdict (single-window): catches anything elevated at t=0,
+    # including legitimate loud onsets.
+    # Mitigation verdict (two-window): matches the encoders' detect-then-
+    # trim gate — fires only when the loud onset is followed by silence
+    # (the click signature).  These can disagree, which is informative.
     ratio = first_win_rms / max(global_rms, 1e-9)
+    mitigation_would_fire = detect_onset_spike(samples.T, sr)
     print()
-    if ratio >= args.spike_threshold:
+    diagnostic_hit = ratio >= args.spike_threshold
+    if diagnostic_hit:
         print(
             f"VERDICT: SPIKE detected — first {args.coarse_window_ms:g} ms "
             f"RMS is {ratio:.2f}x global "
             f"(threshold {args.spike_threshold:g}x).  See AUDIO_ISSUES.md -> "
             f"\"Sequence-Start Audio Spike\" for mitigation options."
         )
-        if args.strict:
-            return 1
     else:
         print(
             f"VERDICT: clean — first {args.coarse_window_ms:g} ms RMS is "
             f"{ratio:.2f}x global (below threshold {args.spike_threshold:g}x)."
         )
+    print(
+        f"MITIGATION: --audio-onset-trim auto would "
+        f"{'FIRE' if mitigation_would_fire else 'NOT fire'} on this clip "
+        f"(two-window check: loud first window AND quiet 100-250 ms trail-off)."
+    )
+    if diagnostic_hit and args.strict:
+        return 1
     return 0
 
 

@@ -299,6 +299,8 @@ def encode_video(
     audio_sample_rate: int | None = None,
     audio_bit_depth: str = "int16",
     save_audio_sidecar: bool = False,
+    audio_onset_trim_mode: str = "auto",
+    audio_onset_trim_ms: float | None = None,
     verbose: bool = True,
 ) -> Path:
     """Encode frames (+ optional audio) into the chosen output tier.
@@ -316,6 +318,12 @@ def encode_video(
     `<output>.wav` next to the encoded video (useful for A/B comparison
     against the codec-compressed audio). Otherwise it's written to a hidden
     temp path and deleted once ffmpeg consumes it.
+
+    `audio_onset_trim_mode` / `audio_onset_trim_ms` route through to
+    `LTX_2_MLX.audio.onset.mitigate_onset()` before WAV writing.  Default
+    is "auto" (detect-then-zero-fill); pass "off" to disable.  The trim
+    is applied to BOTH the ffmpeg input and (if kept) the sidecar so the
+    on-disk artifact and the muxed track agree.
     """
     if tier not in TIERS:
         raise ValueError(
@@ -342,6 +350,21 @@ def encode_video(
             raise ValueError(
                 "audio_sample_rate is required when audio_waveform is provided"
             )
+        # Sequence-start onset mitigation, applied once here so both the
+        # ffmpeg input WAV and the optional sidecar carry the cleaned
+        # waveform.  See LTX_2_MLX.audio.onset for the detector spec.
+        from .audio import DEFAULT_TRIM_MS, mitigate_onset
+
+        onset_trim_ms = (
+            audio_onset_trim_ms if audio_onset_trim_ms is not None else DEFAULT_TRIM_MS
+        )
+        onset_result = mitigate_onset(
+            audio_waveform, audio_sample_rate,
+            mode=audio_onset_trim_mode, trim_ms=onset_trim_ms,
+        )
+        audio_waveform = onset_result.samples
+        if verbose and onset_result.applied:
+            print(f"  audio onset: {onset_result.detail}")
         if save_audio_sidecar:
             # Public sidecar: lives next to the output, survives encode.
             audio_path = output_path.with_suffix(".wav")

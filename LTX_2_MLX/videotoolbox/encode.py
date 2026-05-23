@@ -147,6 +147,8 @@ def encode_video_videotoolbox(
     audio_sample_rate: int | None = None,
     audio_bit_depth: str = "float32",
     save_audio_sidecar: bool = False,
+    audio_onset_trim_mode: str = "auto",
+    audio_onset_trim_ms: float | None = None,
     vsr_spatial_mode: str | None = None,
     target_fps: float | None = None,
     vsr_temporal_mode: str = "normal",
@@ -178,6 +180,11 @@ def encode_video_videotoolbox(
 
     `audio_bit_depth` is accepted for API parity with encode_video();
     AVAssetWriter always consumes float32 PCM internally regardless.
+
+    `audio_onset_trim_mode` / `audio_onset_trim_ms` route through to
+    `LTX_2_MLX.audio.onset.mitigate_onset()` before the AudioTrack is
+    built.  The same cleaned waveform feeds both the muxed audio track
+    and the optional sidecar (`save_audio_sidecar=True`).
     """
     require_pyobjc()
     output_path = Path(output_path)
@@ -254,6 +261,25 @@ def encode_video_videotoolbox(
                     "audio_sample_rate is required when audio_waveform is provided"
                 )
             arr = _normalize_audio_for_track(audio_waveform)
+            # Sequence-start onset mitigation.  Runs before the AudioTrack
+            # build so the same cleaned (C,T) float32 buffer feeds both the
+            # muxed track and the optional sidecar.  See
+            # LTX_2_MLX.audio.onset and AUDIO_ISSUES.md ->
+            # "Sequence-Start Audio Spike".
+            from ..audio import DEFAULT_TRIM_MS, mitigate_onset
+
+            onset_trim_ms = (
+                audio_onset_trim_ms
+                if audio_onset_trim_ms is not None
+                else DEFAULT_TRIM_MS
+            )
+            onset_result = mitigate_onset(
+                arr, int(audio_sample_rate),
+                mode=audio_onset_trim_mode, trim_ms=onset_trim_ms,
+            )
+            arr = onset_result.samples
+            if verbose and onset_result.applied:
+                print(f"  audio onset: {onset_result.detail}")
             audio_track = AudioTrack(arr, sample_rate=int(audio_sample_rate))
 
         # Pick writer source format.  When VSR or VTFRC is active, the

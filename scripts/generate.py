@@ -139,6 +139,8 @@ def encode_video_dispatch(
     audio_waveform=None,
     audio_sample_rate=None,
     save_audio_sidecar: bool = False,
+    audio_onset_trim_mode: str = "auto",
+    audio_onset_trim_ms: float | None = None,
     output_backend: str = "auto",
     vsr_spatial_mode: str = "off",
     vsr_target_fps: float | None = None,
@@ -160,6 +162,10 @@ def encode_video_dispatch(
     only by the videotoolbox backend's progress bar; ffmpeg ignores
     it since the ffmpeg encoder collects frames eagerly into a list
     before piping anyway.
+
+    `audio_onset_trim_mode` / `audio_onset_trim_ms` are forwarded to
+    both backends so the sequence-start spike mitigation is uniform
+    regardless of which backend serves the encode.
     """
     backend = resolve_output_backend(
         output_backend, tier,
@@ -174,6 +180,8 @@ def encode_video_dispatch(
             audio_waveform=audio_waveform,
             audio_sample_rate=audio_sample_rate,
             save_audio_sidecar=save_audio_sidecar,
+            audio_onset_trim_mode=audio_onset_trim_mode,
+            audio_onset_trim_ms=audio_onset_trim_ms,
             vsr_spatial_mode=None if vsr_spatial_mode in (None, "off") else vsr_spatial_mode,
             target_fps=vsr_target_fps,
             vsr_temporal_mode=vsr_temporal_mode,
@@ -188,6 +196,8 @@ def encode_video_dispatch(
         audio_waveform=audio_waveform,
         audio_sample_rate=audio_sample_rate,
         save_audio_sidecar=save_audio_sidecar,
+        audio_onset_trim_mode=audio_onset_trim_mode,
+        audio_onset_trim_ms=audio_onset_trim_ms,
     )
 
 
@@ -2493,6 +2503,9 @@ def generate_video(
     vsr_temporal_mode: str = "normal",
     vsr_encode_quality: float = 0.65,
     vsr_audio_codec: str = "alac",
+    # Audio onset (sequence-start spike) mitigation
+    audio_onset_trim_mode: str = "auto",
+    audio_onset_trim_ms: float | None = None,
     # IC-LoRA and Keyframe Interpolation
     keyframes: list = None,
     ic_lora_weights: str = None,
@@ -2749,6 +2762,8 @@ def generate_video(
                 "save_text_embeddings": save_text_embeddings,
                 "save_run_log": save_run_log,
                 "save_audio_sidecar": save_audio_sidecar,
+                "audio_onset_trim_mode": audio_onset_trim_mode,
+                "audio_onset_trim_ms": audio_onset_trim_ms,
                 "output_fps": output_fps,
                 "output_tier": output_tier,
                 "image_path": image_path,
@@ -3546,6 +3561,8 @@ def generate_video(
             audio_waveform=audio_waveform if audio_waveform is not None else None,
             audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
             save_audio_sidecar=save_audio_sidecar,
+            audio_onset_trim_mode=audio_onset_trim_mode,
+            audio_onset_trim_ms=audio_onset_trim_ms,
             output_backend=output_backend,
             vsr_spatial_mode=vsr_spatial_mode,
             vsr_target_fps=vsr_target_fps,
@@ -4090,6 +4107,8 @@ def generate_video(
                     audio_waveform=audio_waveform if audio_waveform is not None else None,
                     audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
                     save_audio_sidecar=save_audio_sidecar,
+                    audio_onset_trim_mode=audio_onset_trim_mode,
+                    audio_onset_trim_ms=audio_onset_trim_ms,
                     output_backend=output_backend,
                     vsr_spatial_mode=vsr_spatial_mode,
                     vsr_target_fps=vsr_target_fps,
@@ -4129,6 +4148,8 @@ def generate_video(
                 audio_waveform=audio_waveform if audio_waveform is not None else None,
                 audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
                 save_audio_sidecar=save_audio_sidecar,
+                audio_onset_trim_mode=audio_onset_trim_mode,
+                audio_onset_trim_ms=audio_onset_trim_ms,
                 output_backend=output_backend,
                 vsr_spatial_mode=vsr_spatial_mode,
                 vsr_target_fps=vsr_target_fps,
@@ -4679,6 +4700,22 @@ def main():
             "--output-backend=videotoolbox.  0.65 matches the ffmpeg "
             "default tier's -q:v 65; raise toward 1.0 for higher "
             "bitrate / lower-loss output."
+        ),
+    )
+    parser.add_argument(
+        "--audio-onset-trim",
+        type=str,
+        default="auto",
+        help=(
+            "Sequence-start audio-spike mitigation.  Some AV generations "
+            "produce a loud click at t=0 followed by silence before the "
+            "first spoken word (see AUDIO_ISSUES.md -> Sequence-Start "
+            "Audio Spike).  auto (default) runs a two-window detector "
+            "(first 50 ms > 2x global RMS AND 100-250 ms < 0.1x global "
+            "RMS) and, when the click signature is present, zero-fills "
+            "the leading 120 ms of audio (sample-count preserved -> AV "
+            "sync safe).  off disables the check.  A numeric value (ms) "
+            "force-trims that duration unconditionally."
         ),
     )
     parser.add_argument(
@@ -5313,6 +5350,16 @@ def main():
         args.save_run_log = True
         args.save_audio_sidecar = True
 
+    # Resolve --audio-onset-trim {auto, off, <ms>} into (mode, trim_ms).
+    from LTX_2_MLX.audio import parse_trim_mode as _parse_onset_trim_mode
+
+    try:
+        args.audio_onset_trim_mode, args.audio_onset_trim_ms = _parse_onset_trim_mode(
+            args.audio_onset_trim
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     resolved_num_frames = resolve_num_frames(
         num_frames=args.frames,
         duration_seconds=args.duration,
@@ -5431,6 +5478,9 @@ def main():
         vsr_target_fps=args.vsr_target_fps,
         vsr_temporal_mode=args.vsr_temporal_mode,
         vsr_encode_quality=args.vsr_encode_quality,
+        # Audio onset (sequence-start spike) mitigation
+        audio_onset_trim_mode=args.audio_onset_trim_mode,
+        audio_onset_trim_ms=args.audio_onset_trim_ms,
         # IC-LoRA and Keyframe Interpolation
         keyframes=args.keyframe,
         ic_lora_weights=args.ic_lora_weights,
