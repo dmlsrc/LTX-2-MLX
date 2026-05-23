@@ -63,8 +63,15 @@ def _attention_core_inline_with_mask(
     elif mask.ndim == 3:
         mask = mask[:, None, :, :]
 
-    # Ensure mask dtype matches query dtype for scaled_dot_product_attention
-    mask = mask.astype(q.dtype)
+    # Boolean masks pass through unchanged — MLX SDPA handles them natively
+    # (True = attend, False = mask out, equivalent to additive -inf at False).
+    # Additive masks (e.g. context_mask with -inf at padding) must match q dtype.
+    # An unconditional .astype(q.dtype) here would cast bool → 0/1 BF16, which
+    # MLX SDPA then interprets as a soft additive bias (~2.72× preference
+    # factor) rather than a hard mask — a real bug for any caller passing
+    # bool.  Dormant on main today (no bool callers), kept correct preemptively.
+    if mask.dtype != mx.bool_:
+        mask = mask.astype(q.dtype)
 
     # Compute attention using Flash Attention
     scale = 1.0 / (dim_head ** 0.5)
