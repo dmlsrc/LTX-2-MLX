@@ -398,6 +398,20 @@ Both are off by default; engaging either forces the VT backend.
 - `--vsr-encode-quality FLOAT` — `AVVideoQualityKey` for the
   AVAssetWriter encoder (default `0.65`, matches the ffmpeg `default`
   tier's `-q:v 65`).
+- `--vsr-save-original` — when VSR or VTFRC is engaged, ALSO write
+  the un-processed source-resolution source-fps mp4 alongside the
+  requested output as `<stem>_orig.mp4`.  Both files share the same
+  audio track so each is playable standalone.  The companion writer
+  mirrors the primary's precision envelope so the A/B comparison
+  isn't skewed by encoder settings: VSR `balanced`/`image` (4x HQ)
+  -> original gets RGBAHalf source + HEVC Main42210 (4:2:2 10-bit),
+  matching the primary; VSR `fast` and VTFRC-only -> original gets
+  NV12 + HEVC Main10 (4:2:0 10-bit), again matching.  The companion
+  encode runs on its own AVAssetWriter GCD queue parallel to the
+  primary one — per-frame cost is one extra source-format upload
+  plus one HEVC HW pass, so wall-time overhead is small (typically
+  a few extra seconds on a 30-second clip).  Useful for keeping a
+  reference copy for A/B comparison without re-running the model.
 
 These are independent of the model-based `--upscale-spatial` /
 `--upscale-temporal` flags — the two systems should not be combined.
@@ -417,6 +431,15 @@ python scripts/generate.py "Your prompt" \
 python scripts/generate.py "Your prompt" \
     --width 384 --height 216 \
     --vsr-spatial-mode balanced --vsr-target-fps 60
+
+# Save both the 4x VSR upscale AND the source-resolution original
+# in one model run, for side-by-side comparison.  Outputs:
+#   sample.mp4      (1536x864, 4x VSR)
+#   sample_orig.mp4 (384x216, no VSR)
+python scripts/generate.py "Your prompt" \
+    --width 384 --height 216 \
+    --vsr-spatial-mode image --vsr-save-original \
+    --output outputs/sample.mp4
 ```
 
 When `--output` is omitted, the output directory resolves in this order:
@@ -494,8 +517,13 @@ Use `--save-all-sidecars` to enable every sidecar together. It is equivalent to
 passing:
 
 ```bash
---save-latents --save-text-embeddings --save-run-log --save-audio-sidecar
+--save-latents --save-text-embeddings --save-run-log --save-audio-sidecar \
+--vsr-save-original
 ```
+
+`--vsr-save-original` is a no-op unless `--vsr-spatial-mode` or
+`--vsr-target-fps` is also set, so including it in the "all sidecars"
+bundle costs nothing when VSR/VTFRC is not engaged.
 
 ### Sequence-start audio onset trim
 

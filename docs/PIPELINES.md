@@ -194,13 +194,14 @@ python scripts/generate.py "Your prompt" \
 | `--vsr-spatial-mode` | VideoToolbox Super Resolution: `off`, `fast` (2x LowLatency), `balanced` (4x HQ Video), `image` (4x HQ Image). Forces `--output-backend videotoolbox`. | off |
 | `--vsr-target-fps` | VideoToolbox frame-rate conversion target. When set and different from `--fps`, interpolates via VTFrameRateConversion. Forces `--output-backend videotoolbox`. | None |
 | `--vsr-temporal-mode` | VTFRC quality: `normal` or `high` (QualityPrioritizationQuality). Only meaningful with `--vsr-target-fps`. | normal |
+| `--vsr-save-original` | When VSR/VTFRC is engaged, also write the un-processed source-resolution source-fps mp4 as `<stem>_orig.mp4`. Mirrors the primary's HEVC profile (Main42210 4:2:2 for VSR HQ, Main10 4:2:0 for fast/VTFRC-only) so the A/B isn't precision-mismatched. Both files share one audio track. No-op when no VT post-processing is engaged. | False |
 | `--vsr-encode-quality` | `AVVideoQualityKey` (0..1) for the AVAssetWriter HEVC encoder. Matches the ffmpeg default tier's `-q:v 65`. | 0.65 |
 | `--generate-audio` | Generate synchronized audio (experimental) | False |
 | `--low-memory` | Legacy emergency eval-cadence knob; usually redundant with distilled streaming runs | False |
 | `--save-latents` | Save video/audio latents as an NPZ sidecar next to the output; distilled two-stage runs include stage-1 and stage-2 latents plus final aliases | False |
 | `--save-text-embeddings` | Save positive/negative text conditioning as an `_text.npz` sidecar next to the output; reload it with `--embedding` | False |
 | `--save-run-log` | Save generation parameters, argv, output paths, and timings as an `_run.json` sidecar, created at run start and finalized on completion | False |
-| `--save-all-sidecars` | Enable latent, text conditioning, and run metadata sidecars together | False |
+| `--save-all-sidecars` | Enable latent, text conditioning, run metadata, audio WAV, and (when VSR/VTFRC is engaged) pre-VSR original mp4 sidecars together | False |
 | `--skip-vae` | Skip VAE decoding (output latent visualization) | False |
 | `--no-gemma` | Use dummy embeddings (testing only) | False |
 | `--embedding` | Path to pre-computed text embedding (.npz) | None |
@@ -235,6 +236,16 @@ disk round-trip, no ffmpeg.
 - **`--vsr-target-fps FLOAT`** — `VTFrameRateConversion` to the
   requested rate. Source rate is `--fps`; identity rates skip the
   stage. Tested ratios include 24→48, 24→60, 30→24.
+- **`--vsr-save-original`** — write a second mp4 at source resolution
+  and source fps alongside the VSR/VTFRC output (`<stem>_orig.mp4`).
+  The companion writer mirrors the primary's HEVC profile so the A/B
+  is precision-floor-matched: VSR HQ (`balanced`/`image`) -> RGBAHalf
+  source + Main42210 (4:2:2 10-bit); VSR `fast` / VTFRC-only -> NV12
+  + Main10 (4:2:0 10-bit).  Companion AVAssetWriter runs on its own
+  GCD queue, sharing the same `AudioTrack`, so the second encode is
+  largely parallel to the primary.  Per-frame overhead is one source
+  buffer upload + one HEVC HW pass.  Useful for A/B comparisons
+  against the upscaled version without re-running the model.
 
 These are independent of `--upscale-spatial` / `--upscale-temporal`
 (transformer LoRA upscalers). The model-based path stays available

@@ -999,6 +999,51 @@ def test_set_n_forwards_absolute_step() -> None:
     )
 
 
+def test_write_below_force_renders_final_state() -> None:
+    """`bars.write(position="below")` must force-render every active bar
+    before freezing them, so the persisted state shows the actual final
+    counts — not whatever was on screen at the previous
+    mininterval-rate-limited render.
+
+    Regression test for the "239/241 frozen" symptom: when the encoder
+    finishes faster than the bar's mininterval over the last few
+    update() calls, those updates advance `bar._n` but skip rendering
+    (mininterval rate-limit).  If position="below" doesn't force a
+    final render, the last visible state is stale.
+    """
+    print("\n[19] bars.write(position='below') force-renders final state")
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        bars = StackedPhaseBars()
+        # Long mininterval guarantees the late ticks are rate-limited
+        # and never trigger their own render.
+        bar = bars.add(total=10, desc="b", unit="it", mininterval=10.0)
+        bar.update(1)  # first tick always renders
+        for _ in range(9):
+            bar.update(1)  # rate-limited; bar._n advances to 10 silently
+        # At this point the on-screen state would still show n=1.
+        bars.write("done: 10 frames", position="below")
+
+    raw = buf.getvalue()
+    # Strip ANSI escape sequences so we can search for the final-state
+    # rendering of the bar by the count it should display.
+    stripped = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
+    # The bar render before the "done: ..." message must include the
+    # final count "10/10".  Splitting on "done:" gives everything that
+    # was emitted before the below-write — that's where the final
+    # render is.
+    pre, _, post = stripped.partition("done: 10 frames")
+    check(
+        "below-write emitted the 'done:' message",
+        "done: 10 frames" in stripped,
+    )
+    check(
+        "pre-write content includes the final-state count 10/10",
+        "10/10" in pre,
+        f"pre-write content (last 200 chars): {pre[-200:]!r}",
+    )
+
+
 def test_close_emits_carriage_return() -> None:
     """`StackedPhaseBars.close()` must emit `\\r` after closing each bar
     so the next caller-side `print()` lands at column 0 of the parked
@@ -1389,6 +1434,7 @@ def main() -> int:
     test_progress_message_routes_through_bars_write()
     test_no_raw_prints_in_progress_message_methods()
     test_set_n_forwards_absolute_step()
+    test_write_below_force_renders_final_state()
     test_close_emits_carriage_return()
     test_fmt_duration_covers_all_scales()
     dt = time.perf_counter() - t0

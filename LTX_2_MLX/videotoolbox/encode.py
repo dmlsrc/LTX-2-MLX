@@ -152,6 +152,7 @@ def encode_video_videotoolbox(
     vsr_spatial_mode: str | None = None,
     target_fps: float | None = None,
     vsr_temporal_mode: str = "normal",
+    vsr_save_original: bool = False,
     encode_quality: float = 0.65,
     encode_chroma: str = "auto",
     n_source_frames: int | None = None,
@@ -185,6 +186,19 @@ def encode_video_videotoolbox(
     `LTX_2_MLX.audio.onset.mitigate_onset()` before the AudioTrack is
     built.  The same cleaned waveform feeds both the muxed audio track
     and the optional sidecar (`save_audio_sidecar=True`).
+
+    `vsr_save_original`: when True AND any VT post-processing is engaged
+    (VSR spatial or VTFRC temporal), also write the un-processed source-
+    resolution source-fps mp4 alongside the requested output, as
+    `<stem>_orig.mp4`.  Both files share the same AudioTrack so each is
+    playable standalone.  No-op when neither VSR nor VTFRC is active
+    (there's nothing for "original" to differ from).  The companion
+    writer mirrors the primary's HEVC profile (RGBAHalf + Main42210 for
+    VSR HQ; NV12 + Main10 for VSR fast / VTFRC-only) so the A/B
+    comparison isn't precision-floor mismatched.  Implementation cost
+    per source frame is one additional source-buffer upload + one HEVC
+    HW append; the AVAssetWriter's pump runs on its own GCD queue, so
+    the second encode is largely parallel to the primary.
     """
     require_pyobjc()
     output_path = Path(output_path)
@@ -312,6 +326,50 @@ def encode_video_videotoolbox(
         elif vsr is not None:
             vsr.use_dst_pool(writer.adaptor.pixelBufferPool())
 
+        # Optional "save the un-processed original alongside the VSR/VTFRC
+        # result" companion writer.  Only meaningful when some VT post-
+        # processing is engaged; otherwise the primary writer IS the
+        # original and a duplicate adds zero value.  Shares the same
+        # AudioTrack — CMSampleBuffer is fresh per make_sample_buffer()
+        # call so two GCD pumps on the same track are safe.
+        #
+        # Source format + HEVC profile mirror the primary writer's
+        # precision envelope (`_pick_hevc_profile`): when the user opted
+        # into VSR HQ (balanced / image), the primary is RGBAHalf source
+        # -> HEVC Main42210 (4:2:2 10-bit) and the original should match
+        # so the A/B comparison isn't a precision-floor mismatch.  For
+        # VSR fast and VTFRC-only the primary is NV12 -> Main10 (4:2:0
+        # 10-bit); the original matches that too — upgrading the
+        # original's source format past what its companion uses adds
+        # bits the encoder would just throw away.  When the input frames
+        # are fp16 RGBA from the streaming-VAE path, RGBAHalf preserves
+        # them all the way to the encoder's internal 4:2:2 conversion;
+        # uint8 RGB input goes through upload_frame_to_buffer's RGBA
+        # promotion path with no loss vs. the NV12 alternative.
+        writer_orig: AVWriter | None = None
+        orig_path: Path | None = None
+        do_save_original = vsr_save_original and (vsr is not None or vtfrc is not None)
+        if do_save_original:
+            orig_path = output_path.with_name(
+                f"{output_path.stem}_orig{output_path.suffix}"
+            )
+            if vsr_spatial_mode in ("balanced", "image"):
+                orig_src_fmt = _pb.PIX_RGBAHALF
+                orig_profile = HEVC_PROFILE_MAIN422_10
+            else:
+                orig_src_fmt = _pb.PIX_NV12
+                orig_profile = HEVC_PROFILE_MAIN10
+            writer_orig = AVWriter(
+                orig_path,
+                width=in_w, height=in_h, fps=fps,
+                source_pixel_format=orig_src_fmt,
+                profile=orig_profile,
+                quality=encode_quality,
+                label="encode_orig",
+                audio_track=audio_track,
+                audio_codec=audio_codec,
+            )
+
         # Optional audio sidecar WAV.
         sidecar_path: Path | None = None
         if audio_track is not None and save_audio_sidecar:
@@ -333,6 +391,11 @@ def encode_video_videotoolbox(
         if verbose:
             print(f"  encode (videotoolbox): {chain} -> HEVC {profile}")
             print(f"  -> {output_path}")
+            if writer_orig is not None:
+                print(
+                    f"  + original passthrough -> HEVC {orig_profile} "
+                    f"-> {orig_path}"
+                )
 
     # If we captured the setup output, route it above the caller's bar
     # stack now — single bars.write() call so the bars stay coherent.
@@ -367,9 +430,28 @@ def encode_video_videotoolbox(
     started = time.perf_counter()
     n_in = 0
     n_out = 0
+    n_orig = 0
     try:
         for src_frame in frame_iter:
             with autorelease_pool():
+                # Companion "original" writer: source frame -> orig_src_fmt
+                # (NV12 or RGBAHalf, matching the primary's precision
+                # envelope) -> append.  Independent of VSR/VTFRC chain;
+                # uses its own source buffer pool.  AVAssetWriter's audio
+                # + video pumps run on their own GCD queues so this second
+                # append is largely parallel to the primary chain's encode
+                # pass.  upload_frame_to_buffer dispatches on the buffer's
+                # pixel format, so the same call works for both src
+                # formats and both source dtypes (uint8 RGB / fp16 RGBA).
+                if writer_orig is not None:
+                    orig_pb = _allocate_writer_src_buffer(
+                        writer_orig.adaptor, in_w, in_h, orig_src_fmt,
+                    )
+                    _pb.upload_frame_to_buffer(src_frame, orig_pb)
+                    writer_orig.append(orig_pb)
+                    n_orig += 1
+                    del orig_pb
+
                 if vsr is not None:
                     src_pb = vsr.upscale_to_buffer(src_frame, n_in)
                 else:
@@ -405,6 +487,8 @@ def encode_video_videotoolbox(
         if bars is not None and owns_bars:
             bars.close()
         writer.finish()
+        if writer_orig is not None:
+            writer_orig.finish()
         if vtfrc is not None:
             vtfrc.close()
         if vsr is not None:
@@ -413,17 +497,28 @@ def encode_video_videotoolbox(
     if verbose:
         elapsed = time.perf_counter() - started
         size = output_path.stat().st_size
+        orig_part = ""
+        if writer_orig is not None and orig_path is not None:
+            orig_size = orig_path.stat().st_size
+            orig_part = (
+                f" + original {_human_size(orig_size)} "
+                f"({n_orig} src frame{'s' if n_orig != 1 else ''})"
+            )
         done_msg = (
             f"  done: {_human_size(size)} in {elapsed:.1f}s "
             f"({n_in} src frame{'s' if n_in != 1 else ''}, "
-            f"{n_out} written)"
+            f"{n_out} written){orig_part}"
         )
         # In caller-managed-stack mode the bars are still alive at this
         # point (the caller closes them after we return), so a raw print
         # would stomp on the bottom bar's row.  Route through bars.write()
-        # which clears the bar rows, prints above them, and redraws.
+        # with position="below" so the visual order in the persisted
+        # scrollback is "bars (frozen at 100%) -> done summary".  The
+        # stack is reset by that call; the caller's `with` cleanup is
+        # a safe no-op afterwards (StackedPhaseBars.close early-returns
+        # when _bars is empty).
         if progress_stack is not None and not owns_bars:
-            progress_stack.write(done_msg)
+            progress_stack.write(done_msg, position="below")
         else:
             print(done_msg)
 

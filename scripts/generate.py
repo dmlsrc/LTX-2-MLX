@@ -145,6 +145,7 @@ def encode_video_dispatch(
     vsr_spatial_mode: str = "off",
     vsr_target_fps: float | None = None,
     vsr_temporal_mode: str = "normal",
+    vsr_save_original: bool = False,
     vsr_encode_quality: float = 0.65,
     vsr_audio_codec: str = "alac",
     n_source_frames: int | None = None,
@@ -166,6 +167,9 @@ def encode_video_dispatch(
     `audio_onset_trim_mode` / `audio_onset_trim_ms` are forwarded to
     both backends so the sequence-start spike mitigation is uniform
     regardless of which backend serves the encode.
+
+    `vsr_save_original` is a VT-only knob; ignored when the ffmpeg
+    backend serves the encode (no VSR/VTFRC available there anyway).
     """
     backend = resolve_output_backend(
         output_backend, tier,
@@ -185,6 +189,7 @@ def encode_video_dispatch(
             vsr_spatial_mode=None if vsr_spatial_mode in (None, "off") else vsr_spatial_mode,
             target_fps=vsr_target_fps,
             vsr_temporal_mode=vsr_temporal_mode,
+            vsr_save_original=vsr_save_original,
             encode_quality=vsr_encode_quality,
             audio_codec=vsr_audio_codec,
             n_source_frames=n_source_frames,
@@ -2501,6 +2506,7 @@ def generate_video(
     vsr_spatial_mode: str = "off",
     vsr_target_fps: float | None = None,
     vsr_temporal_mode: str = "normal",
+    vsr_save_original: bool = False,
     vsr_encode_quality: float = 0.65,
     vsr_audio_codec: str = "alac",
     # Audio onset (sequence-start spike) mitigation
@@ -3567,6 +3573,7 @@ def generate_video(
             vsr_spatial_mode=vsr_spatial_mode,
             vsr_target_fps=vsr_target_fps,
             vsr_temporal_mode=vsr_temporal_mode,
+            vsr_save_original=vsr_save_original,
             vsr_encode_quality=vsr_encode_quality,
             vsr_audio_codec=vsr_audio_codec,
         )
@@ -3695,6 +3702,7 @@ def generate_video(
             vsr_spatial_mode=vsr_spatial_mode,
             vsr_target_fps=vsr_target_fps,
             vsr_temporal_mode=vsr_temporal_mode,
+            vsr_save_original=vsr_save_original,
             vsr_encode_quality=vsr_encode_quality,
             vsr_audio_codec=vsr_audio_codec,
         )
@@ -3794,6 +3802,7 @@ def generate_video(
             vsr_spatial_mode=vsr_spatial_mode,
             vsr_target_fps=vsr_target_fps,
             vsr_temporal_mode=vsr_temporal_mode,
+            vsr_save_original=vsr_save_original,
             vsr_encode_quality=vsr_encode_quality,
             vsr_audio_codec=vsr_audio_codec,
         )
@@ -4113,6 +4122,7 @@ def generate_video(
                     vsr_spatial_mode=vsr_spatial_mode,
                     vsr_target_fps=vsr_target_fps,
                     vsr_temporal_mode=vsr_temporal_mode,
+                    vsr_save_original=vsr_save_original,
                     vsr_encode_quality=vsr_encode_quality,
                     vsr_audio_codec=vsr_audio_codec,
                     n_source_frames=n_total_frames,
@@ -4154,6 +4164,7 @@ def generate_video(
                 vsr_spatial_mode=vsr_spatial_mode,
                 vsr_target_fps=vsr_target_fps,
                 vsr_temporal_mode=vsr_temporal_mode,
+                vsr_save_original=vsr_save_original,
                 vsr_encode_quality=vsr_encode_quality,
                 vsr_audio_codec=vsr_audio_codec,
             )
@@ -4562,6 +4573,7 @@ def generate_video(
         vsr_spatial_mode=vsr_spatial_mode,
         vsr_target_fps=vsr_target_fps,
         vsr_temporal_mode=vsr_temporal_mode,
+        vsr_save_original=vsr_save_original,
         vsr_encode_quality=vsr_encode_quality,
         vsr_audio_codec=vsr_audio_codec,
     )
@@ -4689,6 +4701,26 @@ def main():
             "--vsr-target-fps.  normal (default) = fast, adequate for "
             "~2x rate-up; high = QualityPrioritizationQuality, slower "
             "but cleaner motion."
+        ),
+    )
+    parser.add_argument(
+        "--vsr-save-original",
+        action="store_true",
+        help=(
+            "When --vsr-spatial-mode or --vsr-target-fps is engaged, "
+            "also write the un-processed source-resolution source-fps "
+            "mp4 alongside the VSR/VTFRC output as `<stem>_orig.mp4`. "
+            "The companion writer mirrors the primary's HEVC profile "
+            "(RGBAHalf + Main42210 for VSR HQ, NV12 + Main10 for VSR "
+            "fast / VTFRC-only) so the A/B is precision-floor matched. "
+            "Both files share the same audio track so each is playable "
+            "standalone.  Useful for A/B comparisons against the "
+            "upscaled / temporally-interpolated version.  Cost per "
+            "source frame is one additional source-buffer upload + one "
+            "HEVC HW encode pass; the second AVAssetWriter pump runs "
+            "on its own GCD queue so wall-time impact is small.  No-op "
+            "when no VT post-processing is engaged.  Implied by "
+            "--save-all-sidecars."
         ),
     )
     parser.add_argument(
@@ -5258,7 +5290,8 @@ def main():
         action="store_true",
         help=(
             "Enable all reproducibility/debug sidecars: latents, text "
-            "conditioning, and run metadata"
+            "conditioning, run metadata, audio WAV, and (when VSR/VTFRC "
+            "is engaged) the pre-VSR original mp4."
         ),
     )
     parser.add_argument(
@@ -5349,6 +5382,11 @@ def main():
         args.save_text_embeddings = True
         args.save_run_log = True
         args.save_audio_sidecar = True
+        # The pre-VSR original mp4 is a sidecar in spirit — it lives next
+        # to the requested output and helps reproduce / compare runs.
+        # Implicit no-op when no VT post-processing is engaged (the
+        # companion writer only fires when vsr or vtfrc is alive).
+        args.vsr_save_original = True
 
     # Resolve --audio-onset-trim {auto, off, <ms>} into (mode, trim_ms).
     from LTX_2_MLX.audio import parse_trim_mode as _parse_onset_trim_mode
@@ -5477,6 +5515,7 @@ def main():
         vsr_spatial_mode=args.vsr_spatial_mode,
         vsr_target_fps=args.vsr_target_fps,
         vsr_temporal_mode=args.vsr_temporal_mode,
+        vsr_save_original=args.vsr_save_original,
         vsr_encode_quality=args.vsr_encode_quality,
         # Audio onset (sequence-start spike) mitigation
         audio_onset_trim_mode=args.audio_onset_trim_mode,

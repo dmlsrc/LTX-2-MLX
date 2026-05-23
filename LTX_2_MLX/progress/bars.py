@@ -467,6 +467,14 @@ class StackedPhaseBars:
             return
 
         if position == "below":
+            # Force a final render on every bar so the frozen state
+            # reflects the latest counts, not whatever was on screen at
+            # the previous mininterval-rate-limited render.  Without
+            # this, fast-ticking bars often park at e.g. 239/241 because
+            # the last two update() calls came in under the mininterval
+            # threshold and never triggered a re-render of their own.
+            for bar in self._bars:
+                bar._render(force=True)
             # Emit at the parked cursor row.  Carriage return first
             # because the most-recent render left the cursor at column
             # `len(line)`, not column 0.
