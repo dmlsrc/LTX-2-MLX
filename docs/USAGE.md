@@ -328,29 +328,45 @@ python scripts/generate.py "Epic wide shot of a medieval castle at dawn"
 
 ## Output
 
-Videos are written through `LTX_2_MLX.video_encoder.encode_video()` at 24fps.
-The actual codec and container depend on `--encode-tier` (default: `default`):
+Videos are written at 24fps via one of two backends, controlled by
+`--output-backend` (default `auto`):
 
-| Tier        | Codec / Container                                | Audience                                |
-|-------------|--------------------------------------------------|-----------------------------------------|
-| `web`       | H.264 SW 8-bit 4:2:0 CRF 18 + AAC 320k (.mp4)    | Universal browser/player compat          |
-| `default`   | HEVC HW 10-bit 4:2:0 q=65 + ALAC (.mp4)          | Everyday output on Apple / modern browsers |
-| `hq`        | HEVC SW 10-bit 4:4:4 CRF 14 + ALAC (.mp4)        | Local viewing, full chroma (no browser support) |
-| `export`    | ProRes 422 HQ + PCM 24-bit (.mov)                | Editor / colorist hand-off              |
-| `reference` | ProRes 4444 + PCM 24-bit + alpha (.mov)          | Canonical highest-fidelity copy         |
+- `ffmpeg` — `LTX_2_MLX.video_encoder.encode_video()`.  Handles every
+  tier and is the default for non-HEVC tiers (`web`, `hq`, `export`,
+  `reference`).
+- `videotoolbox` — `LTX_2_MLX.videotoolbox.encode.encode_video_videotoolbox()`.
+  Pure AVAssetWriter; no ffmpeg dependency.  Supports the `default`
+  tier (HEVC Main10 4:2:0 + ALAC) and is also the only backend that
+  can run the optional VSR / VTFRC stages.
 
-The container extension (`.mp4` / `.mov`) is forced by the tier; if `--output`
-specifies a `.mp4` for a ProRes tier, `encode_video()` rewrites it to `.mov`.
+In `auto` mode the dispatcher picks `videotoolbox` whenever the run
+maps onto AVAssetWriter (`--encode-tier default`, or any `--vsr-*`
+flag engaged); otherwise it falls back to ffmpeg.
+
+| Tier        | Codec / Container                                | Backend (auto)  | Audience                                |
+|-------------|--------------------------------------------------|-----------------|-----------------------------------------|
+| `web`       | H.264 SW 8-bit 4:2:0 CRF 18 + AAC 320k (.mp4)    | ffmpeg          | Universal browser/player compat          |
+| `default`   | HEVC HW 10-bit 4:2:0 q=65 + ALAC (.mp4)          | **videotoolbox**| Everyday output on Apple / modern browsers |
+| `hq`        | HEVC SW 10-bit 4:4:4 CRF 14 + ALAC (.mp4)        | ffmpeg          | Local viewing, full chroma (no browser support) |
+| `export`    | ProRes 422 HQ + PCM 24-bit (.mov)                | ffmpeg          | Editor / colorist hand-off              |
+| `reference` | ProRes 4444 + PCM 24-bit + alpha (.mov)          | ffmpeg          | Canonical highest-fidelity copy         |
+
+The container extension (`.mp4` / `.mov`) is forced by the tier; if
+`--output` specifies a `.mp4` for a ProRes tier, the ffmpeg encoder
+rewrites it to `.mov`.
 
 ```bash
-# Default timestamped output location (default tier: HEVC HW + ALAC)
+# Default timestamped output (default tier -> AVAssetWriter HEVC + ALAC,
+# no ffmpeg involved).
 python scripts/generate.py "Your prompt"
-# → saves to outputs/ltx_YYYYmmdd_HHMMSS.mp4
 
-# Web-compat output (H.264 + AAC) for browser embed
+# Force the ffmpeg backend even for the default tier (useful for A/B).
+python scripts/generate.py "Your prompt" --output-backend ffmpeg
+
+# Web-compat output (H.264 + AAC) for browser embed — ffmpeg only.
 python scripts/generate.py "Your prompt" --encode-tier web
 
-# Editor-grade output (ProRes 422 HQ in .mov)
+# Editor-grade output (ProRes 422 HQ in .mov) — ffmpeg only.
 python scripts/generate.py "Your prompt" --encode-tier export
 
 # Custom output directory and filename prefix
@@ -360,6 +376,47 @@ python scripts/generate.py "Your prompt" \
 
 # Exact output path override
 python scripts/generate.py "Your prompt" --output my_video.mp4
+```
+
+### VideoToolbox post-processing (VSR, VTFRC)
+
+When the `videotoolbox` backend is active, two optional post-VAE
+stages can be inserted between the decoded frames and the encoder.
+Both are off by default; engaging either forces the VT backend.
+
+- `--vsr-spatial-mode {off,fast,balanced,image}` — VideoToolbox Super
+  Resolution.  `fast` is `VTLowLatencySuperResolutionScaler` (2x,
+  input <= 960x960).  `balanced` and `image` are
+  `VTSuperResolutionScaler` (4x, downloadable model on first use;
+  `balanced` uses prev-frame feedback for crisper motion; `image` is
+  per-frame deterministic).
+- `--vsr-target-fps FLOAT` — `VTFrameRateConversion` to the requested
+  output rate (e.g. 24->48 for 2x slow-motion, 24->60 for high-refresh
+  playback).  Source rate is `--fps`.
+- `--vsr-temporal-mode {normal,high}` — VTFRC quality
+  (`QualityPrioritizationQuality` when `high`).
+- `--vsr-encode-quality FLOAT` — `AVVideoQualityKey` for the
+  AVAssetWriter encoder (default `0.65`, matches the ffmpeg `default`
+  tier's `-q:v 65`).
+
+These are independent of the model-based `--upscale-spatial` /
+`--upscale-temporal` flags — the two systems should not be combined.
+
+```bash
+# Generate at 384x216 and let VideoToolbox upscale 4x to 1536x864
+# with the HQ "Image" model (no prev-frame feedback -> smoother motion).
+python scripts/generate.py "Your prompt" \
+    --width 384 --height 216 \
+    --vsr-spatial-mode image
+
+# 2x slow-mo: render at 24fps, interpolate to 48fps via VTFRC.
+python scripts/generate.py "Your prompt" \
+    --vsr-target-fps 48 --vsr-temporal-mode high
+
+# 4x VSR + 60fps interp, AAC instead of ALAC for size.
+python scripts/generate.py "Your prompt" \
+    --width 384 --height 216 \
+    --vsr-spatial-mode balanced --vsr-target-fps 60
 ```
 
 When `--output` is omitted, the output directory resolves in this order:

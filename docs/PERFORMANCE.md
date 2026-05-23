@@ -57,6 +57,9 @@ The following ship enabled by default:
 - `--internal-audio auto` (on iff `--generate-audio`).
 - `--mlx-cache-limit-gb 1`.
 - `--vae-decoder native` (lower peak memory than the legacy path).
+- `--output-backend auto` — `--encode-tier default` (HEVC Main10 + ALAC)
+  goes through AVAssetWriter; other tiers stay on ffmpeg.  Removes a
+  raw-frames-to-ffmpeg subprocess pipe from the hot path on macOS.
 - Terminal redraw throttling (`DenoiseProgress` no heartbeat thread,
   `tqdm` with `ascii=True` + `mininterval=1-2s`).
 

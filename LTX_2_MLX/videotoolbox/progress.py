@@ -262,7 +262,7 @@ class PhaseBar:
         else:
             run_str = "      --"
             eta_str = "      --"
-            pace_str = "warming up"
+            pace_str = "measuring"
 
         return (
             f"{self._indent}{self._desc_label} [{bar}] "
@@ -364,14 +364,22 @@ class StackedPhaseBars:
             bar._render(force=True)
 
     def close(self) -> None:
-        """Close all bars and drop the cursor below the stack. Idempotent."""
+        """Close all bars and leave the cursor immediately below the stack.
+
+        During the run the logical cursor sits one row below the bottom
+        bar (the row reserved by the final `\\n` printed when the last
+        bar was added).  close() doesn't print another newline, so the
+        next caller-side `print()` writes onto that already-reserved
+        row, giving tight visual coupling between the final bar render
+        and any "done: ..." / "Processed: ..." summary line.
+
+        Idempotent.
+        """
         if not self._bars:
             return
         for bar in self._bars:
             bar.close()
         self._bars.clear()
-        sys.stderr.write("\n")
-        sys.stderr.flush()
 
     def __enter__(self) -> "StackedPhaseBars":
         return self

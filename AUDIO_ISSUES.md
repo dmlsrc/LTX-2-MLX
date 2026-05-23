@@ -206,6 +206,205 @@ fix appears to have resolved the original temporal degradation along
 with the amplitude collapse.  See the Duration-Dependent Amplitude
 Bug closure note above for the empirical table.
 
+### Sequence-Start Audio Spike (OPEN — May 22, 2026)
+
+**Symptom:** *Some* generated clips produce a loud burst of ~65 ms of
+near-clipping audio at the very start, immediately followed by clean
+silence until the first spoken word.  Audible as a sharp "click" or
+"blat" at t=0 on playback.  **Not all clips exhibit this** — see the
+ambient-onset counter-example below.  Reproduced on a 30-second
+distilled two-stage AV smoke (576x320, dialog-heavy prompt, seed=42,
+generate-audio).
+
+**Decoded WAV characterization** (48 kHz stereo float, ALAC):
+
+| Window (5 ms)   | RMS    | abs-peak | Notes                       |
+|----------------:|-------:|---------:|-----------------------------|
+| 0-5 ms          | 0.387  | 0.887    | Onset, full amplitude       |
+| 5-65 ms         | 0.25-0.37 | up to 0.91 | Sustained loud content   |
+| 65-70 ms        | 0.167  | 0.500    | Sharp decay                 |
+| 70-95 ms        | 0.002-0.024 | <0.06 | Decay tail                |
+| 95-250 ms       | <0.001 | <0.001   | Pure silence (intentional)  |
+| 250+ ms         | ~0.20  | normal   | Speech starts               |
+
+Global clip RMS is 0.120, so the first 5 ms is **3.2x global** and
+sustains above 2x for ~50 ms.  Peak sample sits at t=60.2 ms with
+amplitude -0.9102 — near-clipping.
+
+**Latent characterization** (final_audio_latent, 25 fps_lat = 1
+frame per 40 ms):
+
+| lat_t | Time     | RMS   | max-abs | vs. median |
+|------:|---------:|------:|--------:|-----------:|
+| 0     | 0-40 ms  | 1.475 | 5.34    | 1.31×      |
+| 1     | 40-80 ms | 2.042 | 3.88    | **1.81×**  |
+| 2     | 80-120 ms| 1.787 | 3.42    | 1.59×      |
+| 3+    | 120+ ms  | ≤0.93 | ≤2.98   | settled    |
+| median| —        | 1.127 | —       | 1.00×      |
+
+The first three latent frames carry 1.3-1.8× typical energy, peaking
+at lat_t=1.  After lat_t=3 the latent energy is normal.
+
+**The spike is already present in stage 1**, before the spatial
+upscaler runs:
+
+```
+stage_1_audio_latent  lat_t=0  rms=1.346  max=6.75   <- spike present pre-upscaler
+stage_2_audio_latent  lat_t=0  rms=1.475  max=5.34   <- refinement reshuffles
+```
+
+Stage 2 refinement slightly lowers the per-sample peak and slightly
+raises the RMS — energy moves around within the frame but the spike
+persists.  This rules out the spatial-upscaler refinement step as
+the source.
+
+**Counter-example (20-second ambient-onset clip, same model + seed
+range):**
+
+| Metric                       | Dialog-heavy (clicks) | Ambient-onset (no click) |
+|------------------------------|----------------------:|-------------------------:|
+| WAV global RMS               | 0.120                 | 0.018                    |
+| WAV 0-50 ms RMS              | 0.310 (2.58x ↑)       | 0.0015 (0.08x ↓)         |
+| final lat_t=0 RMS            | 1.475                 | **2.120**                |
+| final lat_t=0 max-abs        | 5.34                  | **6.72**                 |
+| stage_1 lat_t=0 max-abs      | 6.75                  | 7.00                     |
+
+The ambient-onset clip's latent at t=0 is **more** elevated than the
+dialog-heavy one's (RMS +44 %, max-abs +26 %), yet its WAV at t=0 is
+**quieter than its own global RMS**.  So elevated lat_t=0 RMS alone
+does not predict an audible click.
+
+**Diagnosis (revised):** The *elevated lat_t=0* appears to be a
+universal sequence-start sink — the transformer reliably encodes
+something with high L2 norm into the first ~3 latent frames across
+prompts and seeds.  That is consistent with classic attention-sink
+behavior (no left-context, attention defaults to fixed sink
+positions).  Whether that elevated latent becomes an *audible*
+spike depends on the **spectral content** the model places there:
+
+- *Dialog-heavy prompts* (where the model wants loud content at t=0):
+  the model encodes loud transient onsets with broadband spectral
+  content, which BWE (24 → 48 kHz bandwidth extension) faithfully
+  synthesizes into a wide-spectrum click;
+- *Ambient-onset prompts* (where the model wants quiet content at
+  t=0): the model encodes quiet room tone — high latent RMS but
+  DC-ish / low-frequency content — which decodes to faithful silence.
+
+So the AV transformer's high-energy lat_t=0 is **not the bug** by
+itself; the click is a *content-dependent* manifestation of it on
+clips whose intended t=0 is loud.  This is **not** caused by:
+
+- the VideoToolbox encode path (spike is in the latent, before any
+  encoder runs);
+- AVAssetWriter ALAC mux (ALAC is lossless);
+- `LTX_NORMALIZE_AUDIO_NOISE` (off in the dialog-heavy test that
+  exhibited the spike, also off in the ambient-onset test that
+  didn't).
+
+**What would actually predict a click?**  An open question.  Probably
+the latent's *spectral / dynamic-range* content at t=0, not just its
+RMS.  A useful follow-up would be to extract per-channel-of-8
+statistics for lat_t=0 across clips that click vs. clips that don't,
+and look for the discriminating feature.  The analyzer script's
+verdict is therefore a *necessary but not sufficient* indicator —
+the current 50 ms-RMS threshold catches the audible cases but says
+nothing about why some quiet-onset clips have elevated latents too.
+
+**Reproduction inputs:**
+- Output: any `.{mp4,wav,npz}` sidecar bundle from a generate.py run
+  with `--save-all-sidecars` (the run log JSON is preserved alongside).
+- Generator: `--pipeline distilled --height 320 --width 576
+  --duration 30 --generate-audio --fast-mode --save-all-sidecars`
+  on a dialog-heavy prompt at any seed; the spike reproduces broadly,
+  not just for one seed/prompt combo.
+- Analysis: `scripts/analyze_audio_onset.py --run <stem>.mp4` (or
+  `.wav` / `.npz`).  Prints WAV head profile (coarse 50 ms windows
+  over the first 2 s, fine 5 ms windows over the first 120 ms),
+  per-frame latent stats for every audio-latent key present, and a
+  one-line VERDICT (spike / clean) using a configurable threshold.
+  See the script's docstring for the full design notes.
+
+**Possible mitigations** (in order of intrusiveness, none implemented).
+The dialog-vs-ambient comparison narrows the design: clips that don't
+click shouldn't be touched, so the production-grade fix is
+**detect-then-trim** rather than unconditional surgery.
+
+1. **Detect-then-trim** (recommended). After audio decode, run the
+   same 50 ms-RMS-vs-global heuristic the analyzer script uses; if
+   the first window exceeds the threshold, drop the leading 100-150
+   ms of WAV before mux.  Clean clips pass through unchanged.  Trim
+   length 100-150 ms is sized to clear the click decay tail (~95 ms
+   on the diagnosed clip) plus a margin; it sits inside the
+   intentional silence the model places before the first spoken
+   word (95-250 ms on the same clip), so the cushion costs nothing.
+   Natural CLI: `--audio-onset-trim {auto, off, N_ms}`, default
+   `auto`.  Must apply in both the new VT encode helper and the
+   ffmpeg encode helper, and to the sidecar WAV writer.
+2. **Linear / cosine fade-in** over 100-150 ms with the same
+   detect gate.  Same protection, slightly softer if the spike ever
+   overlaps real audio (the diagnosed clip has clean silence between
+   the burst and the first word, so trim and fade are indistinguishable
+   there — fade matters only if future clips have legitimate content
+   right at t=0).
+3. **Zero the first 2-3 audio-latent frames** before vocoder decode.
+   Universal, no gating needed: the elevated lat_t=0 appears on both
+   clicking and non-clicking clips, and the non-clicking clip already
+   decodes those high-RMS latent frames to silence, so dropping them
+   should be ~imperceptible there.  Caveat: the vocoder has temporal
+   context spread, so neighbor latent frames still feed forward into
+   the vocoder's left edge — a fully clean t=0 isn't guaranteed.
+   Useful as an A/B against (1) to confirm whether the residual
+   energy comes from the latent or from the vocoder's left-edge
+   behavior on its own.
+4. ~~**Notch / subtract a stable spectrum.**~~  **Demoted.**  The
+   dialog-vs-ambient counter-example shows the spike is content-
+   dependent — there's no single stable spectrum across clips to
+   notch.  Not worth pursuing.
+
+Whichever path is taken, the audio sidecar (`--save-audio-sidecar`)
+and the muxed track should both get the cleaned version so post-hoc
+listening doesn't rediscover the click.  Trim/fade should be applied
+**after** any latent save (`--save-latents` keeps the raw latent so
+the analyzer-script analysis stays reproducible).  The detect-then-
+trim heuristic can reuse the analyzer's threshold logic so a single
+constant defines both the diagnosis criterion and the mitigation
+gate.
+
+**AV sync safety** (do not get this wrong):
+
+- The trim mitigation must **mute / zero-fill** the leading audio
+  samples, not **drop** them.  Audio length must continue to match
+  video length, otherwise every video frame after the trim point
+  slips by the trim duration — 100 ms of drop = 2.4 video frames at
+  24 fps, very audible on speech.  Equivalently: keep the audio
+  track PTS at 0 and write zeros over the spike region.
+- The fade-in mitigation preserves sample count and is sync-safe
+  trivially.
+- The latent-zero mitigation preserves vocoder output length (output
+  length is determined by latent T, not by latent magnitude) and is
+  sync-safe trivially.  Only caveat is vocoder temporal-spread bleed
+  near the left edge — audible artifact possible but no sync drift.
+- The detect gate is *also* a sync-safety feature: a clip with
+  legitimate speech from t=0 would show normal speech RMS at the
+  head (~0.2x global), not the click's ~2.5x global, so the trim
+  wouldn't fire and lip sync at t=0 would be preserved.  Worth
+  refining the heuristic before implementing — see "more robust
+  shape detector" note below.
+
+**More robust shape detector** (for future implementation): the
+click signature is specifically *loud burst followed by silence*,
+not just *loud burst*.  A two-window check —
+
+```
+window_0_rms > 2.0x global AND mean(windows in 100-250 ms) < 0.1x global
+```
+
+— would catch the diagnosed click signature but reject any future
+clip where the loud t=0 is legitimate speech onset (which wouldn't
+be followed by silence).  The current single-window threshold in
+`scripts/analyze_audio_onset.py` is fine for diagnosis but the
+mitigation gate should use the two-window variant.
+
 ### Potential Deep-Dive Areas
 - Compare audio latents (pre-VAE-decode) between MLX and ComfyUI for same seed/prompt
 - Layer-by-layer transformer output comparison (heavy instrumentation needed)
@@ -247,4 +446,10 @@ Transformer output (B, T, 128) patchified
 ### Test Tools Created
 - `save_embeddings_hook.py` — Patches ComfyUI to export text embeddings
 - `test_vocoder_from_mel.py` — Feeds MLX mel through PyTorch vocoder
+- `scripts/analyze_audio_onset.py` — Detects + characterizes start-of-clip
+  audio artifacts (e.g. the sequence-start spike).  Takes any run sidecar
+  path (`.mp4` / `.wav` / `.npz`), prints WAV head RMS profiles at both
+  coarse (50 ms) and fine (5 ms) resolutions, per-frame latent stats for
+  every audio-latent key in the NPZ, and a VERDICT line.  `--strict`
+  returns non-zero on spike detection (sweep / CI usable).
 - Exported embeddings: `/Users/steveross/Documents/ComfyUI/exported_embeddings/`

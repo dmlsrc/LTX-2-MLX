@@ -33,6 +33,7 @@ from ._compat import autorelease_pool, require_pyobjc
 # point a class is actually constructed (via require_pyobjc in each ctor).
 from .audio import AudioTrack
 from .cut_detect import CutDetector
+from .encode import encode_video_videotoolbox
 from .progress import PhaseBar, StackedPhaseBars
 from .vsr import VsrSession
 from .temporal import VtfrcSession
@@ -47,5 +48,6 @@ __all__ = [
     "VsrSession",
     "VtfrcSession",
     "autorelease_pool",
+    "encode_video_videotoolbox",
     "require_pyobjc",
 ]

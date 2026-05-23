@@ -188,8 +188,13 @@ python scripts/generate.py "Your prompt" \
 | `--model-variant` | `distilled` (fast) or `dev` (quality) | distilled |
 | `--spatial-upscaler-weights` | Path to spatial upscaler weights (for distilled/two-stage) | cached LTX-2.3 x2 upscaler |
 | `--temporal-upscaler-weights` | Path to temporal upscaler weights | None |
-| `--upscale-spatial` | Apply 2x spatial upscaling (legacy) | False |
-| `--upscale-temporal` | Apply 2x temporal upscaling (legacy) | False |
+| `--upscale-spatial` | Apply 2x spatial upscaling (legacy model-based) | False |
+| `--upscale-temporal` | Apply 2x temporal upscaling (legacy model-based) | False |
+| `--output-backend` | Encode backend: `auto` (VT for HEVC/`default` tier or any `--vsr-*` flag, ffmpeg otherwise), `ffmpeg`, or `videotoolbox` | auto |
+| `--vsr-spatial-mode` | VideoToolbox Super Resolution: `off`, `fast` (2x LowLatency), `balanced` (4x HQ Video), `image` (4x HQ Image). Forces `--output-backend videotoolbox`. | off |
+| `--vsr-target-fps` | VideoToolbox frame-rate conversion target. When set and different from `--fps`, interpolates via VTFrameRateConversion. Forces `--output-backend videotoolbox`. | None |
+| `--vsr-temporal-mode` | VTFRC quality: `normal` or `high` (QualityPrioritizationQuality). Only meaningful with `--vsr-target-fps`. | normal |
+| `--vsr-encode-quality` | `AVVideoQualityKey` (0..1) for the AVAssetWriter HEVC encoder. Matches the ffmpeg default tier's `-q:v 65`. | 0.65 |
 | `--generate-audio` | Generate synchronized audio (experimental) | False |
 | `--low-memory` | Legacy emergency eval-cadence knob; usually redundant with distilled streaming runs | False |
 | `--save-latents` | Save video/audio latents as an NPZ sidecar next to the output; distilled two-stage runs include stage-1 and stage-2 latents plus final aliases | False |
@@ -211,6 +216,30 @@ python scripts/generate.py "Your prompt" \
 - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
 - The VAE decoder defaults to native Conv3d with zero spatial padding and RAM-aware auto tiling. `--vae-decoder legacy` and `--vae-spatial-padding reflect` remain available for decode A/Bs against the earlier baseline.
 - Converted-weight caching, a 1GB MLX allocator cache limit, same-math video projection pretranspose layouts, and native Conv3d/zero/auto VAE decode are enabled by default. Use `--weights-cache off`, `--mlx-cache-limit-gb 0`, `--video-ff-layout off --video-attn-layout off`, or `--vae-decoder legacy` for focused baselines.
+- The `default` encode tier (HEVC HW Main10 + ALAC) auto-routes through `AVAssetWriter` (no ffmpeg dependency). Other tiers still go through ffmpeg. Force the legacy ffmpeg HEVC path with `--output-backend ffmpeg` for A/B comparisons.
+
+## VideoToolbox post-processing
+
+Two optional stages run between VAE decode and the encoder when
+`--output-backend` resolves to `videotoolbox`. Both are off by default
+and stream frames straight from the decoder into AVAssetWriter — no
+disk round-trip, no ffmpeg.
+
+- **`--vsr-spatial-mode {fast,balanced,image}`** — VideoToolbox Super
+  Resolution. `fast` uses `VTLowLatencySuperResolutionScaler` (2x,
+  input ≤ 960×960, NV12 source). `balanced` and `image` use
+  `VTSuperResolutionScaler` (4x, RGBAHalf source, downloadable model
+  fetched once on first use); `balanced` chains prev-frame state for
+  crisper motion, `image` is per-frame deterministic with measurably
+  smoother frame-to-frame detail (lower temporal second-difference).
+- **`--vsr-target-fps FLOAT`** — `VTFrameRateConversion` to the
+  requested rate. Source rate is `--fps`; identity rates skip the
+  stage. Tested ratios include 24→48, 24→60, 30→24.
+
+These are independent of `--upscale-spatial` / `--upscale-temporal`
+(transformer LoRA upscalers). The model-based path stays available
+for cases where its quality profile is preferred; the VT path is
+typically 100×+ faster for the same scale factor.
 
 ## Frame Count
 

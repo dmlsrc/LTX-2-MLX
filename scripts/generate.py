@@ -77,6 +77,109 @@ from LTX_2_MLX.core_utils import to_velocity
 from LTX_2_MLX.video_encoder import encode_video, TIERS
 
 
+# Tiers that map cleanly onto AVAssetWriter's HEVC outputs.  Auto-mode
+# routes these through the VideoToolbox backend; everything else stays
+# on ffmpeg.  `default` is HEVC Main10 4:2:0, which is exactly what
+# AVWriter writes out of the box.  `hq` is HEVC 4:4:4 which AVWriter
+# doesn't do; `web`/`export`/`reference` are H.264 / ProRes, also out
+# of scope for the VT helper today.
+VT_AUTO_TIERS = {"default"}
+
+
+def _vsr_active(vsr_spatial_mode: str, vsr_target_fps: float | None) -> bool:
+    """True if any VSR / VTFRC flag is engaged (forces VT backend)."""
+    return vsr_spatial_mode not in (None, "off") or vsr_target_fps is not None
+
+
+def resolve_output_backend(
+    requested: str,
+    tier: str,
+    vsr_spatial_mode: str = "off",
+    vsr_target_fps: float | None = None,
+) -> str:
+    """Resolve --output-backend {auto,ffmpeg,videotoolbox} -> {ffmpeg,videotoolbox}.
+
+    Auto rules:
+      - VSR or target_fps engaged                -> videotoolbox (required)
+      - tier in VT_AUTO_TIERS (HEVC Main10)      -> videotoolbox
+      - everything else                          -> ffmpeg
+
+    Explicit `videotoolbox` is validated against the tier — non-HEVC
+    tiers raise here rather than failing deep inside AVAssetWriter.
+    """
+    vsr_on = _vsr_active(vsr_spatial_mode, vsr_target_fps)
+    if requested == "videotoolbox":
+        if tier not in VT_AUTO_TIERS:
+            raise SystemExit(
+                f"--output-backend videotoolbox supports --encode-tier "
+                f"{sorted(VT_AUTO_TIERS)}; got tier={tier!r}. Use the "
+                f"ffmpeg backend or change tier."
+            )
+        return "videotoolbox"
+    if requested == "ffmpeg":
+        if vsr_on:
+            raise SystemExit(
+                "--vsr-spatial-mode / --vsr-target-fps require the "
+                "videotoolbox backend; --output-backend ffmpeg cannot "
+                "run VSR / VTFRC."
+            )
+        return "ffmpeg"
+    # auto
+    if vsr_on:
+        return "videotoolbox"
+    return "videotoolbox" if tier in VT_AUTO_TIERS else "ffmpeg"
+
+
+def encode_video_dispatch(
+    frames,
+    output_path,
+    *,
+    tier: str,
+    fps: float,
+    audio_waveform=None,
+    audio_sample_rate=None,
+    save_audio_sidecar: bool = False,
+    output_backend: str = "auto",
+    vsr_spatial_mode: str = "off",
+    vsr_target_fps: float | None = None,
+    vsr_temporal_mode: str = "normal",
+    vsr_encode_quality: float = 0.65,
+    vsr_audio_codec: str = "alac",
+):
+    """Route an encode call to ffmpeg or AVAssetWriter.
+
+    The signature mirrors the ffmpeg `encode_video(...)` plus the VT-only
+    knobs; resolve_output_backend() picks the backend. Returns the
+    encoded output path (extension may be normalized).
+    """
+    backend = resolve_output_backend(
+        output_backend, tier,
+        vsr_spatial_mode=vsr_spatial_mode,
+        vsr_target_fps=vsr_target_fps,
+    )
+    if backend == "videotoolbox":
+        from LTX_2_MLX.videotoolbox import encode_video_videotoolbox
+        return encode_video_videotoolbox(
+            frames, output_path,
+            fps=fps,
+            audio_waveform=audio_waveform,
+            audio_sample_rate=audio_sample_rate,
+            save_audio_sidecar=save_audio_sidecar,
+            vsr_spatial_mode=None if vsr_spatial_mode in (None, "off") else vsr_spatial_mode,
+            target_fps=vsr_target_fps,
+            vsr_temporal_mode=vsr_temporal_mode,
+            encode_quality=vsr_encode_quality,
+            audio_codec=vsr_audio_codec,
+        )
+    return encode_video(
+        frames, output_path,
+        tier=tier, fps=fps,
+        audio_waveform=audio_waveform,
+        audio_sample_rate=audio_sample_rate,
+        save_audio_sidecar=save_audio_sidecar,
+    )
+
+
 SUPPORTED_COMPUTE_DTYPES = {
     "bfloat16": mx.bfloat16,
     "float16": mx.float16,
@@ -945,7 +1048,7 @@ class DenoiseProgress:
                 pace = f"{1.0 / seconds_per_step:.2f}it/s"
         else:
             eta_text = "--"
-            pace = "warming up" if denoise_started_at is None else "measuring"
+            pace = "measuring"
 
         line = (
             f"  {self.label} [{bar}] {step:>3}/{total:<3} "
@@ -2507,6 +2610,13 @@ def generate_video(
     ge_gamma: float = 0.0,
     output_fps: float = NATIVE_FPS,
     output_tier: str = "default",
+    # Output backend / VideoToolbox post-processing
+    output_backend: str = "auto",
+    vsr_spatial_mode: str = "off",
+    vsr_target_fps: float | None = None,
+    vsr_temporal_mode: str = "normal",
+    vsr_encode_quality: float = 0.65,
+    vsr_audio_codec: str = "alac",
     # IC-LoRA and Keyframe Interpolation
     keyframes: list = None,
     ic_lora_weights: str = None,
@@ -3554,12 +3664,18 @@ def generate_video(
 
         # Save video
         print(f"\nSaving video to {output_path}...")
-        final_path = encode_video(
+        final_path = encode_video_dispatch(
             frames, output_path,
             tier=output_tier, fps=output_fps,
             audio_waveform=audio_waveform if audio_waveform is not None else None,
             audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
             save_audio_sidecar=save_audio_sidecar,
+            output_backend=output_backend,
+            vsr_spatial_mode=vsr_spatial_mode,
+            vsr_target_fps=vsr_target_fps,
+            vsr_temporal_mode=vsr_temporal_mode,
+            vsr_encode_quality=vsr_encode_quality,
+            vsr_audio_codec=vsr_audio_codec,
         )
         print(f"Done! Video saved to {final_path}")
         return
@@ -3679,7 +3795,16 @@ def generate_video(
 
         # Save video
         print(f"\nSaving video to {output_path}...")
-        final_path = encode_video(frames, output_path, tier=output_tier, fps=output_fps)
+        final_path = encode_video_dispatch(
+            frames, output_path,
+            tier=output_tier, fps=output_fps,
+            output_backend=output_backend,
+            vsr_spatial_mode=vsr_spatial_mode,
+            vsr_target_fps=vsr_target_fps,
+            vsr_temporal_mode=vsr_temporal_mode,
+            vsr_encode_quality=vsr_encode_quality,
+            vsr_audio_codec=vsr_audio_codec,
+        )
         print(f"Done! Video saved to {final_path}")
         return
 
@@ -3769,7 +3894,16 @@ def generate_video(
 
         # Save video
         print(f"\nSaving video to {output_path}...")
-        final_path = encode_video(frames, output_path, tier=output_tier, fps=output_fps)
+        final_path = encode_video_dispatch(
+            frames, output_path,
+            tier=output_tier, fps=output_fps,
+            output_backend=output_backend,
+            vsr_spatial_mode=vsr_spatial_mode,
+            vsr_target_fps=vsr_target_fps,
+            vsr_temporal_mode=vsr_temporal_mode,
+            vsr_encode_quality=vsr_encode_quality,
+            vsr_audio_codec=vsr_audio_codec,
+        )
         print(f"Done! Video saved to {final_path}")
         return
 
@@ -4003,12 +4137,18 @@ def generate_video(
 
         # Save video with audio
         print(f"\nSaving video to {output_path}...")
-        final_path = encode_video(
+        final_path = encode_video_dispatch(
             frames, output_path,
             tier=output_tier, fps=output_fps,
             audio_waveform=audio_waveform if audio_waveform is not None else None,
             audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
             save_audio_sidecar=save_audio_sidecar,
+            output_backend=output_backend,
+            vsr_spatial_mode=vsr_spatial_mode,
+            vsr_target_fps=vsr_target_fps,
+            vsr_temporal_mode=vsr_temporal_mode,
+            vsr_encode_quality=vsr_encode_quality,
+            vsr_audio_codec=vsr_audio_codec,
         )
         print(f"Done! Video saved to {final_path}")
         timings.mark("output save")
@@ -4408,7 +4548,16 @@ def generate_video(
     # Save video
     # Note: Audio generation is handled by the AUDIO-VIDEO PIPELINE section above
     print(f"\nSaving video to {output_path}...")
-    encode_video(frames, output_path, tier=output_tier, fps=output_fps)
+    encode_video_dispatch(
+        frames, output_path,
+        tier=output_tier, fps=output_fps,
+        output_backend=output_backend,
+        vsr_spatial_mode=vsr_spatial_mode,
+        vsr_target_fps=vsr_target_fps,
+        vsr_temporal_mode=vsr_temporal_mode,
+        vsr_encode_quality=vsr_encode_quality,
+        vsr_audio_codec=vsr_audio_codec,
+    )
     timings.mark("output save")
 
     print(f"\nDone! Video saved to {output_path}")
@@ -4480,6 +4629,70 @@ def main():
             "hq: local viewing with full chroma (HEVC SW 10-bit 4:4:4 + ALAC). "
             "export: editor / colorist hand-off (ProRes 422 HQ + PCM 24-bit, .mov). "
             "reference: canonical highest-fidelity copy (ProRes 4444 + PCM 24-bit + alpha, .mov)."
+        ),
+    )
+    parser.add_argument(
+        "--output-backend",
+        choices=["auto", "ffmpeg", "videotoolbox"],
+        default="auto",
+        help=(
+            "How to encode the final mp4.  auto (default) routes the "
+            "HEVC `default` tier and any --vsr-* run through "
+            "AVAssetWriter (no ffmpeg dependency); other tiers stay on "
+            "ffmpeg.  Force `videotoolbox` to require the AVWriter path "
+            "(valid only for --encode-tier default today).  Force "
+            "`ffmpeg` to disable the VT path entirely; incompatible "
+            "with any --vsr-* flag."
+        ),
+    )
+    parser.add_argument(
+        "--vsr-spatial-mode",
+        choices=["off", "fast", "balanced", "image"],
+        default="off",
+        help=(
+            "VideoToolbox spatial upscale, applied after VAE decode and "
+            "before AVAssetWriter.  Scale is implied by the mode "
+            "(fast=2x VTLowLatency; balanced=4x HQ Video — temporal "
+            "feedback; image=4x HQ Image — per-frame deterministic).  "
+            "off (default) skips the upscale entirely.  Engaging any "
+            "non-off mode forces --output-backend=videotoolbox.  This "
+            "is independent from the model-based --upscale-spatial; "
+            "the two should not be combined."
+        ),
+    )
+    parser.add_argument(
+        "--vsr-target-fps",
+        type=float,
+        default=None,
+        help=(
+            "VideoToolbox frame-rate conversion target.  When set and "
+            "different from --fps, VTFrameRateConversion interpolates "
+            "between source frames at the requested rate (e.g. 24->48 "
+            "for 2x slow-mo, 24->60 for high-refresh playback).  "
+            "Engaging this forces --output-backend=videotoolbox.  "
+            "Independent from --upscale-temporal (model-based)."
+        ),
+    )
+    parser.add_argument(
+        "--vsr-temporal-mode",
+        choices=["normal", "high"],
+        default="normal",
+        help=(
+            "VTFrameRateConversion quality.  Only meaningful with "
+            "--vsr-target-fps.  normal (default) = fast, adequate for "
+            "~2x rate-up; high = QualityPrioritizationQuality, slower "
+            "but cleaner motion."
+        ),
+    )
+    parser.add_argument(
+        "--vsr-encode-quality",
+        type=float,
+        default=0.65,
+        help=(
+            "AVVideoQualityKey for the AVAssetWriter HEVC encoder when "
+            "--output-backend=videotoolbox.  0.65 matches the ffmpeg "
+            "default tier's -q:v 65; raise toward 1.0 for higher "
+            "bitrate / lower-loss output."
         ),
     )
     parser.add_argument(
@@ -5226,6 +5439,12 @@ def main():
         # Output FPS + encode tier
         output_fps=args.fps,
         output_tier=args.encode_tier,
+        # Output backend / VideoToolbox post-processing
+        output_backend=args.output_backend,
+        vsr_spatial_mode=args.vsr_spatial_mode,
+        vsr_target_fps=args.vsr_target_fps,
+        vsr_temporal_mode=args.vsr_temporal_mode,
+        vsr_encode_quality=args.vsr_encode_quality,
         # IC-LoRA and Keyframe Interpolation
         keyframes=args.keyframe,
         ic_lora_weights=args.ic_lora_weights,

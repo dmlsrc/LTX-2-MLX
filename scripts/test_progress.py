@@ -64,9 +64,10 @@ def near(actual: float, expected: float, tol: float) -> bool:
 # ---------------------------------------------------------------------------
 
 def test_first_tick_records_duration() -> None:
-    """A bar at 1/N must show a measured pace, not 'warming up'.
-    Verifies that the first `update()` advances `_t_last` so elapsed
-    becomes non-zero — pace is derived from `n / (now - origin)`."""
+    """A bar at 1/N must show a measured pace, not the n=0 'measuring'
+    placeholder.  Verifies that the first `update()` advances `_t_last`
+    so elapsed becomes non-zero — pace is derived from
+    `n / (now - origin)`."""
     print("\n[1] first tick advances the clock past origin")
     buf = io.StringIO()
     with redirect_stderr(buf):
@@ -83,9 +84,11 @@ def test_first_tick_records_duration() -> None:
             near(elapsed, 0.05, 0.04),
             f"got {elapsed * 1000:.1f} ms (expected ~50 ms)",
         )
+        # Pace is shown as "X.Xs/<unit>" or "<f.2><unit>/s" once n>=1;
+        # the n=0 placeholder is "measuring".
         check(
-            "line is NOT 'warming up' after first tick",
-            "warming up" not in b._build_line(),
+            "line shows a measured pace (not the 'measuring' placeholder)",
+            "measuring" not in b._build_line(),
             f"line={b._build_line()!r}",
         )
         b.close()
@@ -402,8 +405,9 @@ def visual_demo() -> None:
     What to look for as it runs:
       * Layout: <indent><label> [<bar>] <n/total> <pct>% | RUN <d> | ETA <d> | <pace>
       * VAE bar's first tick (1/4) shows real numbers for RUN, ETA, and
-        a "X.Xs/chunk" pace — NOT "warming up". RUN climbs, ETA shrinks.
-      * VSR bar shows "warming up" only at 0/80; after the first frame
+        a "X.Xs/chunk" pace — NOT the "measuring" placeholder.  RUN
+        climbs, ETA shrinks.
+      * VSR bar shows "measuring" only at 0/80; after the first frame
         completes it switches to "RUN 0.1s | ETA 0.4s | NN.NN frame/s".
       * Durations: dashed clock — `--:--:SS` under a minute, `--:MM:SS`
         once minutes are non-zero, `HH:MM:SS` once hours appear. Always
