@@ -21,7 +21,13 @@ class Conv3dSimple(nn.Module):
     This properly applies the full 3D kernel by iterating over temporal kernel
     positions and accumulating contributions from each 2D spatial slice.
 
-    Weight format: (out_channels, in_channels, T, H, W) - PyTorch format
+    Weight format: (out_channels, T, H, W, in_channels) - MLX channels-last.
+    Historically this stored PyTorch (O, I, T, H, W) and transposed each
+    temporal slice to MLX channels-last per forward call.  Storing channels-
+    last directly removes the per-slice transpose and lets the family cache
+    bake the layout once at build time (see
+    ``transformer_cache.py:_bake_conv_layout_for_family``).  Loaders accept
+    either layout via an idempotent shape check.
     """
 
     def __init__(
@@ -37,9 +43,9 @@ class Conv3dSimple(nn.Module):
         self.kernel_size = kernel_size
         self.padding = padding
 
-        # PyTorch weight format: (out_C, in_C, T, H, W)
+        # MLX channels-last weight format: (out_C, kT, kH, kW, in_C)
         k = kernel_size
-        self.weight = mx.zeros((out_channels, in_channels, k, k, k))
+        self.weight = mx.zeros((out_channels, k, k, k, in_channels))
         self.bias = mx.zeros((out_channels,))
 
     def __call__(self, x: mx.array, causal: bool = True) -> mx.array:
@@ -84,10 +90,11 @@ class Conv3dSimple(nn.Module):
 
         # Iterate over temporal kernel positions
         for kt in range(k):
-            # Extract the 2D kernel slice for this temporal position
-            # weight shape: (out_C, in_C, kT, kH, kW)
-            w_slice = self.weight[:, :, kt, :, :]  # (out_C, in_C, kH, kW)
-            w_slice = w_slice.transpose(0, 2, 3, 1)  # MLX format: (out_C, kH, kW, in_C)
+            # Extract the 2D kernel slice for this temporal position.
+            # Weight is stored MLX channels-last: (out_C, kT, kH, kW, in_C).
+            # Slicing on the temporal axis (index 1) yields (out_C, kH, kW, in_C),
+            # directly the layout mx.conv2d expects -- no runtime transpose.
+            w_slice = self.weight[:, kt, :, :, :]  # (out_C, kH, kW, in_C)
 
             # Get the temporal slice of input that corresponds to this kernel position
             t_out_len = t_pad - k + 1  # Number of output temporal positions
@@ -404,6 +411,20 @@ class SimpleVideoEncoder(nn.Module):
         return means
 
 
+def _assign_conv3d_weight(conv: Conv3dSimple, value: mx.array) -> None:
+    """Assign Conv3dSimple weight with idempotent layout conversion.
+
+    ``Conv3dSimple`` stores weights in MLX channels-last ``(O, T, H, W, I)``.
+    Cached safetensors built with schema_version >= 2 already hold that
+    layout; raw PyTorch checkpoints (or older schema_version=1 caches)
+    hold ``(O, I, T, H, W)``.  Shape-check decides whether to transpose.
+    """
+    if tuple(value.shape) != tuple(conv.weight.shape):
+        # PyTorch (O, I, T, H, W) -> MLX (O, T, H, W, I)
+        value = value.transpose(0, 2, 3, 4, 1)
+    conv.weight = value
+
+
 def load_vae_encoder_weights(encoder: SimpleVideoEncoder, weights_path: str) -> None:
     """
     Load VAE encoder weights from a safetensors file.
@@ -431,7 +452,7 @@ def load_vae_encoder_weights(encoder: SimpleVideoEncoder, weights_path: str) -> 
         pt_key = f"vae.encoder.conv_in.conv.{suffix}"
         if pt_key in weights:
             if suffix == "weight":
-                encoder.conv_in.weight = weights[pt_key]
+                _assign_conv3d_weight(encoder.conv_in, weights[pt_key])
             else:
                 encoder.conv_in.bias = weights[pt_key]
             loaded_count += 1
@@ -475,7 +496,7 @@ def load_vae_encoder_weights(encoder: SimpleVideoEncoder, weights_path: str) -> 
                         pt_key = f"vae.encoder.down_blocks.{pt_idx}.res_blocks.{res_idx}.{conv_name}.conv.{suffix}"
                         if pt_key in weights:
                             if suffix == "weight":
-                                conv.weight = weights[pt_key]
+                                _assign_conv3d_weight(conv, weights[pt_key])
                             else:
                                 conv.bias = weights[pt_key]
                             loaded_count += 1
@@ -486,7 +507,7 @@ def load_vae_encoder_weights(encoder: SimpleVideoEncoder, weights_path: str) -> 
                 pt_key = f"vae.encoder.down_blocks.{pt_idx}.conv.conv.{suffix}"
                 if pt_key in weights:
                     if suffix == "weight":
-                        block.conv.weight = weights[pt_key]
+                        _assign_conv3d_weight(block.conv, weights[pt_key])
                     else:
                         block.conv.bias = weights[pt_key]
                     loaded_count += 1
@@ -496,7 +517,7 @@ def load_vae_encoder_weights(encoder: SimpleVideoEncoder, weights_path: str) -> 
         pt_key = f"vae.encoder.conv_out.conv.{suffix}"
         if pt_key in weights:
             if suffix == "weight":
-                encoder.conv_out.weight = weights[pt_key]
+                _assign_conv3d_weight(encoder.conv_out, weights[pt_key])
             else:
                 encoder.conv_out.bias = weights[pt_key]
             loaded_count += 1

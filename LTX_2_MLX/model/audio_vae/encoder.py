@@ -266,14 +266,24 @@ def load_audio_encoder_weights(encoder: AudioEncoder, weights_path: str) -> None
 
 
 def _load_conv_weights(conv: CausalConv2d, weights: dict, prefix: str) -> None:
-    """Load conv weights with shape transposition."""
+    """Load conv weights, transposing to MLX channels-last if needed.
+
+    Idempotent: when the cached safetensors already holds the
+    channels-last layout (cache schema version >= 2, see
+    transformer_cache.py:_bake_conv_layout_for_family), the loaded
+    tensor's shape already matches ``conv.weight.shape`` and the
+    transpose is skipped.  Raw PyTorch-layout safetensors (e.g.
+    ``--weights-cache off``) still get the transpose at load time.
+    """
     weight_key = f"{prefix}.weight"
     bias_key = f"{prefix}.bias"
 
     if weight_key in weights:
         w = weights[weight_key]
-        # Transpose: PyTorch (out_C, in_C, kH, kW) -> MLX (out_C, kH, kW, in_C)
-        conv.weight = w.transpose(0, 2, 3, 1)
+        if tuple(w.shape) != tuple(conv.weight.shape):
+            # PyTorch (out_C, in_C, kH, kW) -> MLX (out_C, kH, kW, in_C)
+            w = w.transpose(0, 2, 3, 1)
+        conv.weight = w
 
     if bias_key in weights:
         conv.bias = weights[bias_key]

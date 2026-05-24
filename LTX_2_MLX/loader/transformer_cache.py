@@ -16,7 +16,30 @@ import mlx.nn as nn
 from .weight_converter import _flatten_to_nested, convert_pytorch_key_to_mlx
 
 
+# Transformer cache schema -- bumped only when the transformer.safetensors
+# layout / dtype / quantization conventions change.  The actual cache
+# digest also folds in layout-spec / quant-spec / dtype-spec args, so most
+# meaningful changes already invalidate without a version bump.
 CACHE_SCHEMA_VERSION = 1
+
+# Family-cache schema -- separate so we can bump VAE/audio_vae/etc layout
+# conventions without forcing a transformer-cache rebuild (which is ~22 GB
+# and takes minutes).  Schema 2 (2026-05-23): video_vae and audio_vae
+# family caches now store Conv weights in MLX channels-last layout
+# (NDHWC for Conv3d, NHWC for Conv2d) instead of PyTorch channels-second.
+# The one-time materialization that previously happened on first eval is
+# moved to cache build time.  ``Conv3dSimple`` in
+# ``model/video_vae/simple_encoder.py`` was updated to store weights in
+# channels-last too so the encoder and decoder agree on layout, and
+# loaders take an idempotent shape check so raw PyTorch checkpoints
+# (``--weights-cache off``) still work.  Vocoder 3D Conv weights are
+# NOT pre-baked because Conv1d vs ConvTranspose1d need different
+# transpose orders that can't be told apart from a key alone; that
+# family stays at the runtime transpose.  Bumping this invalidates any
+# family cache built at the previous version so first run after upgrade
+# rebuilds the VAE/audio_vae/connector/vocoder caches in-place; the
+# transformer cache stays valid.
+FAMILY_CACHE_SCHEMA_VERSION = 2
 LAYOUT_KEY_PREFIX = "__layout__."
 QUANT_KEY_PREFIX = "__quant__."
 TRANSFORMER_CACHE_QUANTIZE_OFF = "off"
@@ -419,7 +442,7 @@ def _cache_payload(
 
 def _source_payload(weights_path: str, *, kind: str) -> dict[str, Any]:
     return {
-        "schema_version": CACHE_SCHEMA_VERSION,
+        "schema_version": FAMILY_CACHE_SCHEMA_VERSION,
         "source": _file_signature(weights_path),
         "kind": kind,
     }
@@ -427,7 +450,7 @@ def _source_payload(weights_path: str, *, kind: str) -> dict[str, Any]:
 
 def _source_dir_payload(weights_path: str) -> dict[str, Any]:
     return {
-        "schema_version": CACHE_SCHEMA_VERSION,
+        "schema_version": FAMILY_CACHE_SCHEMA_VERSION,
         "source": _file_signature(weights_path),
     }
 
@@ -747,6 +770,54 @@ def _write_metadata(metadata_file: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp_metadata, metadata_file)
 
 
+def _bake_conv_layout_for_family(family: str, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+    """Transpose Conv weights to MLX channels-last layout in-place at cache build.
+
+    PyTorch Conv layouts are stored channels-second (NCHW / NCDHW), but
+    MLX's ``mx.conv2d`` / ``mx.conv3d`` kernels expect channels-last
+    (NHWC / NDHWC).  Historically each VAE/audio_vae loader called
+    ``value.transpose(...)`` at load time on every process start; that
+    transpose was a metadata-only view in MLX but the first conv eval
+    had to materialize the contiguous channels-last buffer.  Baking
+    the transpose into the cache build moves that one-time
+    materialization off the hot path so subsequent runs load straight
+    into the right layout.
+
+    Bakes both ``video_vae`` (5D Conv3d weights, NCDHW -> NDHWC) and
+    ``audio_vae`` (4D Conv2d weights, NCHW -> NHWC).  Identified by
+    tensor rank since every 5D weight in ``vae.*`` is a Conv3d weight
+    and every 4D weight in ``audio_vae.*`` is a Conv2d weight (the
+    only other tensors in those families are 0D/1D scalars or
+    per-channel statistics).
+
+    Vocoder 3D weights are NOT baked because Conv1d
+    ((O, I, k) -> (O, k, I), ``transpose(0, 2, 1)``) and
+    ConvTranspose1d ((I, O, k) -> (O, k, I), ``transpose(1, 2, 0)``)
+    need different transposes that can't be picked apart from a key
+    name alone; the vocoder load path still does the right transpose
+    at runtime per layer.
+
+    ``mx.contiguous`` materializes the rearranged bytes so the
+    safetensors file on disk holds the channels-last layout directly,
+    not a strided view of the channels-second source.
+    """
+    if family == "video_vae":
+        target_ndim = 5
+        perm = (0, 2, 3, 4, 1)  # (O, I, T, H, W) -> (O, T, H, W, I)
+    elif family == "audio_vae":
+        target_ndim = 4
+        perm = (0, 2, 3, 1)  # (O, I, H, W) -> (O, H, W, I)
+    else:
+        return weights
+
+    converted: Dict[str, mx.array] = {}
+    for key, value in weights.items():
+        if value.ndim == target_ndim and key.endswith(".weight"):
+            value = mx.contiguous(value.transpose(*perm))
+        converted[key] = value
+    return converted
+
+
 def _save_weight_family_cache(
     family: str,
     cache_file: Path,
@@ -755,6 +826,7 @@ def _save_weight_family_cache(
     weights: Dict[str, mx.array],
 ) -> int:
     cache_file.parent.mkdir(parents=True, exist_ok=True)
+    weights = _bake_conv_layout_for_family(family, weights)
     tmp_cache = cache_file.parent / f".{cache_file.stem}.tmp.safetensors"
     mx.save_safetensors(str(tmp_cache), weights)
     os.replace(tmp_cache, cache_file)
