@@ -46,7 +46,9 @@ The following ship enabled by default:
   evidence — `scripts/bench_ff_microbench.py bf16_layout` — showed
   project_in pretranspose is a 2.5 % regression in isolation and
   neutral end-to-end.  Only project_out earns its keep, with a 35 %
-  isolated-matmul win that rescues a kernel-selection cliff.)
+  isolated-matmul win that rescues a BlockLoader coalescing cliff in
+  MLX's `_nt_` GEMM template — see `PERFORMANCE_NOTES.md`
+  "BlockLoader cliff characterization" entry for the mechanism.)
 - Video attention layout: OFF by default.  (The historical default
   was `to_q/to_k/to_v/to_out:pretranspose`; same microbench showed
   these are tied with naive BF16 within ±1 % at the 4096×4096 shape.)

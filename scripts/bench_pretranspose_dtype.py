@@ -121,6 +121,30 @@ def main() -> None:
     p.add_argument("--m-audio", type=int, default=502, help="batch*tokens for AUDIO shapes (default 502 = LTX bakery T_audio)")
     p.add_argument("--iters", type=int, default=50, help="timed iterations per cell")
     p.add_argument("--warmup", type=int, default=10, help="warmup iterations per cell")
+    p.add_argument(
+        "--k-sweep",
+        action="store_true",
+        help=(
+            "After the named shapes, sweep K at fine granularity over the project_out "
+            "direction (K -> N=4096) to bracket the kernel-selection cliff threshold.  "
+            "Default K-list: 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432.  "
+            "Adds ~2 minutes at default iters/warmup."
+        ),
+    )
+    p.add_argument(
+        "--k-sweep-only",
+        action="store_true",
+        help="Run ONLY the K-sweep (skip the named video/audio shapes).  Useful for quick re-runs.",
+    )
+    p.add_argument(
+        "--k-sweep-list",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated K values for the sweep, overrides the default list.  "
+            "Example: --k-sweep-list 14336,15360,16384,17408"
+        ),
+    )
     args = p.parse_args()
 
     print(f"\nLTX-2.3 distilled production shapes")
@@ -137,51 +161,73 @@ def main() -> None:
     print("(kernel cliff at K=16384), project_in neutral, attn tied within 1%.")
     print("Open question this run answers: does FP16 share or escape the cliff?")
 
-    run_shape(
-        "FF.project_in    (production: K=4096 N=16384)",
-        args.m, 4096, 16384, args.iters, args.warmup,
-    )
-    run_shape(
-        "FF.project_out   (production: K=16384 N=4096)   <- historical BF16 35% cliff",
-        args.m, 16384, 4096, args.iters, args.warmup,
-    )
-    run_shape(
-        "attn.to_q/k/v    (K=4096 N=4096, square)",
-        args.m, 4096, 4096, args.iters, args.warmup,
-    )
+    if not args.k_sweep_only:
+        run_shape(
+            "FF.project_in    (production: K=4096 N=16384)",
+            args.m, 4096, 16384, args.iters, args.warmup,
+        )
+        run_shape(
+            "FF.project_out   (production: K=16384 N=4096)   <- historical BF16 35% cliff",
+            args.m, 16384, 4096, args.iters, args.warmup,
+        )
+        run_shape(
+            "attn.to_q/k/v    (K=4096 N=4096, square)",
+            args.m, 4096, 4096, args.iters, args.warmup,
+        )
 
-    # Diagnostic shapes to confirm shape-sensitivity.
-    run_shape(
-        "DIAGNOSTIC: K=4096 N=10240",
-        args.m, 4096, 10240, args.iters, args.warmup,
-    )
-    run_shape(
-        "DIAGNOSTIC: K=10240 N=4096",
-        args.m, 10240, 4096, args.iters, args.warmup,
-    )
+        # Diagnostic shapes to confirm shape-sensitivity.
+        run_shape(
+            "DIAGNOSTIC: K=4096 N=10240",
+            args.m, 4096, 10240, args.iters, args.warmup,
+        )
+        run_shape(
+            "DIAGNOSTIC: K=10240 N=4096",
+            args.m, 10240, 4096, args.iters, args.warmup,
+        )
 
-    # AUDIO shapes (smaller M=502, smaller K_max=8192).  Historical note from
-    # PERFORMANCE_NOTES.md: audio pretranspose was neutral within 1% at bakery
-    # T=502 in BF16, but -11.2% (a win) at small-T workloads (256x256x25)
-    # because dispatch cost matters more there.  Open question: does FP16
-    # have a smaller cliff at K=8192 the way video does at K=16384?
-    print()
-    print("#" * 86)
-    print("#  AUDIO shapes (M = T_audio = 502, half-size hidden + FF dims)")
-    print("#" * 86)
+        # AUDIO shapes (smaller M=502, smaller K_max=8192).  Historical note from
+        # PERFORMANCE_NOTES.md: audio pretranspose was neutral within 1% at bakery
+        # T=502 in BF16, but -11.2% (a win) at small-T workloads (256x256x25)
+        # because dispatch cost matters more there.  Open question: does FP16
+        # have a smaller cliff at K=8192 the way video does at K=16384?
+        print()
+        print("#" * 86)
+        print("#  AUDIO shapes (M = T_audio = 502, half-size hidden + FF dims)")
+        print("#" * 86)
 
-    run_shape(
-        "audio.FF.project_in    (K=2048 N=8192)",
-        args.m_audio, 2048, 8192, args.iters, args.warmup,
-    )
-    run_shape(
-        "audio.FF.project_out   (K=8192 N=2048)   <- candidate audio cliff",
-        args.m_audio, 8192, 2048, args.iters, args.warmup,
-    )
-    run_shape(
-        "audio.attn.to_q/k/v    (K=2048 N=2048, square)",
-        args.m_audio, 2048, 2048, args.iters, args.warmup,
-    )
+        run_shape(
+            "audio.FF.project_in    (K=2048 N=8192)",
+            args.m_audio, 2048, 8192, args.iters, args.warmup,
+        )
+        run_shape(
+            "audio.FF.project_out   (K=8192 N=2048)   <- candidate audio cliff",
+            args.m_audio, 8192, 2048, args.iters, args.warmup,
+        )
+        run_shape(
+            "audio.attn.to_q/k/v    (K=2048 N=2048, square)",
+            args.m_audio, 2048, 2048, args.iters, args.warmup,
+        )
+
+    # K-SWEEP: bracket the cliff threshold by fine-grained K samples at the
+    # project_out direction (K -> N=4096, M=14640).  The two known datapoints
+    # from `bench_pretranspose_dtype.py` (without --k-sweep) are K=10240 (~+2 %
+    # pretranspose BF16, +14 % FP16) and K=16384 (+28 % BF16, +48 % FP16).
+    # Goal: find where in between the cliff starts and how steeply it deepens.
+    if args.k_sweep or args.k_sweep_only:
+        if args.k_sweep_list:
+            k_list = [int(x) for x in args.k_sweep_list.split(",") if x.strip()]
+        else:
+            k_list = [10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432]
+        print()
+        print("#" * 86)
+        print(f"#  K-SWEEP at project_out direction:  M={args.m}, N=4096, K varies")
+        print(f"#  K values: {k_list}")
+        print("#" * 86)
+        for k in k_list:
+            run_shape(
+                f"K-SWEEP: K={k:>5d} N=4096",
+                args.m, k, 4096, args.iters, args.warmup,
+            )
 
     print()
     print("=" * 86)

@@ -108,41 +108,299 @@ savings, no quality concern, no measurable wall improvement.  Kept
 because the dtype dimension is interesting to have available for
 future hardware / workload changes that might shift the math.
 
-### 2026-05-23: FF FP16 + FP16 kernel cliff `[PROMOTED]`
+### 2026-05-23: BlockLoader cliff characterization (project_out K-sweep + MLX source) `[CHARACTERIZED]`
 
-Implemented `--video-ff-dtype float16` as a cache-baked opt-in.  Lands in
-`PERFORMANCE.md` matrix row and "2026-05-23: FF compute in FP16" Recent
-Sessions entry.  Headline: **-4.6 % bakery 384x640x20s wall** (8m 00s →
-7m 38s) at cosine sim ~0.71 vs BF16.
+The "kernel-selection cliff" we've been writing about since 2026-05-17 is
+finally pinned down to a specific mechanism in the MLX `steel_gemm`
+BlockLoader, plus an empirical K-sweep that reveals it's neither a clean
+slope nor a single hard step.  Reference bench:
+`scripts/bench_pretranspose_dtype.py --k-sweep`.
 
-**Key finding worth remembering: FP16 has a worse kernel-selection cliff
-than BF16.**  Per
-`scripts/bench_pretranspose_dtype.py`
-on M1 Max with current MLX:
+**The mechanism (from MLX source).**  At all M=14640, N=4096 matmuls
+tested, MLX dispatches identical `steel_matmul_regular_axpby` with
+tile params `bm=64, bn=64, bk=16, wm=2, wn=2` — the "Medium device"
+defaults (`mlx/backend/metal/matmul.cpp:163-168`).  The ONLY runtime
+difference between cliff and fast paths is the `transpose_b` template
+flag selecting between two kernel-name suffixes:
 
-| shape (M=14640)                | BF16 naive | BF16 pretrans | FP16 naive | FP16 pretrans |
-| ------------------------------ | ---------- | ------------- | ---------- | ------------- |
-| FF.project_in   (K=4096 N=16384) | 8.07       | 7.99          | 9.26       | 9.38          |
-| FF.project_out  (K=16384 N=4096) | **5.86**   | 8.10          | **4.95**   | 9.51          |
-| attn  (K=N=4096)               | 8.07       | 8.09          | 9.24       | 9.53          |
-| K=4096 N=10240 (diagnostic)    | 8.06       | 8.07          | 9.24       | 9.50          |
-| K=10240 N=4096 (diagnostic)    | 7.92       | 8.02          | 8.14       | 9.50          |
+- **`_nt_` (naive `x @ w.T`)** — `BlockLoader` (`kernels/steel/gemm/loader.h:14-80`)
+  puts 128 threads in a **2-across × 64-down** layout in B's (N, K)
+  view, touching 64 distinct B-rows per warp-cycle, each row separated
+  by `ldb=K` elements.  As K grows, the **64-row × ldb-byte span grows
+  linearly** and coalescing within a SIMD group breaks.
+- **`_nn_` (pretranspose `x @ w_pt`)** — same template family, but
+  with `transpose_b=false` the loader flips to **8-across × 16-down**
+  along contiguous memory.  Eight adjacent threads read 8 adjacent
+  BF16 elements = full 128-bit coalesced burst, and only 16 B-rows
+  are touched per warp-cycle, K-independent.
 
-Three things to note:
+No K-based branching in the dispatcher (`matmul.cpp:88-169` and
+`device.cpp:485-520`); no FP16/BF16 split in dispatch either.  The
+cliff is **purely in the kernel's memory access pattern**, not in
+template selection.  Same kernel template for every shape we tested,
+just different `ldb` and `transpose_b` flag.
 
-1. **Project_out cliff is real and shape-sensitive.**  Triggered when the
-   inner-dim (K) of the strided weight view is "large" — K=16384 hits
-   hard, K=10240 barely, K=4096 no.  Threshold lives somewhere between
-   10240 and 16384.
-2. **FP16's cliff is *deeper* than BF16's** (4.95 vs 5.86 TFlops/s).  At
-   project_out's K=16384 in naive layout, FP16 runs 18 % SLOWER than
-   BF16 — exactly the opposite of expected.  So FP16 *requires*
-   pretranspose, not just benefits from it.
-3. **`_ensure_ff_layout_for_dtype` in `scripts/generate.py` enforces the
-   pair.**  When `--video-ff-dtype float16` is set, both
-   project_in:pretranspose and project_out:pretranspose are added
-   automatically regardless of what the user passes for
-   `--video-ff-layout`.  Cliff trap closed.
+**The K-sweep (empirical).**  At M=14640, N=4096, varying K from
+10240 to 18432 in 1024 steps:
+
+| K     | ldb (B bytes) | 64-row span | BF16 naive  | BF16 pre   | BF16 Δ%   | FP16 naive  | FP16 pre   | FP16 Δ%  |
+|-------|---------------|-------------|-------------|------------|-----------|-------------|------------|----------|
+| 10240 | 20 KB         | 1.25 MB     | 7.92        | 8.09       | +2.1      | 8.11        | 9.52       | +14.8    |
+| 11264 | 22 KB         | 1.38 MB     | 7.87        | 8.08       | +2.6      | 7.84        | 9.52       | +17.7    |
+| 12288 | 24 KB         | 1.50 MB     | 7.73        | 8.08       | +4.4      | 7.58        | 9.51       | +20.3    |
+| **13312** | **26 KB** | **1.63 MB** | **7.13 ★** | 8.08       | +11.7     | **6.81 ★**  | 9.51       | +28.4    |
+| 14336 | 28 KB         | 1.75 MB     | 7.13 (plat) | 7.97       | +10.5     | 6.81 (plat) | 9.38       | +27.4    |
+| 15360 | 30 KB         | 1.88 MB     | 6.68 ★     | 7.52       | +11.1     | 6.26 ★      | 8.73       | +28.3    |
+| 16384 | 32 KB         | 2.00 MB     | 5.84 ★     | 7.10       | +17.8     | 5.67 ★      | 8.54       | +33.6    |
+| 17408 | 34 KB         | 2.13 MB     | 5.93 (plat) | 6.96       | +14.9     | 5.71 (plat) | 7.96       | +28.3    |
+| 18432 | 36 KB         | 2.25 MB     | 6.03 (plat) | 6.79       | +11.2     | 5.74 (plat) | 7.68       | +25.2    |
+
+(★ = step in naive throughput. "plat" = plateau, throughput unchanged
+from previous K despite span growing.)
+
+**Structure of the cliff (the K-sweep surprise).**  It's not a single
+step at K=16384, and it's not a smooth slope either.  It's **slope
++ steps + plateaus + recovery plateau**:
+
+```
+TF/s
+ 8.0  ●●●                                ← gradual slope K=10240-12288
+ 7.5      ●
+ 7.0          ●●                         ← plateau 1 K=13312-14336
+ 6.5             ●                       ← step to 6.68 at K=15360
+ 6.0                  ●
+ 5.5                     ●●●             ← plateau 2 K=17408-18432
+ 5.0
+      10  11  12  13  14  15  16  17  18  K/1024
+       └── slope ──┘ └─── steps ────┘ └─ plateau ─┘
+```
+
+Reading: each step is one cache-residency tier being crossed by the
+64-row × ldb-byte working set.  Plateaus are "this many rows still
+fit, drop happens when one more falls out."  Largest single drop is
+K=12288 → 13312 (-0.60 TF/s BF16, span 1.50 → 1.63 MB) — one specific
+cache tier exhausted there.
+
+**Pretranspose also degrades past K≈14336, but smoothly.**  BF16
+pretrans drops from 8.08 (K=13312) to 6.79 (K=18432) = -16 %.  Same
+kernel template, no loader cliff (it's K-invariant by construction).
+This is **the second mechanism**: longer K-loop, FLOPs/byte ratio
+shifts as the matmul becomes compute-bound at lower effective
+throughput.  Independent of the strided-loader cliff.  At K=16384
+both mechanisms stack but only the loader cliff is rescued by
+pretranspose; the K-loop slope affects both paths equally.
+
+**FP16 is consistently deeper, starts earlier.**
+
+| dtype | "production meaningful" cliff (≥5 % pretrans Δ) starts at |
+|-------|-------------------------------------------------------------|
+| BF16  | K ≈ 13312 (3.3× hidden_size 4096)                          |
+| FP16  | K ≈ 10240 already (2.5× hidden_size 4096) — visible at every K tested |
+
+Pretranspose-vs-naive Δ scales by roughly 2× FP16-over-BF16 across the
+sweep (BF16 +11.7 % vs FP16 +28.4 % at K=13312; BF16 +17.8 % vs FP16
++33.6 % at K=16384).  Hypothesis (un-confirmed in source): same
+absolute byte penalty (coalescing breaks identically since ldb_bytes
+is dtype-independent for 16-bit), but FP16 has slightly higher
+compute throughput on Apple7 → kernel is more bandwidth-bound → same
+penalty as larger fraction of total wall.  Numbers consistent: BF16
+naive/pretrans ratio at K=16384 is 5.84/7.10 = 82 %; FP16 is 5.67/8.54
+= 66 %.  Penalty applied to a faster compute baseline.
+
+**Audio (K=8192, M=502) escape clause.**  Audio matmuls don't hit the
+cliff because (a) K=8192 = 16 KB stride is below the cliff onset
+even for video M, AND (b) audio runs at M=502, ~29× fewer warp
+launches than video M=14640 → far less L2 contention pressure even at
+the same per-warp footprint.  Audio FP16 naive is faster than BF16
+naive at K=8192 — the matmul is firmly on the upside of the cliff.
+
+**Threshold guidance.**
+
+- LTX production project_out is K=16384, which sits squarely on the
+  cliff for both dtypes.  Pretranspose is **mandatory**, not optional.
+- For any new layer with K ≥ 13312 in BF16 or K ≥ 10240 in FP16,
+  audit the layout — pretranspose is going to pay off.
+- For square or wide-output shapes (K ≤ 4096), pretranspose is
+  neutral or a slight regression; don't enable by default.
+
+**Cross-reference with M1 Max GPU cache hierarchy.**  The plateau-step
+structure pins to specific cache tiers when reconciled with M1 Max
+specs (Apple G13X / AGX2 / apple7 family):
+
+| Cache tier                | Capacity                  | Source              |
+|---------------------------|---------------------------|---------------------|
+| L1 data per GPU core      | 8 KB                      | RE (Chips & Cheese, Philip Turner) |
+| L2 per shader cluster     | ~256 KB–1.5 MB (disputed) | RE (Chips & Cheese: M1 Pro/Max dropped from M1's 768 KB-chip-wide to 256 KB-per-cluster) |
+| SLC (System Level Cache)  | 48 MB chip-wide           | Apple documented    |
+| DRAM bandwidth            | 408 GB/s, LPDDR5 512-bit  | Apple documented    |
+| Page size                 | 16 KB                     | Apple documented (Asahi)  |
+| GPU TLB                   | unknown size, ~32 MB total reach observed on M1 Ultra | RE (HN 31020484) |
+| Threadgroup memory        | 32 KB Metal limit         | Apple documented    |
+| Simdgroup width           | 32 lanes                  | Apple documented    |
+
+(RE = reverse-engineered, not Apple-published.)
+
+Mapped to our K-sweep step structure at M=14640:
+
+| K-step                        | 64-row span change       | Hypothesized cache event |
+|-------------------------------|--------------------------|--------------------------|
+| K=10240→12288 (slope, no step)| 1.25 → 1.50 MB          | Working set growing inside per-cluster L2; coalescing degrades smoothly but most rows still resident |
+| **K=12288→13312** (-0.60 BF16)| **1.50 → 1.63 MB**       | **Per-cluster L2 partition spills.**  Best match to the ~1.5 MB reverse-engineered per-cluster L2 capacity.  Stridedly-touched B rows start missing into SLC. |
+| K=13312→14336 (plateau)       | 1.63 → 1.75 MB           | Hold pattern: L2 already spilled; SLC absorbing misses |
+| **K=14336→15360** (-0.45 BF16)| **1.75 → 1.88 MB**       | **Probable L1 TLB exhaustion.**  16 KB pages, 64 distinct B-rows separated by ldb > 16 KB at K ≥ 8192 → 64 distinct page touches per gather.  L1 TLB capacity exceeded somewhere in this window. |
+| **K=15360→16384** (-0.84 BF16)| **1.88 → 2.00 MB**       | **Probable L2 TLB pressure.**  Compounding page-walk cost as the multi-level TLB structure runs out of headroom.  Apple GPU TLB sizes for M1 Max not publicly pinned down; this is the inference, not a confirmation. |
+| K=17408+ (recovery plateau)   | ≥ 2.13 MB                | Saturated state: L2 spilled + TLB saturated + SLC absorbing the entire 64-row span; new K just adds proportional miss cost.  The curve flattens because nothing new is being spilled. |
+
+Pretranspose's smooth slope past K≈14336 is **independent of all the
+above**: contiguous loads don't hit cluster-L2 partition or TLB
+boundaries the same way.  The pretranspose curve degrades because the
+contiguous tile size grows vs L2 — pure DRAM-bandwidth scaling, no
+multi-level cache event.
+
+**Why MLX won't auto-mitigate.**  `matmul.cpp:88-169` GEMM tile
+selection has **zero cache awareness**: M1 Max hits the Medium-device
+unconditional branch (`bm=64, bn=64, bk=16, wm=2, wn=2`) regardless
+of K, dtype, or transpose flag.  No L1/L2/SLC/page-size constants in
+the dispatcher.  No `ldb`-based heuristic.  `BlockLoader` at
+`kernels/steel/gemm/loader.h:25-134` walks K via `src += tile_stride`
+with no L2-blocking logic.  The cliff is therefore **structurally
+unavoidable** for any (large-M × strided-large-K) matmul on M1 Max in
+current MLX; pretranspose at the LTX-2-MLX cache layer is the
+load-bearing mitigation.  No upstream MLX change is in flight that
+would address this — the structural cause is "the tile selector
+doesn't know the GPU's caches exist."
+
+**Honesty about sources.**
+
+- Apple-documented: SLC 48 MB, page 16 KB, simdgroup 32, threadgroup
+  mem 32 KB, DRAM bandwidth.
+- Reverse-engineered (Chips & Cheese, Philip Turner, Dougall Johnson,
+  Asahi Linux): L1 8 KB, per-cluster L2 256 KB–1.5 MB, 24 concurrent
+  simdgroups/core.
+- Not pinned down publicly: exact M1 Max GPU TLB sizes/structure,
+  exact L2 partition policy per cluster, whether a separate texture
+  cache is reused by `device T*` matmul loads.  The step at K=15360
+  and K=16384 is *attributed* to TLB pressure based on the only
+  public M1-family TLB data point (HN 31020484, ~32 MB total reach on
+  M1 Ultra) and the page-count arithmetic, but is not confirmed.
+
+**Files (MLX source).**
+
+- `mlx-main/mlx/backend/metal/matmul.cpp:88-169` —
+  `GEMM_TPARAM_MACRO`, tile-param selection per device tier.  M1 Max
+  hits the Medium-device fallback at lines 163-168 with no cache
+  awareness.
+- `mlx-main/mlx/backend/metal/matmul.cpp:842,1225` —
+  `steel_matmul_axpby` dispatcher, `Matmul::eval_gpu`.
+- `mlx-main/mlx/backend/metal/device.cpp:485-520,828,841` —
+  arch suffix detection (M1 Max returns `'s'`), NAX availability
+  (requires `arch_gen >= 17`, M1 is 14).
+- `mlx-main/mlx/backend/metal/kernels/steel/gemm/loader.h:25-134` —
+  `BlockLoader` template, the actual seat of the cliff.  Walks K via
+  `src += tile_stride` with no L2-blocking logic.
+- `mlx-main/mlx/backend/metal/kernels/steel/gemm/gemm.h:38-46,48-61` —
+  `tgp_mem_size` calculation (~5 KB for Medium tier, well under
+  32 KB Metal limit so not the bottleneck), `loader_b_t`
+  parameterization on `transpose_b`.
+- `mlx-main/mlx/backend/metal/kernels/steel/gemm/mma.h:440-505` —
+  `BlockMMA`, same on both paths (so the cliff isn't in the MMA).
+
+**External sources** (M1 Max GPU specs):
+
+- Chester Lam / Chips & Cheese — *iGPU Cache Setups Compared, Including M1* — per-cluster L2 reverse-engineering.
+- Asahi Linux — *Tales of the M1 GPU*, *Apple GPU (AGX) docs* — 16 KB page size confirmed.
+- Dougall Johnson — `applegpu/docs.html` — G13 architecture reference, simdgroup-per-core counts.
+- Philip Turner — `metal-benchmarks` — 8 KB L1 measurement, simdgroup throughput.
+- AnandTech — M1 Max performance review — 48 MB SLC, 408 GB/s bandwidth.
+- HN 31020484 — M1 Ultra GPU TLB ~32 MB reach.
+
+**Future levers (tempting but probably not worth it).**  Captured here
+as thinking, NOT planned work.  Re-evaluate only if MLX upstream stays
+cache-blind through several releases or if a similar cliff appears in a
+new layer.
+
+1. **Manual K-splitting on project_out.**  Process K=16384 as K=8192 +
+   K=8192 with accumulation.  Each chunk sits on the upside of the
+   cliff (full ~8 TF/s pretranspose), combined effective throughput
+   should beat the K=16384 pretranspose 7.10 TF/s.  Estimated ceiling:
+   ~10-15 % speedup on project_out alone, ~2-3 % wall savings on
+   stage 2.
+   - **Costs:** custom kernel or graph rewrite (MLX `splitk` won't
+     auto-trigger here per the agent's read of `matmul.cpp:919` —
+     `min_tmn_threshold = 2048` and our `_tm*_tn = 915 * 256 = 234240`
+     vastly exceeds it), accumulation precision drift, ~few days work.
+   - **Risks:** the K-loop slope analysis shows even K=8192 isn't at
+     ceiling (~7.95 TF/s); the win might be smaller than predicted.
+     Also adds memory traffic for the intermediate accumulator.
+   - **Verdict:** not worth pursuing.  ~2-3 % is in the noise floor
+     we just measured for the FF FP16 work.  Also MLX could land a
+     fix upstream any release and obsolete this.
+
+2. **Reduce video M via M-chunking.**  M=14640 → two M=7320 launches
+   would halve L2 contention per launch and might escape the cliff
+   entirely.
+   - **Costs:** ~2× kernel launch overhead, transformer-block surgery
+     to chunk attention/FF/residual cleanly.  Cross-attention can't
+     be cleanly chunked (mixes M dimensions).
+   - **Verdict:** not worth pursuing.  Architecturally invasive for
+     unclear benefit.
+
+3. **Upstream a cache-aware tile selector to MLX.**  Patch
+   `matmul.cpp:88-169` to add an `ldb`-based heuristic that bumps
+   `bk` (from 16 to 32 or 64) when the strided-B span would exceed
+   estimated per-cluster L2.  Specifically, if `transpose_b &&
+   bn * ldb_bytes > L2_per_cluster_estimate`, increase `bk` so fewer
+   B-rows are touched per warp-cycle (at the cost of more arithmetic
+   per loaded tile).
+   - **Costs:** MLX PR review cycle, hardware-specific tuning that
+     would need a "Medium" tier sub-classification, no Apple-published
+     cache sizes to anchor the heuristic.
+   - **Verdict:** not our PR to write as downstream consumers.  Worth
+     mentioning if anyone from MLX team asks about M1 Max perf cliffs.
+
+4. **Belt-and-suspenders layout sanity check.**  Emit a one-line
+   warning at model construction time if any `Linear` in the
+   transformer has `weight.shape[1] >= 13312` (BF16) / `>= 10240`
+   (FP16) AND lacks a pretranspose layout spec.  ~30 lines in
+   `loader/transformer_cache.py` or `scripts/generate.py`.
+   - **Cost:** trivial.
+   - **Benefit:** protects future LTX versions or alternate models
+     from silently regressing if a new large-K matmul is introduced
+     without a layout audit.
+   - **Verdict:** could land cheaply; current LTX-2.3 doesn't need it
+     (project_out is the only K≥13312 linear in the stack and it's
+     already pretransposed).  Defer until a non-LTX model is loaded
+     into this codebase or someone reports a cliff regression.
+
+### 2026-05-23: FF FP16 (--video-ff-dtype, --audio-ff-dtype) `[PROMOTED]`
+
+Implemented `--video-ff-dtype float16` and `--audio-ff-dtype float16`
+as cache-baked opt-ins.  Lands in `PERFORMANCE.md` matrix rows and the
+"2026-05-23: FF compute in FP16" Recent Sessions entry.
+
+**Headline:** `--video-ff-dtype float16` saves **-4.6 % bakery
+384x640x20s wall** (8m 00s → 7m 38s) at cosine sim ~0.71 vs BF16.
+`--audio-ff-dtype float16` adds no measurable wall savings (within
+3 s noise on the same workload) but is exposed as a curiosity opt-in;
+audio quality unchanged (latent cos sim ≥0.997 vs the video-only-FP16
+reference, perceptually unchanged by listening test).
+
+The microbench prediction matches production within 1 s.  Per-matmul
+FP16 win ~15 %, FF share of stage-2 compute ~22 % → 3.3 % expected
+wall savings; observed denoise savings ~12 s on ~6m 27s denoise = 3.1
+%.  Remaining ~10 s of headline 22 s "total wall" delta is noise in
+pre/post phases (audio decode, save, encode).
+
+**Auto-pair is mandatory for FP16:** `_ensure_ff_layout_for_dtype` /
+`_ensure_audio_ff_layout_for_dtype` in `scripts/generate.py` force
+`project_in:pretranspose,project_out:pretranspose` whenever the
+corresponding FF dtype is FP16.  Two reasons stack: (a) without
+dtype-baked pretransposed cache, project_in does FP16 × BF16 → FP32
+mixed-dtype promotion fallback; (b) FP16 has a deeper BlockLoader
+cliff than BF16 (see characterization entry above) — the same K=16384
+naive path runs 4.95 TFlops/s in FP16 vs 5.86 TFlops/s in BF16, so
+FP16 naive is actually 18 % *slower* than BF16 naive on this shape.
+Both failure modes are closed by the auto-pair.
 
 **Attention FP16 was tried and dropped.**  `--video-attn-dtype float16`
 gave +18 s regression on bakery despite matmuls being faster.  Two
@@ -153,13 +411,6 @@ cleanly, forcing additional cast at the SDPA boundary.  Per-projection
 matmul savings exist (1.18× per the bench) but they don't compose into
 a wall-time win once the SDPA boundary tax is paid.  Flag removed in
 2026-05-23 cleanup.
-
-**The microbench prediction matches production within 1 second.**
-Per-matmul FP16 win ~15 %, FF share of stage-2 compute ~22 % →
-3.3 % expected wall savings.  Observed denoise savings ~12 s on
-~6m 27s total denoise = 3.1 %.  The remaining ~10 s of the headline
-22 s "total wall" delta is noise in pre/post phases (audio decode,
-save, encode) that aren't dtype-sensitive.
 
 ### 2026-05-17: Microbench results for FF / attention candidate optimizations `[PROMOTED 2026-05-18]`
 
