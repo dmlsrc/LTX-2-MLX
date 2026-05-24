@@ -91,7 +91,7 @@ LTX_2_MLX/
 │   └── tools.py              # Latent conditioning utilities
 │
 ├── pipelines/
-│   ├── one_stage.py          # AV one-stage and distilled two-stage
+│   ├── av_pipeline.py        # Joint audio+video denoise (CFG single-pass + distilled)
 │   ├── two_stage.py          # Two-stage with upscaling
 │   ├── ic_lora.py            # Image conditioning LoRA
 │   └── keyframe_interpolation.py

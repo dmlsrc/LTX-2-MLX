@@ -589,8 +589,8 @@ This is typically a timestep conditioning issue. Ensure you're using the latest 
 ## API Usage
 
 The old `DistilledPipeline` library wrapper has been archived. Programmatic
-distilled two-stage generation now uses the same `OneStagePipeline` /
-`OneStageAVPipeline.generate_distilled_two_stage` route as `scripts/generate.py`.
+distilled two-stage generation now uses the same `AVPipeline` /
+`AVPipeline.generate_distilled_two_stage` route as `scripts/generate.py`.
 Use the CLI as the reference entry point unless you are wiring the model
 components directly.
 

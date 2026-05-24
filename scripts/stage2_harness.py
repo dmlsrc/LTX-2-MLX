@@ -524,7 +524,7 @@ def main() -> None:
     timings.mark("decoder/upscaler load")
 
     print("\n[4/5] Creating stage-2 pipeline...")
-    av_pipeline = gen.OneStagePipeline(
+    av_pipeline = gen.AVPipeline(
         transformer=model,
         video_encoder=video_encoder,
         video_decoder=vae_decoder,
@@ -545,7 +545,7 @@ def main() -> None:
 
     del model
 
-    config = gen.OneStageCFGConfig(
+    config = gen.AVCFGConfig(
         height=height,
         width=width,
         num_frames=inferred_frames,

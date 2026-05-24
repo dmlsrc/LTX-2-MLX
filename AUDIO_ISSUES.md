@@ -137,7 +137,7 @@ This is a numerical precision divergence across 48 transformer layers. Audio spe
 - Video quality unaffected, only audio
 
 **Workaround applied at the time** (commit `3ce9ab7`, April 13 2026):
-`OneStageAVPipeline._channelwise_normalize_audio_noise` was added and called
+`AVPipeline._channelwise_normalize_audio_noise` was added and called
 unconditionally at stage-1 audio init, whitening the per-channel statistics
 of the audio noise tensor so that long clips wouldn't suffer the amplitude
 collapse.  This made the audio init *not match* the distribution the LTX-2

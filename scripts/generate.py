@@ -1091,9 +1091,9 @@ from LTX_2_MLX.pipelines.two_stage import (
     TwoStagePipeline,
     TwoStageCFGConfig,
 )
-from LTX_2_MLX.pipelines.one_stage import (
-    OneStagePipeline,
-    OneStageCFGConfig,
+from LTX_2_MLX.pipelines.av_pipeline import (
+    AVPipeline,
+    AVCFGConfig,
 )
 from LTX_2_MLX.pipelines.common import ImageCondition
 from LTX_2_MLX.pipelines.ic_lora import (
@@ -2565,7 +2565,7 @@ def generate_video(
 
     v2 = config_weights_path and is_v2_model(config_weights_path)
     distilled_two_stage_requested = pipeline_type == "distilled" and v2
-    distilled_one_stage_requested = (
+    distilled_single_pass_requested = (
         model_variant == "distilled" and pipeline_type in {"text-to-video", "one-stage"} and v2
     )
     if (
@@ -2578,7 +2578,7 @@ def generate_video(
             "two-stage sigma schedule; ignoring --steps."
         )
     if (
-        distilled_one_stage_requested
+        distilled_single_pass_requested
         and requested_num_steps is not None
         and requested_num_steps != len(DISTILLED_SIGMA_VALUES) - 1
     ):
@@ -3104,7 +3104,7 @@ def generate_video(
             # Skip the negative encoding entirely for any distilled mode
             # (cfg_scale=1.0 means negative is mathematically a no-op).
             # Two-stage doesn't accept a negative at all.  One-stage now
-            # short-circuits the CFG branch in OneStagePipeline.__call__
+            # short-circuits the CFG branch in AVPipeline.__call__
             # when both cfg scales are 1.0, so the negative isn't needed
             # there either.  Saves ~5-7s/run by avoiding one Gemma + one
             # AV-connector forward pass.
@@ -3114,7 +3114,7 @@ def generate_video(
             # both tolerate missing negative — they fall back to zeros).
             # Re-enable with LTX_ENCODE_UNUSED_NEGATIVE=1 for debugging.
             skip_negative = (
-                (distilled_two_stage_requested or distilled_one_stage_requested)
+                (distilled_two_stage_requested or distilled_single_pass_requested)
                 and not os.environ.get("LTX_ENCODE_UNUSED_NEGATIVE")
             )
             if skip_negative:
@@ -3827,7 +3827,7 @@ def generate_video(
         return
 
     # === AUDIO-VIDEO PIPELINE ===
-    # Use OneStagePipeline for joint audio-video generation
+    # Use AVPipeline for joint audio-video generation
     # V2.3 always uses this path (AV transformer) even without audio generation
     if use_av_encoder:
         distilled_two_stage = distilled_two_stage_requested
@@ -3906,7 +3906,7 @@ def generate_video(
 
         # Create one-stage pipeline with audio support
         print("\n[4/5] Creating audio-video pipeline...")
-        av_pipeline = OneStagePipeline(
+        av_pipeline = AVPipeline(
             transformer=model,
             video_encoder=video_encoder,
             video_decoder=vae_decoder,
@@ -3914,7 +3914,7 @@ def generate_video(
             vocoder=vocoder,
         )
 
-        del model  # pipeline now holds the only reference; del self.transformer in one_stage.py can actually free it
+        del model  # pipeline now holds the only reference; del self.transformer in av_pipeline.py can actually free it
         model = None
         gc.collect()
 
@@ -3939,7 +3939,7 @@ def generate_video(
         else:  # "auto"
             _internal_audio_resolved = generate_audio
         _disable_internal_audio = not _internal_audio_resolved
-        av_config = OneStageCFGConfig(
+        av_config = AVCFGConfig(
             height=height,
             width=width,
             num_frames=num_frames,

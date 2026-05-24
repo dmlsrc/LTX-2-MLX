@@ -70,7 +70,7 @@ from ..types import (
 
 
 @dataclass
-class OneStageCFGConfig:
+class AVCFGConfig:
     """Configuration for single-stage CFG pipeline."""
 
     # Video dimensions
@@ -131,7 +131,7 @@ class OneStageCFGConfig:
             )
 
 
-class OneStagePipeline:
+class AVPipeline:
     """
     Single-stage text/image-to-video generation pipeline.
 
@@ -1103,7 +1103,7 @@ class OneStagePipeline:
     def generate_distilled_two_stage(
         self,
         positive_encoding: mx.array,
-        config: OneStageCFGConfig,
+        config: AVCFGConfig,
         spatial_upscaler,
         images: Optional[List[ImageCondition]] = None,
         callback: Optional[Callable[[int, int], None]] = None,
@@ -1484,7 +1484,7 @@ class OneStagePipeline:
         self,
         stage_1_video_latent: mx.array,
         positive_encoding: mx.array,
-        config: OneStageCFGConfig,
+        config: AVCFGConfig,
         spatial_upscaler,
         stage_1_audio_latent: Optional[mx.array] = None,
         images: Optional[List[ImageCondition]] = None,
@@ -1774,7 +1774,7 @@ class OneStagePipeline:
         self,
         positive_encoding: mx.array,
         negative_encoding: Optional[mx.array] = None,
-        config: OneStageCFGConfig = None,
+        config: AVCFGConfig = None,
         images: Optional[List[ImageCondition]] = None,
         callback: Optional[Callable[[int, int], None]] = None,
         progress_message: Optional[Callable[[str], None]] = None,
@@ -2192,13 +2192,13 @@ class OneStagePipeline:
         return video, audio_waveform
 
 
-def create_one_stage_pipeline(
+def create_av_pipeline(
     transformer: LTXModel,
     video_encoder: Optional[NativeConv3dVideoEncoder],
     video_decoder: Optional[NativeConv3dVideoDecoder],
     audio_decoder: Optional[AudioDecoder] = None,
     vocoder: Optional[Vocoder] = None,
-) -> OneStagePipeline:
+) -> AVPipeline:
     """
     Create a single-stage CFG pipeline.
 
@@ -2210,9 +2210,9 @@ def create_one_stage_pipeline(
         vocoder: Optional vocoder (required for audio generation).
 
     Returns:
-        Configured OneStagePipeline.
+        Configured AVPipeline.
     """
-    return OneStagePipeline(
+    return AVPipeline(
         transformer=transformer,
         video_encoder=video_encoder,
         video_decoder=video_decoder,

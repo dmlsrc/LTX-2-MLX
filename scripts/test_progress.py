@@ -889,7 +889,7 @@ def test_no_raw_prints_in_progress_message_methods() -> None:
     import ast
     pipeline_root = Path(__file__).parent.parent / "LTX_2_MLX" / "pipelines"
     # Files scanned: anything under pipelines/ that defines a method
-    # taking a `progress_message` parameter.  Currently one_stage.py;
+    # taking a `progress_message` parameter.  Currently av_pipeline.py;
     # the scan is generic so future pipeline modules get covered.
     py_files = sorted(pipeline_root.glob("*.py"))
 
@@ -1186,7 +1186,7 @@ def demo_denoise_stacked() -> None:
             time.sleep(0.1)
             s1.update(1)
 
-        # Inter-stage pipeline messages (same content `one_stage.py`
+        # Inter-stage pipeline messages (same content `av_pipeline.py`
         # emits via progress_message between stage 1 and stage 2).
         # position="below" leaves Stage 1's bar frozen at its row and
         # routes the messages BELOW it — Stage 2's bar then slots in

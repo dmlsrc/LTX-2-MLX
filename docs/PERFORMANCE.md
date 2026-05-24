@@ -174,7 +174,7 @@ from the default stack when running A/Bs.
 | `--video-attn-layout` (default OFF, `()` empty) | default | none | none | Pre-2026-05-17 default was `to_out,to_q,to_k,to_v:pretranspose`.  Microbench (`bench_ff_microbench.py bf16_layout`) shows all four attention projections at the 4096x4096 shape are tied with naive BF16 (within ±1 %, all at ~7.9 TFlops/s).  Default flipped to OFF.  Opt back in via `--video-attn-layout to_out:pretranspose,to_q:pretranspose,to_k:pretranspose,to_v:pretranspose`.  End-to-end A/B with the old default still to be measured. |
 | AdaLN/RoPE dtype cast-back | default | none | **-16.8 % bakery total** | The `scale_shift_table` tensors are FP32 (sincos precision).  Inline math `normed * (1 + scale) + shift` and `x + residual * gate` was promoting BF16 → FP32, forcing SDPA to compile `steel_attention_float32_*_maskfloat32_*` kernels (~2× the data movement of BF16).  Fixed at 5 sites in `transformer.py` + `rope.py`.  Bakery 29m 38s → 24m 40s.  See [2026-05-17 AdaLN/RoPE fix](#2026-05-17-adalnrope-dtype-promotion-fix). |
 | Skip negative prompt encoding (distilled, cfg=1.0) | default | none | -10 % AV (256×256×25) + ~7 s/run on prompt encode | Distilled pipelines never use the negative encoding (cfg=1.0 makes it a no-op).  Both two-stage and one-stage now skip it.  Re-enable: `LTX_ENCODE_UNUSED_NEGATIVE=1`. |
-| OneStagePipeline CFG short-circuit | default | none | ~2× denoise vs CFG-on | When `cfg_scale==1.0 and audio_cfg_scale==1.0 and rescale_scale==0.0` for euler+no-STG runs, `OneStagePipeline.__call__` routes to `_denoise_loop_simple_av` — one transformer pass per step instead of two.  Log line "CFG disabled (scale 1.0) - Running optimized single-pass inference" confirms the short-circuit fired. |
+| AVPipeline CFG short-circuit | default | none | ~2× denoise vs CFG-on | When `cfg_scale==1.0 and audio_cfg_scale==1.0 and rescale_scale==0.0` for euler+no-STG runs, `AVPipeline.__call__` routes to `_denoise_loop_simple_av` — one transformer pass per step instead of two.  Log line "CFG disabled (scale 1.0) - Running optimized single-pass inference" confirms the short-circuit fired. |
 | Tokenize without max-length padding | default | none | -5 % AV (256×256×25) | Tokenizer was padding 2 real tokens to 1024 before Gemma forward.  Re-enable: `LTX_PAD_PROMPT_TO_MAX=1`. |
 | `--mlx-cache-limit-gb 1` | default | low | neutral | Same-math allocator-cache cap.  Bakery AV process RAM 44 GB → 40 GB with no time penalty.  `0` returns freed buffers immediately. |
 | Defer AV text encoder load until after Gemma | default | low | neutral; -6 GB prompt-encode peak | Trim Gemma hidden states, materialize, free Gemma, then load AV connector. |
@@ -646,7 +646,7 @@ captures that cover identical work windows.
 
 #### Profile hooks: pause-then-stop
 
-Two env-gated helpers added to `OneStagePipeline.generate_distilled_two_stage`:
+Two env-gated helpers added to `AVPipeline.generate_distilled_two_stage`:
 
 - `LTX_PROFILE_PAUSE_BEFORE_DENOISE=1` — blocks on stdin once, immediately
   before stage 1's first denoise step.  Prints `pid=N` so a second-terminal

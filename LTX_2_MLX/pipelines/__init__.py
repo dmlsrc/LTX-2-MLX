@@ -18,11 +18,11 @@ from .ic_lora import (
     create_image_conditionings,
     create_video_conditionings,
 )
-from .one_stage import (
-    OneStageCFGConfig,
-    OneStagePipeline,
-    ImageCondition as OneStageImageCondition,
-    create_one_stage_pipeline,
+from .av_pipeline import (
+    AVCFGConfig,
+    AVPipeline,
+    ImageCondition as AVImageCondition,
+    create_av_pipeline,
 )
 from .two_stage import (
     TwoStageCFGConfig,
@@ -48,11 +48,11 @@ __all__ = [
     "load_video_tensor",
     "create_image_conditionings",
     "create_video_conditionings",
-    # One-stage CFG
-    "OneStageCFGConfig",
-    "OneStagePipeline",
-    "OneStageImageCondition",
-    "create_one_stage_pipeline",
+    # AV pipeline (CFG single-pass, also routes distilled + text-to-video)
+    "AVCFGConfig",
+    "AVPipeline",
+    "AVImageCondition",
+    "create_av_pipeline",
     # Two-stage CFG
     "TwoStageCFGConfig",
     "TwoStagePipeline",

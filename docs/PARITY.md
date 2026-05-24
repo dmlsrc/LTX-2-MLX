@@ -203,9 +203,9 @@ x0 = latent - sigma * velocity
 
 ### 8. Audio Noise Normalization (V2.3 — May 21, 2026)
 
-**Issue**: `OneStageAVPipeline._channelwise_normalize_audio_noise` unconditionally whitened the per-channel statistics of the audio noise tensor at stage-1 init.  Lightricks does not normalize the noise — the audio LoRA was trained on un-normalized `N(0,1) * sigma_max`.  Originally added as a workaround for a "duration-dependent amplitude bug" (see [AUDIO_ISSUES.md](../AUDIO_ISSUES.md)) that has since been resolved by other fixes.
+**Issue**: `AVPipeline._channelwise_normalize_audio_noise` unconditionally whitened the per-channel statistics of the audio noise tensor at stage-1 init.  Lightricks does not normalize the noise — the audio LoRA was trained on un-normalized `N(0,1) * sigma_max`.  Originally added as a workaround for a "duration-dependent amplitude bug" (see [AUDIO_ISSUES.md](../AUDIO_ISSUES.md)) that has since been resolved by other fixes.
 
-**Fix**: [`LTX_2_MLX/pipelines/one_stage.py:30,1188-1198`](../LTX_2_MLX/pipelines/one_stage.py) — env-gated behind `LTX_NORMALIZE_AUDIO_NOISE`, default OFF.  Set to `=1` to restore legacy MLX behavior for A/B.  See AUDIO_ISSUES.md for the empirical re-test that confirmed the bug is no longer present (20-second clip RMS 588 vs 608 between modes, both with healthy ~1000-1600 RMS dialog bursts).
+**Fix**: [`LTX_2_MLX/pipelines/av_pipeline.py:30,1188-1198`](../LTX_2_MLX/pipelines/av_pipeline.py) — env-gated behind `LTX_NORMALIZE_AUDIO_NOISE`, default OFF.  Set to `=1` to restore legacy MLX behavior for A/B.  See AUDIO_ISSUES.md for the empirical re-test that confirmed the bug is no longer present (20-second clip RMS 588 vs 608 between modes, both with healthy ~1000-1600 RMS dialog bursts).
 
 ### 9. Keyframe Conditioning Routing (V2.3 — May 21, 2026)
 
@@ -215,7 +215,7 @@ x0 = latent - sigma * velocity
 
 ## Known Divergences (V2.3 Audit, May 21, 2026)
 
-Subagent line-by-line audit of `OneStageAVPipeline.generate_distilled_two_stage` vs canonical `TI2VidTwoStagesPipeline.__call__` found four actionable items (all fixed in commit `c431b7b`) and a handful of structural observations that don't currently affect output but are worth knowing about:
+Subagent line-by-line audit of `AVPipeline.generate_distilled_two_stage` vs canonical `TI2VidTwoStagesPipeline.__call__` found four actionable items (all fixed in commit `c431b7b`) and a handful of structural observations that don't currently affect output but are worth knowing about:
 
 ### Resolved (commit `c431b7b`)
 
