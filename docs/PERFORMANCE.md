@@ -180,6 +180,7 @@ from the default stack when running A/Bs.
 | Terminal redraw throttling | default | none | -5.9 % bakery total on macOS | `DenoiseProgress` no longer spawns a heartbeat thread; `tqdm` uses `ascii=True + mininterval=1-2s`.  Bakery 31m 28s → 29m 38s.  Stage 2 alone -8 %.  See [Terminal redraw throttling](#terminal-redraw-throttling) for the full story. |
 | **--- compute-precision opt-ins ---** | | | | |
 | `--video-ff-dtype float16` | opt-in | none | **-4.6 % bakery 384x640x20s (8m 00s → 7m 38s)** | Cache-baked: cast project_in and project_out weights to FP16 at cache-build time, run the FF interior in FP16 (silu+geglu+matmuls), cast the residual back to BF16 at FF exit.  Attention/RMSNorm/RoPE/SDPA stay BF16.  ~15 % per-matmul FP16 win at production FF shapes (BF16/FP16 ratio 1.17–1.18×) translates to 4.6 % wall savings because FF is ~22 % of total compute and the FF-block win includes boundary casts.  Cosine sim ~0.71 vs BF16 — perceptually close, not bit-equivalent.  **Auto-pairs** with `project_in:pretranspose,project_out:pretranspose` (enforced in `scripts/generate.py:_ensure_ff_layout_for_dtype`).  FP16 *requires* pretranspose: at project_out (K=16384) the FP16 naive kernel falls off a deeper kernel-selection cliff than BF16 (4.95 vs 5.86 TFlops/s, then both recover to >8 TFlops/s with pretranspose).  Disabling pretranspose with FP16 on would be -18 % regression vs BF16 baseline.  Tried `--video-attn-dtype float16` too: net regression (+0.6 % wall) because the SDPA boundary's projection casts outweigh the matmul win; flag dropped.  See "FF FP16 + FP16 cliff" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
+| `--audio-ff-dtype float16` | opt-in (curiosity) | none | **none measurable** (real-world A/B: +4.6 s within noise on bakery) | Mirror of `--video-ff-dtype` for the audio branch.  Per-matmul FP16 win at audio shapes is real (~10–13 % on audio.FF.project_in K=2048 N=8192 and audio.FF.project_out K=8192 N=2048) but per-call wall is ~2 ms vs video's 200+ ms.  Microbench predicted ~0.32 s savings (0.07 %); bakery A/B (video+audio-FF-FP16 7m 42.2s vs video-only-FF-FP16 7m 37.6s = +4.6s) is fully within single-run noise — output save phase alone varied by +2.6 s between the two runs.  Audio latent cos sim ≥0.997 vs the video-only-FP16 reference; perceptually unchanged by listening test on bakery dialogue.  **No kernel cliff at audio K=8192** — unlike video K=16384, FP16 naive is actually FASTER than BF16 naive there.  Auto-pairs audio FF pretranspose (avoids FP16 × BF16 → FP32 mixed-dtype promotion, not because of a cliff).  Kept as a documented opt-in for future hardware / workload shifts that might change the math.  See "Audio FF FP16" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
 | **--- env-toggle opt-ins ---** | | | | |
 | `LTX_VELOCITY_MODE=1` | opt-in | low | neutral | Inline velocity-form Euler update in `_denoise_loop_simple_av`.  Same math.  Kept env-gated for future MLX versions. |
 | `LTX_ROPE_PRECOMPUTE=1` | opt-in | none | neutral | mlx-video pattern: per-stage RoPE precompute via `Modality.positional_embeddings`.  MLX's lazy graph already dedupes per-step RoPE calls. |
@@ -285,6 +286,19 @@ trip the cliff.  Tested via
 
 Full bench logs and additional detail in `PERFORMANCE_NOTES.md` "FF FP16
 + FP16 kernel cliff" entry.
+
+**Audio-side followup (`--audio-ff-dtype float16`):** same plumbing
+mirrored for the audio branch and shipped as a curiosity opt-in.
+Microbench predicted ~0.32 s savings per generation (0.07 % of 7m 38s)
+because audio FF per-call wall is small (~2 ms vs video's 200+ ms).
+Real-world bakery A/B confirmed: video+audio-FF-FP16 7m 42.2s vs
+video-only-FF-FP16 7m 37.6s = +4.6 s, fully within the ~3 s single-run
+noise floor (output save phase alone varied by +2.6 s).  Audio latent
+cos sim ≥0.997 vs the video-only-FP16 reference; audio dialogue
+perceptually unchanged by listening test.  No kernel cliff at audio
+K=8192 — FP16 naive is faster than BF16 naive there.  Kept as
+documented opt-in for future hardware / workload shifts.  See "Audio
+FF FP16" entry in `PERFORMANCE_NOTES.md`.
 
 ### 2026-05-17 Follow-up: probe + non-sync A/B + sub-phase signposts (gap closed)
 

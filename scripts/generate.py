@@ -710,6 +710,39 @@ def parse_video_ff_quantize_specs(value: str | None) -> tuple[tuple[str, str], .
     return tuple(specs)
 
 
+def _ensure_audio_ff_layout_for_dtype(
+    layout_specs: tuple[tuple[str, str], ...],
+    audio_ff_dtype: str | None,
+) -> tuple[tuple[str, str], ...]:
+    """Add audio FF pretranspose when --audio-ff-dtype switches audio FF
+    to FP16.
+
+    Mirror of `_ensure_ff_layout_for_dtype` for the audio branch.  The
+    primary motivation here is reason (1) from the video helper —
+    avoiding the FP16 × BF16 → FP32 mixed-dtype promotion.  Audio shapes
+    (K=2048 / 8192) do NOT hit a kernel-selection cliff per
+    `scripts/bench_pretranspose_dtype.py`: at K=8192 audio FP16 naive is
+    *faster* than BF16 naive (7.10 vs 6.40 TFlops/s, same direction as
+    the per-matmul win, no cliff).  So pretranspose isn't a speed
+    rescue for audio FP16 — it's just required so the matmul stays in
+    pure FP16 instead of falling back to FP32.
+
+    Auto-pairs `project_in:pretranspose,project_out:pretranspose` for
+    audio FF when `--audio-ff-dtype float16` is set, mirroring the
+    video helper.
+    """
+    if not audio_ff_dtype or audio_ff_dtype == "bfloat16":
+        return layout_specs
+    have = {target for target, _layout in layout_specs}
+    additions = []
+    for tgt in ("project_in", "project_out"):
+        if tgt not in have:
+            additions.append((tgt, "pretranspose"))
+    if additions:
+        return tuple(additions) + tuple(layout_specs)
+    return layout_specs
+
+
 def _ensure_ff_layout_for_dtype(
     layout_specs: tuple[tuple[str, str], ...],
     video_ff_dtype: str | None,
@@ -2165,6 +2198,7 @@ def load_av_transformer(
     transformer_block_compile: bool = False,
     transformer_block_compile_group_size: int = 0,
     video_ff_dtype: mx.Dtype | None = None,
+    audio_ff_dtype: mx.Dtype | None = None,
 ) -> LTXAVModel:
     """Load AudioVideo transformer with weights.
 
@@ -2228,6 +2262,7 @@ def load_av_transformer(
                 video_ff_quantize_bits=video_ff_quantize_bits,
                 resident_blocks=transformer_block_resident_blocks,
                 video_ff_dtype=video_ff_dtype,
+                audio_ff_dtype=audio_ff_dtype,
             )
             model.transformer_block_compile = transformer_block_compile
             model.transformer_block_compile_group_size = transformer_block_compile_group_size
@@ -2261,6 +2296,7 @@ def load_av_transformer(
                 adaln_pretranspose=adaln_pretranspose,
                 transformer_cache_quantize=transformer_cache_quantize,
                 video_ff_dtype=video_ff_dtype,
+                audio_ff_dtype=audio_ff_dtype,
             )
             layouts_loaded_from_cache = True
         else:
@@ -2527,6 +2563,7 @@ def generate_video(
     enhance_prompt_flag: bool = False,
     cross_attn_scale: float = 1.0,
     video_ff_dtype: str | None = None,
+    audio_ff_dtype: str | None = None,
     distilled_lora: str = None,
     distilled_lora_scale: float = 1.0,
     stg_scale: float = 0.0,
@@ -3263,6 +3300,13 @@ def generate_video(
             else:
                 _audio_ff_layout_specs = video_ff_layout_specs
                 _audio_attn_layout_specs = video_attn_layout_specs
+            # If --audio-ff-dtype is FP16, enforce both project_in and
+            # project_out pretranspose on the audio side too (independent
+            # of whether video FF is also FP16).  Otherwise the audio
+            # project_in matmul would do FP16 × BF16 → FP32 promotion.
+            _audio_ff_layout_specs = _ensure_audio_ff_layout_for_dtype(
+                _audio_ff_layout_specs, audio_ff_dtype
+            )
             # AdaLN pretranspose is cache-integrated (no per-load RAM spike),
             # but measured neutral-to-slight-regression at small T because the
             # per-step adaln matmul count is low (8) and batch is tiny.  Off
@@ -3295,9 +3339,12 @@ def generate_video(
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
                 video_ff_dtype=(mx.float16 if video_ff_dtype == "float16" else None),
+                audio_ff_dtype=(mx.float16 if audio_ff_dtype == "float16" else None),
             )
             if video_ff_dtype is not None:
                 print(f"  Video FF dtype baked into cache: {video_ff_dtype}")
+            if audio_ff_dtype is not None:
+                print(f"  Audio FF dtype baked into cache: {audio_ff_dtype}")
         else:
             model = None
             print("  Skipping model load (placeholder mode)")
@@ -5105,6 +5152,23 @@ def main():
         ),
     )
     parser.add_argument(
+        "--audio-ff-dtype",
+        type=str,
+        default=None,
+        choices=["bfloat16", "float16"],
+        help=(
+            "Experimental: cast the AUDIO FF interior to this dtype, mirror of "
+            "--video-ff-dtype for the audio branch.  Microbench predicts "
+            "sub-noise per-generation savings (~0.07%% on bakery) because "
+            "audio FF per-call wall is small (~2-3 ms vs video's 200-300 ms), "
+            "but the per-matmul FP16 win is real (~10-13%%) so exposed for "
+            "real-world A/B testing.  No kernel cliff at audio K=8192 (unlike "
+            "video K=16384), but auto-pairs with audio FF pretranspose to "
+            "avoid the FP16 × BF16 → FP32 mixed-dtype promotion fallback.  "
+            "Default (omit flag): keep audio FF at the loaded checkpoint dtype."
+        ),
+    )
+    parser.add_argument(
         "--profile-transformer-once",
         action="store_true",
         help="Diagnostic: profile the first denoise transformer call with forced eval checkpoints. "
@@ -5556,6 +5620,7 @@ def main():
         enhance_prompt_flag=args.enhance_prompt,
         cross_attn_scale=args.cross_attn_scale,
         video_ff_dtype=args.video_ff_dtype,
+        audio_ff_dtype=args.audio_ff_dtype,
         # Two-stage pipeline parameters
         steps_stage1=args.steps_stage1,
         steps_stage2=args.steps_stage2,

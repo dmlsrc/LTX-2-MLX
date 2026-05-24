@@ -27,23 +27,7 @@ and failed experiments worth remembering.  This is the working notebook;
 
 ## Open
 
-### 2026-05-23: Audio FF FP16 -- candidate, gated on microbench `[OPEN]`
-
-Video FF FP16 landed (see Promoted entry below).  User flagged that the
-historical 2026-05-15 audio-pretranspose result showed a slight perf boost
-that was "larger than the math should predict" — possibly indicating an
-audio-side kernel-selection sensitivity similar to the video project_out
-cliff.  Open question: does FP16 give audio FF a measurable bakery-scale
-win, or is audio too small to amortize the dtype change?
-
-Bench script: `scripts/bench_pretranspose_dtype.py`
-adds three audio shape rows (audio.FF.project_in K=2048 N=8192,
-audio.FF.project_out K=8192 N=2048, audio.attn K=N=2048) at T=502 bakery
-audio length.  Pending user run.
-
-If FP16 saves >5 % per audio matmul AND audio FF wall is non-trivial
-(audio has fewer / smaller calls than video, so per-call win may not move
-the needle), implement `--audio-ff-dtype` mirroring `--video-ff-dtype`.
+_(empty — investigation converged; see Promoted section below.)_
 
 ---
 
@@ -51,6 +35,78 @@ the needle), implement `--audio-ff-dtype` mirroring `--video-ff-dtype`.
 
 (Entries moved to `PERFORMANCE.md` — kept here as one-line stubs for
 cross-reference.)
+
+### 2026-05-23: Audio FF FP16 -- shipped as curiosity opt-in, no measurable wall savings `[PROMOTED]`
+
+Added `--audio-ff-dtype {bfloat16, float16}` mirroring `--video-ff-dtype`.
+Microbench at bakery T=502 predicted per-generation savings ~0.32 s
+(0.07 % of 7m 38s) — well below noise.  No kernel-selection cliff at
+audio K=8192 (FP16 naive is FASTER than BF16 naive there, unlike video
+K=16384).  Per-matmul FP16 win is real (~10–13 %) but per-call wall is
+tiny (0.7–2.4 ms vs video's 60–250 ms).
+
+Exposed anyway because (a) implementation cost was low once the video
+FF FP16 plumbing was in place — `audio_ff` uses the same FeedForward
+class so the runtime boundary-cast code is shared, and (b) the dtype
+dimension is interesting to keep available for future workloads where
+audio is a larger compute share.  `_AUDIO_FF_KEY_PATTERNS` and
+`_ensure_audio_ff_layout_for_dtype` mirror their video equivalents in
+`LTX_2_MLX/loader/transformer_cache.py` and `scripts/generate.py`.
+`_video_cache_dtype_for_key` was renamed to `_ff_cache_dtype_for_key`
+to dispatch on both video and audio FF prefixes.
+
+Auto-pair: when `--audio-ff-dtype float16` is set,
+`project_in:pretranspose,project_out:pretranspose` is added to the
+audio FF layout regardless of what video FF layout is doing.  Primary
+motivation is the FP16 × BF16 → FP32 mixed-dtype promotion fallback,
+not the kernel cliff (which doesn't exist at audio K=8192).
+
+Bench evidence: `scripts/bench_pretranspose_dtype.py` audio rows.
+
+| audio shape                          | BF16 pretrans | FP16 pretrans | FP16 saves |
+| ------------------------------------ | ------------- | ------------- | ---------- |
+| audio.FF.project_in   (K=2048 N=8192) | 2.43 ms       | 2.10 ms       | +13.6 %    |
+| audio.FF.project_out  (K=8192 N=2048) | 2.61 ms       | 2.33 ms       | +10.7 %    |
+| audio.attn  (K=N=2048)               | 0.82 ms       | 0.74 ms       | +9.2 %     |
+
+**Real-world bakery A/B (idle machine, distilled 384x640x20s):**
+
+| variant                          | wall      | stage 1   | stage 2   | output save | Δ wall vs video-only-FP16 |
+| -------------------------------- | --------- | --------- | --------- | ----------- | ------------------------- |
+| BF16 baseline                    | 7m 59.6s  | 2m 09s    | 4m 18s    | 56.10s      | (baseline)                |
+| `--video-ff-dtype float16` only  | 7m 37.6s  | 2m 07.7s  | 4m 07.3s  | 56.15s      | (reference)               |
+| video + audio FF FP16            | 7m 42.2s  | 2m 07.5s  | 4m 09.8s  | 58.76s      | **+4.6s**                 |
+
+Output save (pure VAE + encoder, untouched by the transformer) varies
+by +2.6s between the two FP16 runs.  That's the noise floor.  Stage 2
+denoise +2.5s sits within it.  **No measurable wall savings from audio
+FP16 on bakery.**
+
+**Latent comparison (cos sim):**
+
+| key                  | video-FP16 vs BF16 | video+audio-FP16 vs BF16 | video+audio vs video-only-FP16 |
+| -------------------- | ------------------ | ------------------------ | ------------------------------ |
+| stage_1_video_latent | 0.78008            | 0.78030                  | 0.95847                        |
+| stage_2_video_latent | 0.70955            | 0.71348                  | 0.88612                        |
+| stage_1_audio_latent | 0.98973            | 0.98943                  | **0.99903**                    |
+| stage_2_audio_latent | 0.98411            | 0.98028                  | **0.99662**                    |
+
+Audio FP16 keeps the audio latent at cos sim ≥0.997 vs the video-only-
+FP16 reference — effectively untouched.  Audio listening test confirms
+no perceptual change in the bakery dialogue.
+
+The apparent stage-2 video latent drift between the two FP16 configs
+(cos 0.886) looks alarming but is consistent with geometric distance
+between two FP16 runs both sitting at cos ~0.71 from BF16 baseline —
+two points at angular distance ~45° from a third reference can be
+~27° apart from each other.  Cross-attention feedback from audio to
+video is real but small (audio latent only perturbed by cos 0.997
+from adding audio FP16, propagated through cross-attn into video).
+
+**Verdict: flag shipped as a curiosity opt-in.**  Documented marginal
+savings, no quality concern, no measurable wall improvement.  Kept
+because the dtype dimension is interesting to have available for
+future hardware / workload changes that might shift the math.
 
 ### 2026-05-23: FF FP16 + FP16 kernel cliff `[PROMOTED]`
 
