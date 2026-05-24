@@ -28,17 +28,17 @@ CACHE_SCHEMA_VERSION = 1
 # family caches now store Conv weights in MLX channels-last layout
 # (NDHWC for Conv3d, NHWC for Conv2d) instead of PyTorch channels-second.
 # The one-time materialization that previously happened on first eval is
-# moved to cache build time.  ``Conv3dSimple`` in
-# ``model/video_vae/simple_encoder.py`` was updated to store weights in
-# channels-last too so the encoder and decoder agree on layout, and
-# loaders take an idempotent shape check so raw PyTorch checkpoints
-# (``--weights-cache off``) still work.  Vocoder 3D Conv weights are
-# NOT pre-baked because Conv1d vs ConvTranspose1d need different
-# transpose orders that can't be told apart from a key alone; that
-# family stays at the runtime transpose.  Bumping this invalidates any
-# family cache built at the previous version so first run after upgrade
-# rebuilds the VAE/audio_vae/connector/vocoder caches in-place; the
-# transformer cache stays valid.
+# moved to cache build time.  Both production VAE encoders/decoders
+# (``NativeConv3dVideoEncoder``, ``NativeConv3dVideoDecoder``) expect
+# channels-last weights; the legacy per-temporal-slice path
+# (``SimpleVideoEncoder``/``SimpleVideoDecoder``) was archived to
+# ``archive/`` at the same time.  Vocoder 3D Conv weights are NOT
+# pre-baked because Conv1d vs ConvTranspose1d need different transpose
+# orders that can't be told apart from a key alone; that family stays
+# at the runtime transpose.  Bumping this invalidates any family cache
+# built at the previous version so first run after upgrade rebuilds
+# the VAE/audio_vae/connector/vocoder caches in-place; the transformer
+# cache stays valid.
 FAMILY_CACHE_SCHEMA_VERSION = 2
 LAYOUT_KEY_PREFIX = "__layout__."
 QUANT_KEY_PREFIX = "__quant__."

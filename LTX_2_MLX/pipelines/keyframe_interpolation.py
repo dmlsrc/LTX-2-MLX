@@ -34,7 +34,7 @@ from ..conditioning.tools import VideoLatentTools
 from ..model.transformer import LTXModel, Modality, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
-from ..model.video_vae.simple_encoder import SimpleVideoEncoder
+from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 from ..model.upscaler import SpatialUpscaler
 from ..types import (
@@ -131,7 +131,7 @@ def load_image_as_tensor(
 
 def create_keyframe_conditionings(
     keyframes: List[Keyframe],
-    video_encoder: SimpleVideoEncoder,
+    video_encoder: NativeConv3dVideoEncoder,
     height: int,
     width: int,
     dtype: mx.Dtype = mx.float32,
@@ -186,7 +186,7 @@ class KeyframeInterpolationPipeline:
     def __init__(
         self,
         transformer: LTXModel,
-        video_encoder: SimpleVideoEncoder,
+        video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: Optional[SpatialUpscaler] = None,
     ):
@@ -503,7 +503,7 @@ class KeyframeInterpolationPipeline:
 
 def create_keyframe_pipeline(
     transformer: LTXModel,
-    video_encoder: SimpleVideoEncoder,
+    video_encoder: NativeConv3dVideoEncoder,
     video_decoder: NativeConv3dVideoDecoder,
     spatial_upscaler: Optional[SpatialUpscaler] = None,
 ) -> KeyframeInterpolationPipeline:

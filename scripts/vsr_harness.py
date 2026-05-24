@@ -161,14 +161,11 @@ def chunk_to_rgba_fp16(chunk: Any, mx_mod: Any):
 
 
 def make_video_decoder_default(
-    weights_path: str, compute_dtype: Any, *, backend: str, padding: str,
+    weights_path: str, compute_dtype: Any, *, backend: str,
 ):
     """generate.py's happy-path defaults via encode_modes_harness."""
     from scripts.encode_modes_harness import make_video_decoder
-    return make_video_decoder(
-        weights_path, compute_dtype,
-        backend=backend, spatial_padding_mode=padding,
-    )
+    return make_video_decoder(weights_path, compute_dtype, backend=backend)
 
 
 def latent_dims(latent: Any) -> tuple[int, int, int]:
@@ -426,7 +423,6 @@ def run(args: argparse.Namespace) -> None:
         decoder = make_video_decoder_default(
             args.weights, compute_dtype,
             backend=args.vae_decoder_backend,
-            padding=args.vae_spatial_padding,
         )
         print(f"[setup] video VAE loaded in {time.perf_counter() - t:.2f}s")
         total_frames, in_h, in_w = latent_dims(latent)
@@ -767,10 +763,6 @@ def main() -> None:
             "native (default, matches generate.py) uses MLX-native nn.Conv3d. "
             "legacy is the older slice-based Conv3d emulation, kept for A/B comparison."
         ),
-    )
-    parser.add_argument(
-        "--vae-spatial-padding", choices=["zero", "reflect"], default="zero",
-        help="VAE spatial padding. zero matches generate.py's default.",
     )
     parser.add_argument(
         "--vae-tiling", choices=["auto", "off"], default="auto",

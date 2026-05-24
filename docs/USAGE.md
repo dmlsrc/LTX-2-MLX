@@ -238,25 +238,22 @@ Precision exceptions are intentionally narrow:
 
 ### VAE Decode Defaults
 
-Video decode uses the native Conv3d VAE decoder with
-`--vae-spatial-padding zero` and `--vae-tiling auto`. That keeps the common
-command short while using the RAM-aware native tiling planner.
-`--vae-spatial-padding reflect` is still available as an A/B baseline:
+Video decode uses the native MLX-Conv3d VAE encoder + decoder with zero
+spatial padding and `--vae-tiling auto`'s RAM-aware tile plan.  Pass
+nothing extra to use the production default.
 
-```bash
-python scripts/generate.py "Your prompt" \
-    --vae-spatial-padding reflect
-```
-
-Saved-latent A/B tests on motion-heavy bakery and talking-subject clips showed
-`zero` substantially reduced edge ghosting, background flicker, and boundary
-smearing versus `reflect`, with no meaningful decode-time cost.
-
-The older "legacy" VAE decoder (`SimpleVideoDecoder`, PyTorch-layout
-slice-conv) was archived to `LTX_2_MLX/pipelines/archive/simple_decoder.py.bak`
-on 2026-05-23 after the native decoder had been the default for an
-extended bake-in period.  The `--vae-decoder` CLI flag now only accepts
-`native`; pass nothing to use the production default.
+Historical retirements (2026-05-23):
+- The `SimpleVideoDecoder` (PyTorch-layout slice-conv decoder) was
+  archived to `archive/simple_decoder.py.bak`; the `--vae-decoder` CLI
+  flag now only accepts `native`.
+- The `SimpleVideoEncoder` was archived to `archive/simple_encoder.py.bak`
+  and replaced by `NativeConv3dVideoEncoder` (parity verified at cos
+  sim 0.99965 FP32; ~2-3× faster).
+- The `--vae-spatial-padding` flag was removed entirely.  A/B testing
+  showed `reflect` produced worse boundary artifacts than `zero` in
+  every workflow tested (motion-heavy bakery, talking-subject clips,
+  static images), with no meaningful decode-time difference.  Zero is
+  hardcoded.
 
 ### Transformer Streaming
 
@@ -469,7 +466,6 @@ python scripts/decode_latent_debug.py \
     --latent outputs/sample.npz \
     --weights weights/ltx-2/ltx-2.3-22b-distilled-1.1.safetensors \
     --modes auto \
-    --vae-spatial-padding zero \
     --decode-audio \
     --show-memory \
     --output-dir outputs/decode_tests

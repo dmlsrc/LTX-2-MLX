@@ -454,12 +454,6 @@ def main() -> None:
     parser.add_argument("--vae-dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
     parser.add_argument("--latent-dtype", choices=["auto", "bfloat16", "float16", "float32"], default="auto")
     parser.add_argument(
-        "--vae-spatial-padding",
-        choices=["reflect", "zero"],
-        default="reflect",
-        help="Baseline VAE decoder spatial padding. orig_zero_convpad still forces zero for that variant.",
-    )
-    parser.add_argument(
         "--mode",
         default="auto",
         help="Decode mode from decode_latent_debug.py: auto, none, default, both384_24, etc.",
@@ -503,9 +497,8 @@ def main() -> None:
         latent, audio_latent = load_latents(args.latent, mx, args.latent_dtype)
     compute_dtype = parse_dtype(mx, args.vae_dtype)
     print(f"VAE compute dtype: {args.vae_dtype}")
-    print(f"VAE spatial padding: {args.vae_spatial_padding}")
     with Timer(timings, "load vae decoder"):
-        decoder = make_decoder(args.weights, compute_dtype, args.vae_spatial_padding)
+        decoder = make_decoder(args.weights, compute_dtype)
 
     audio_wav_path = None
     audio_sample_rate = None

@@ -312,7 +312,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weights-cache", choices=["off", "auto", "rebuild"], default="auto")
     parser.add_argument("--weights-cache-dir", default=None)
     parser.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
-    parser.add_argument("--vae-spatial-padding", default="zero", choices=["reflect", "zero"])
     parser.add_argument("--native-causal", action="store_true")
     parser.add_argument(
         "--probe-upsample-internals",
@@ -364,7 +363,6 @@ def main() -> None:
         base_channels=config.get("decoder_base_channels", 128),
         timestep_conditioning=config.get("timestep_conditioning", False),
         compute_dtype=dtype,
-        spatial_padding_mode=args.vae_spatial_padding,
         causal=args.native_causal,
     )
     load_native_vae_decoder_weights(decoder, str(vae_weights))
@@ -439,7 +437,6 @@ def main() -> None:
         "weights": str(args.weights),
         "vae_weights": str(vae_weights),
         "dtype": args.dtype,
-        "vae_spatial_padding": args.vae_spatial_padding,
         "native_causal": args.native_causal,
         "probe_upsample_internals": probe_upsample_internals,
         "probe_upsample_window_index": args.probe_upsample_window_index,

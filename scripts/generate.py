@@ -1140,9 +1140,9 @@ from LTX_2_MLX.pipelines.keyframe_interpolation import (
     KeyframeInterpolationConfig,
     Keyframe,
 )
-from LTX_2_MLX.model.video_vae.simple_encoder import (
-    SimpleVideoEncoder,
-    load_vae_encoder_weights,
+from LTX_2_MLX.model.video_vae.native_encoder import (
+    NativeConv3dVideoEncoder,
+    load_native_vae_encoder_weights,
 )
 
 def _read_checkpoint_config(checkpoint_path: str) -> dict:
@@ -2514,7 +2514,6 @@ def generate_video(
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
     vae_decoder_backend: str = "native",
-    vae_spatial_padding: str = "zero",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
     spatial_upscaler_weights: str = None,
@@ -2800,7 +2799,6 @@ def generate_video(
                 "dtype": dtype if isinstance(dtype, str) else str(dtype),
                 "compute_dtype": compute_dtype_name(compute_dtype),
                 "vae_decoder_backend": vae_decoder_backend,
-                "vae_spatial_padding": vae_spatial_padding,
                 "vae_tiling_mode": vae_tiling_mode,
                 "tiled_vae": tiled_vae,
                 "vae_auto_tiling": vae_auto_tiling,
@@ -2916,11 +2914,9 @@ def generate_video(
     elif vae_decoder_backend == "native":
         print("VAE decoder: native Conv3d")
     else:
-        print("VAE decoder: legacy slice-conv baseline")
-    if not skip_vae and vae_spatial_padding == "zero":
-        print("VAE spatial padding: zero (boundary-flicker mitigation)")
-    elif not skip_vae:
-        print("VAE spatial padding: reflect")
+        print("VAE decoder: legacy slice-conv baseline (archived)")
+    if not skip_vae:
+        print("VAE spatial padding: zero (boundary-flicker mitigation; reflect path archived 2026-05-23)")
     if upscale_spatial:
         print(f"Spatial upscaling: 2x (output will be {width*2}x{height*2})")
     if upscale_temporal:
@@ -3467,12 +3463,14 @@ def generate_video(
             print(f"  VAE config: {len(decoder_blocks)} blocks, base_ch={base_channels}, timestep={timestep_cond}")
 
         if vae_decoder_backend == "native":
+            # spatial_padding_mode parameter was removed 2026-05-23 — only zero
+            # padding is supported now (reflect was archived after A/B testing
+            # consistently showed it produced worse boundary artifacts).
             vae_decoder = NativeConv3dVideoDecoder(
                 decoder_blocks=decoder_blocks,
                 base_channels=base_channels,
                 timestep_conditioning=timestep_cond,
                 compute_dtype=compute_dtype,
-                spatial_padding_mode=vae_spatial_padding,
             )
         else:
             # Only "native" is supported; the legacy SimpleVideoDecoder was
@@ -3554,9 +3552,9 @@ def generate_video(
 
         # Load video encoder
         print("[3.5/5] Loading VAE encoder...")
-        video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
+        video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
         if not use_placeholder:
-            load_vae_encoder_weights(video_encoder, video_vae_load_path)
+            load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -3695,9 +3693,9 @@ def generate_video(
 
         # Load VAE encoder
         print("[3.5/5] Loading VAE encoder...")
-        video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
+        video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
         if video_vae_load_path and not use_placeholder:
-            load_vae_encoder_weights(video_encoder, video_vae_load_path)
+            load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -3830,9 +3828,9 @@ def generate_video(
 
         # Load VAE encoder
         print("[3.5/5] Loading VAE encoder...")
-        video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
+        video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
         if video_vae_load_path and not use_placeholder:
-            load_vae_encoder_weights(video_encoder, video_vae_load_path)
+            load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
         else:
             print("  Skipping weights load (placeholder)")
 
@@ -3933,9 +3931,9 @@ def generate_video(
         video_encoder = None
         if images or distilled_two_stage:
             print("[3.5/5] Loading VAE encoder...")
-            video_encoder = SimpleVideoEncoder(compute_dtype=compute_dtype)
+            video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
             if video_vae_load_path and not use_placeholder:
-                load_vae_encoder_weights(video_encoder, video_vae_load_path)
+                load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
             else:
                 print("  Skipping weights load (placeholder)")
         else:
@@ -5032,16 +5030,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--vae-spatial-padding",
-        choices=["reflect", "zero"],
-        default="zero",
-        help=(
-            "Spatial padding mode for VAE decoder convolutions. zero is the default "
-            "boundary-flicker mitigation; reflect keeps the released Lightricks "
-            "boundary behavior for A/B testing."
-        ),
-    )
-    parser.add_argument(
         "--model-variant",
         type=str,
         choices=["distilled", "dev"],
@@ -5565,7 +5553,6 @@ def main():
         use_gemma=not args.no_gemma,
         dtype=args.dtype,
         vae_decoder_backend=args.vae_decoder,
-        vae_spatial_padding=args.vae_spatial_padding,
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
         spatial_upscaler_weights=args.spatial_upscaler_weights,

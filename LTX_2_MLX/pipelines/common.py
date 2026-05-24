@@ -17,7 +17,7 @@ from ..conditioning.keyframe import VideoConditionByKeyframeIndex
 from ..conditioning.latent import VideoConditionByLatentIndex
 from ..conditioning.tools import VideoLatentTools
 from ..model.transformer import Modality
-from ..model.video_vae.simple_encoder import SimpleVideoEncoder
+from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..types import LatentState
 
 
@@ -105,7 +105,7 @@ def load_image_tensor(
 
 def create_image_conditionings(
     images: List[ImageCondition],
-    video_encoder: SimpleVideoEncoder,
+    video_encoder: NativeConv3dVideoEncoder,
     height: int,
     width: int,
     dtype: mx.Dtype = mx.float32,

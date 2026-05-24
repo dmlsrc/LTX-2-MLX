@@ -69,13 +69,13 @@ def make_video_decoder(
     compute_dtype: Any,
     *,
     backend: str = "native",
-    spatial_padding_mode: str = "zero",
 ):
     """Build a VAE decoder matching scripts/generate.py's happy-path defaults.
 
-    Defaults: native backend + zero spatial padding. Both match the
-    `generate.py` CLI defaults so output matches a normal generate.py run.
-    The other combinations exist only for A/B testing.
+    Only the ``native`` backend is supported.  The 'legacy' SimpleVideoDecoder
+    was archived 2026-05-23 (see ``archive/simple_decoder.py.bak``) and the
+    spatial padding mode was hardcoded to ``zero`` at the same time after
+    A/B testing showed ``reflect`` was a loss in every tested workflow.
     """
     from scripts.generate import get_vae_config
     from LTX_2_MLX.model.video_vae.native_decoder import (
@@ -88,7 +88,7 @@ def make_video_decoder(
     timestep_conditioning = cfg.get("timestep_conditioning", True)
 
     print(
-        f"VAE backend: {backend}, padding: {spatial_padding_mode}, "
+        f"VAE backend: {backend}, "
         f"blocks={len(decoder_blocks) if decoder_blocks else 'default'}, "
         f"base_ch={base_channels}, timestep={timestep_conditioning}"
     )
@@ -99,7 +99,6 @@ def make_video_decoder(
             base_channels=base_channels,
             timestep_conditioning=timestep_conditioning,
             compute_dtype=compute_dtype,
-            spatial_padding_mode=spatial_padding_mode,
         )
         load_native_vae_decoder_weights(decoder, weights_path)
     else:
@@ -329,16 +328,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
     )
     parser.add_argument(
-        "--vae-spatial-padding",
-        choices=["zero", "reflect"],
-        default="zero",
-        help=(
-            "Spatial padding for VAE convolutions. zero matches generate.py's "
-            "default boundary-flicker mitigation; reflect is the original "
-            "Lightricks behavior kept for A/B."
-        ),
-    )
-    parser.add_argument(
         "--modes",
         nargs="+",
         default=None,
@@ -390,7 +379,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.weights,
             compute_dtype,
             backend=args.vae_decoder_backend,
-            spatial_padding_mode=args.vae_spatial_padding,
         )
 
     # Output dims derived from latent shape (same formula as decode_latent_debug).

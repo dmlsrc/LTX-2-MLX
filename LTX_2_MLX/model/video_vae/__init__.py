@@ -31,10 +31,9 @@ from .native_decoder import (
     NativeConv3dVideoDecoder,
     load_native_vae_decoder_weights,
 )
-from .simple_encoder import (
-    SimpleVideoEncoder,
-    load_vae_encoder_weights,
-    encode_video,
+from .native_encoder import (
+    NativeConv3dVideoEncoder,
+    load_native_vae_encoder_weights,
 )
 from .tiling import (
     TilingConfig,
@@ -75,14 +74,14 @@ __all__ = [
     "LogVarianceType",
     "decode_video",
     # Video VAE decoder (production = NativeConv3dVideoDecoder; legacy
-    # SimpleVideoDecoder was archived 2026-05-23, see pipelines/archive/)
+    # SimpleVideoDecoder was archived 2026-05-23, see archive/)
     "decode_latent",
     "NativeConv3dVideoDecoder",
     "load_native_vae_decoder_weights",
-    # Simple encoder (for weight loading)
-    "SimpleVideoEncoder",
-    "load_vae_encoder_weights",
-    "encode_video",
+    # Video VAE encoder (production = NativeConv3dVideoEncoder; legacy
+    # SimpleVideoEncoder was archived 2026-05-23, see archive/)
+    "NativeConv3dVideoEncoder",
+    "load_native_vae_encoder_weights",
     # Tiling
     "TilingConfig",
     "SpatialTilingConfig",

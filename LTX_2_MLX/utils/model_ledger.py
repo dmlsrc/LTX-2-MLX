@@ -122,11 +122,14 @@ class ModelLedger:
         if self.checkpoint_path is None:
             raise ValueError("checkpoint_path is required to load video encoder")
 
-        from ..model.video_vae import SimpleVideoEncoder, load_vae_encoder_weights
+        from ..model.video_vae.native_encoder import (
+            NativeConv3dVideoEncoder,
+            load_native_vae_encoder_weights,
+        )
 
         print("Loading video encoder...")
-        encoder = SimpleVideoEncoder(compute_dtype=self.compute_dtype)
-        load_vae_encoder_weights(encoder, self.checkpoint_path)
+        encoder = NativeConv3dVideoEncoder(compute_dtype=self.compute_dtype)
+        load_native_vae_encoder_weights(encoder, self.checkpoint_path)
 
         self._video_encoder = encoder
         return encoder

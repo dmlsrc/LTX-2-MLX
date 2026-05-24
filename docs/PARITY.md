@@ -224,7 +224,7 @@ Subagent line-by-line audit of `OneStageAVPipeline.generate_distilled_two_stage`
 | 1 | Audio noise normalization (unconditional → env-gated, default OFF) | ✅ Fixed |
 | 2 | Multi-image conditioning routing (always latent → keyframe for non-zero frame_index) | ✅ Fixed |
 | 3 | Missing `stage_1_sigmas` / `stage_2_sigmas` override kwargs | ✅ Fixed |
-| 4 | `distilled.py` dormant code retired (moved to `LTX_2_MLX/pipelines/archive/`) | ✅ Fixed |
+| 4 | `distilled.py` dormant code retired (moved to `archive/`) | ✅ Fixed |
 
 ### Structural observations (no action — informational)
 

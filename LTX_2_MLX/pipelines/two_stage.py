@@ -42,7 +42,7 @@ from ..loader import LoRAConfig, fuse_lora_into_weights
 from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, Modality, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
-from ..model.video_vae.simple_encoder import SimpleVideoEncoder
+from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 from ..model.upscaler import SpatialUpscaler
 from ..model.audio_vae import AudioDecoder, Vocoder
@@ -161,7 +161,7 @@ class TwoStagePipeline:
     def __init__(
         self,
         transformer: LTXModel,
-        video_encoder: SimpleVideoEncoder,
+        video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
         audio_decoder: Optional[AudioDecoder] = None,
@@ -785,7 +785,7 @@ class TwoStagePipeline:
 
 def create_two_stage_pipeline(
     transformer: LTXModel,
-    video_encoder: SimpleVideoEncoder,
+    video_encoder: NativeConv3dVideoEncoder,
     video_decoder: NativeConv3dVideoDecoder,
     spatial_upscaler: SpatialUpscaler,
     audio_decoder: Optional[AudioDecoder] = None,
