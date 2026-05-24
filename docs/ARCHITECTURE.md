@@ -91,9 +91,6 @@ LTX_2_MLX/
 │   └── tools.py              # Latent conditioning utilities
 │
 ├── pipelines/
-│   ├── text_to_video.py      # Basic text-to-video
-│   ├── archive/
-│   │   └── distilled.py.bak  # Archived legacy distilled pipeline API
 │   ├── one_stage.py          # AV one-stage and distilled two-stage
 │   ├── two_stage.py          # Two-stage with upscaling
 │   ├── ic_lora.py            # Image conditioning LoRA
@@ -102,7 +99,18 @@ LTX_2_MLX/
 ├── loader/
 │   └── weight_converter.py   # PyTorch → MLX weight conversion
 │
-└── types.py                  # VideoLatentShape, SpatioTemporalScaleFactors
+├── types.py                  # VideoLatentShape, SpatioTemporalScaleFactors
+
+archive/                      # documentation-only; not imported.  source for
+├── distilled.py.bak          # archived legacy distilled pipeline API
+├── simple_decoder.py.bak     # per-temporal-slice VAE decoder
+├── simple_encoder.py.bak     # per-temporal-slice VAE encoder
+├── encoder.py.bak            # configurable-blocks VideoEncoder (PyTorch-style)
+├── decoder.py.bak            # configurable-blocks VideoDecoder
+├── resnet.py.bak             # ResnetBlock3D, UNetMidBlock3D, PixelNorm
+├── sampling.py.bak           # SpaceToDepthDownsample, DepthToSpaceUpsample
+├── convolution.py.bak        # DualConv3d, CausalConv3d, PaddingModeType, ...
+└── text_to_video.py.bak      # legacy TextToVideoPipeline + GenerationConfig
 ```
 
 ## Key Components

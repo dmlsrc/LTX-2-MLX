@@ -16,30 +16,12 @@ import mlx.nn as nn
 from .weight_converter import _flatten_to_nested, convert_pytorch_key_to_mlx
 
 
-# Transformer cache schema -- bumped only when the transformer.safetensors
-# layout / dtype / quantization conventions change.  The actual cache
-# digest also folds in layout-spec / quant-spec / dtype-spec args, so most
-# meaningful changes already invalidate without a version bump.
+# Schema versions for cache invalidation.  Transformer and family caches
+# are split so a family-layout bump (cheap rebuild) doesn't drag the
+# ~22 GB transformer cache.  The cache digest also folds layout/quant/dtype
+# specs in, so most meaningful changes invalidate without a version bump.
 CACHE_SCHEMA_VERSION = 1
-
-# Family-cache schema -- separate so we can bump VAE/audio_vae/etc layout
-# conventions without forcing a transformer-cache rebuild (which is ~22 GB
-# and takes minutes).  Schema 2 (2026-05-23): video_vae and audio_vae
-# family caches now store Conv weights in MLX channels-last layout
-# (NDHWC for Conv3d, NHWC for Conv2d) instead of PyTorch channels-second.
-# The one-time materialization that previously happened on first eval is
-# moved to cache build time.  Both production VAE encoders/decoders
-# (``NativeConv3dVideoEncoder``, ``NativeConv3dVideoDecoder``) expect
-# channels-last weights; the legacy per-temporal-slice path
-# (``SimpleVideoEncoder``/``SimpleVideoDecoder``) was archived to
-# ``archive/`` at the same time.  Vocoder 3D Conv weights are NOT
-# pre-baked because Conv1d vs ConvTranspose1d need different transpose
-# orders that can't be told apart from a key alone; that family stays
-# at the runtime transpose.  Bumping this invalidates any family cache
-# built at the previous version so first run after upgrade rebuilds
-# the VAE/audio_vae/connector/vocoder caches in-place; the transformer
-# cache stays valid.
-FAMILY_CACHE_SCHEMA_VERSION = 2
+FAMILY_CACHE_SCHEMA_VERSION = 2  # v2: video_vae + audio_vae Conv weights baked channels-last
 LAYOUT_KEY_PREFIX = "__layout__."
 QUANT_KEY_PREFIX = "__quant__."
 TRANSFORMER_CACHE_QUANTIZE_OFF = "off"

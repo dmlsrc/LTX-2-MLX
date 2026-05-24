@@ -1,15 +1,7 @@
 """Native MLX Conv3d video VAE decoder.
 
-The older (now-archived) ``simple_decoder.py`` stored PyTorch-layout
-Conv3d weights and emulated each 3D convolution with temporal slices
-of 2D convolutions.  This decoder stores the same weights in MLX
-Conv3d layout and runs the VAE in BFHWC/channel-last form.  It works
-with the existing tiled decode wrapper.
-
-Shared Conv3d primitives (``NativeConv3dBlock``, ``NativeResBlock3d``,
-``NativeResBlockGroup``, ``pixel_norm_bfhwc``, ``unpatchify_spatial_bfhwc``,
-``to_native_conv3d_layout``, ``lookup_weight``) live in
-``native_blocks.py`` and are also imported by ``native_encoder.py``.
+Mirrors ``NativeConv3dVideoEncoder`` on the shared blocks in
+``native_blocks.py``.  Works with the existing tiled decode wrapper.
 """
 
 from __future__ import annotations

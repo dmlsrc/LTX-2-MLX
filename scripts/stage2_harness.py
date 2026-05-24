@@ -159,10 +159,7 @@ def parse_args() -> argparse.Namespace:
         "--vae-decoder",
         choices=["native-conv3d"],
         default="native-conv3d",
-        help=(
-            "Video VAE decoder backend.  Only 'native-conv3d' is supported; "
-            "the 'simple' backend was archived 2026-05-23."
-        ),
+        help="Video VAE decoder backend (MLX-native Conv3d).",
     )
     parser.add_argument(
         "--vae-tiling",
@@ -493,8 +490,6 @@ def main() -> None:
     decoder_blocks = vae_config.get("decoder_blocks", None)
     base_channels = vae_config.get("decoder_base_channels", 128)
     timestep_cond = vae_config.get("timestep_conditioning", True)
-    # Legacy SimpleVideoDecoder was archived 2026-05-23; only native remains.
-    # spatial_padding_mode was removed at the same time -- only zero is supported.
     vae_decoder = gen.NativeConv3dVideoDecoder(
         decoder_blocks=decoder_blocks,
         base_channels=base_channels,

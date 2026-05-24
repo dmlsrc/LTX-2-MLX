@@ -36,7 +36,6 @@ from LTX_2_MLX.model.audio_vae import (
     load_vocoder_with_bwe_weights,
 )
 from LTX_2_MLX.model.audio_vae.vocoder import MelSTFT
-from LTX_2_MLX.model.video_vae import VideoDecoder, NormLayerType
 from LTX_2_MLX.components import (
     DISTILLED_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -710,22 +709,9 @@ def _ensure_audio_ff_layout_for_dtype(
     layout_specs: tuple[tuple[str, str], ...],
     audio_ff_dtype: str | None,
 ) -> tuple[tuple[str, str], ...]:
-    """Add audio FF pretranspose when --audio-ff-dtype switches audio FF
-    to FP16.
-
-    Mirror of `_ensure_ff_layout_for_dtype` for the audio branch.  The
-    primary motivation here is reason (1) from the video helper —
-    avoiding the FP16 × BF16 → FP32 mixed-dtype promotion.  Audio shapes
-    (K=2048 / 8192) do NOT hit a kernel-selection cliff per
-    `scripts/bench_pretranspose_dtype.py`: at K=8192 audio FP16 naive is
-    *faster* than BF16 naive (7.10 vs 6.40 TFlops/s, same direction as
-    the per-matmul win, no cliff).  So pretranspose isn't a speed
-    rescue for audio FP16 — it's just required so the matmul stays in
-    pure FP16 instead of falling back to FP32.
-
-    Auto-pairs `project_in:pretranspose,project_out:pretranspose` for
-    audio FF when `--audio-ff-dtype float16` is set, mirroring the
-    video helper.
+    """Auto-add audio FF pretranspose when FP16, avoiding FP16 × BF16 → FP32
+    mixed-dtype promotion.  Mirror of ``_ensure_ff_layout_for_dtype`` minus
+    the kernel-cliff motivation (audio K=8192 doesn't hit it).
     """
     if not audio_ff_dtype or audio_ff_dtype == "bfloat16":
         return layout_specs
@@ -743,29 +729,12 @@ def _ensure_ff_layout_for_dtype(
     layout_specs: tuple[tuple[str, str], ...],
     video_ff_dtype: str | None,
 ) -> tuple[tuple[str, str], ...]:
-    """Add FF pretranspose when --video-ff-dtype switches FF interior to FP16.
-
-    Pretranspose is mandatory whenever the FF interior dtype is FP16, for
-    two independent reasons (either alone is enough to motivate the
-    auto-pair; both apply here):
-
-    1. **FP32 mixed-dtype promotion.**  Without a dtype-baked
-       pretransposed cache, project_in's `nn.Linear` holds the weight at
-       checkpoint BF16; sending an FP16 activation through it promotes
-       the matmul to FP32 (MLX's mixed-dtype fallback) — slower than
-       either pure path.
-    2. **FP16 kernel-selection cliff.**  Even when both operands are
-       pure FP16, the naive `x @ w.T` layout at project_out's K=16384
-       falls off a kernel-selection cliff: FP16 naive runs at 4.95
-       TFlops/s vs 9.51 TFlops/s pretransposed (47.9% pretranspose win
-       in FP16, compared to BF16's 27.7% at the same shape).  FP16
-       requires pretranspose *more* than BF16 does, not less.  Measured
-       at `scripts/bench_pretranspose_dtype.py`.
-
-    So the FP16 speedup only materializes when BOTH project_in and
-    project_out have pretransposed (and dtype-cast) weight caches.
-    project_out:pretranspose is the production default already; this
-    helper ensures project_in is added too when needed.
+    """Auto-add ``project_in/project_out:pretranspose`` when --video-ff-dtype
+    is FP16.  Mandatory for two reasons: (1) without a pretransposed dtype-
+    baked cache, project_in's nn.Linear promotes FP16 × BF16 → FP32; (2)
+    naive FP16 at K=16384 hits a deeper BlockLoader cliff than BF16 (4.95
+    vs 9.51 TFlops/s with vs without pretranspose).  See
+    PERFORMANCE_NOTES.md "BlockLoader cliff characterization" entry.
     """
     if not video_ff_dtype or video_ff_dtype == "bfloat16":
         return layout_specs
@@ -1949,41 +1918,6 @@ def load_text_conditioning(embedding_path: str, use_av_encoder: bool) -> dict:
     return loaded
 
 
-def load_vae_decoder(weights_path: str) -> VideoDecoder:
-    """Load VAE decoder with weights."""
-    print("Loading VAE decoder...")
-
-    # LTX-2 decoder configuration
-    decoder_blocks = [
-        ("res_x", {"num_layers": 4}),
-        ("compress_all", {"multiplier": 1}),
-        ("res_x", {"num_layers": 4}),
-        ("compress_all", {"multiplier": 1}),
-        ("res_x", {"num_layers": 4}),
-        ("compress_time", {}),
-        ("res_x", {"num_layers": 4}),
-        ("compress_space", {}),
-        ("res_x", {"num_layers": 4}),
-        ("compress_space", {}),
-    ]
-
-    decoder = VideoDecoder(
-        convolution_dimensions=3,
-        in_channels=128,
-        out_channels=3,
-        decoder_blocks=decoder_blocks,
-        patch_size=4,
-        norm_layer=NormLayerType.PIXEL_NORM,
-        causal=True,
-        timestep_conditioning=False,
-    )
-
-    # TODO: Load VAE weights from file
-    print("  VAE decoder created (weights not loaded yet)")
-
-    return decoder
-
-
 def load_transformer(
     weights_path: str,
     num_layers: int = 48,
@@ -2914,9 +2848,9 @@ def generate_video(
     elif vae_decoder_backend == "native":
         print("VAE decoder: native Conv3d")
     else:
-        print("VAE decoder: legacy slice-conv baseline (archived)")
+        raise ValueError(f"Unsupported VAE decoder backend: {vae_decoder_backend}")
     if not skip_vae:
-        print("VAE spatial padding: zero (boundary-flicker mitigation; reflect path archived 2026-05-23)")
+        print("VAE spatial padding: zero (boundary-flicker mitigation)")
     if upscale_spatial:
         print(f"Spatial upscaling: 2x (output will be {width*2}x{height*2})")
     if upscale_temporal:
@@ -3463,9 +3397,6 @@ def generate_video(
             print(f"  VAE config: {len(decoder_blocks)} blocks, base_ch={base_channels}, timestep={timestep_cond}")
 
         if vae_decoder_backend == "native":
-            # spatial_padding_mode parameter was removed 2026-05-23 — only zero
-            # padding is supported now (reflect was archived after A/B testing
-            # consistently showed it produced worse boundary artifacts).
             vae_decoder = NativeConv3dVideoDecoder(
                 decoder_blocks=decoder_blocks,
                 base_channels=base_channels,
@@ -3473,11 +3404,9 @@ def generate_video(
                 compute_dtype=compute_dtype,
             )
         else:
-            # Only "native" is supported; the legacy SimpleVideoDecoder was
-            # archived 2026-05-23 to pipelines/archive/simple_decoder.py.bak.
             raise ValueError(
-                f"Unsupported VAE decoder backend: {vae_decoder_backend}. "
-                f"Only 'native' is supported; 'legacy' was archived."
+                f"Unsupported VAE decoder backend: {vae_decoder_backend!r}. "
+                f"Only 'native' is supported."
             )
         if video_vae_load_path and not use_placeholder:
             load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
@@ -5021,13 +4950,7 @@ def main():
         "--vae-decoder",
         choices=["native"],
         default="native",
-        help=(
-            "Video VAE decoder backend.  Only 'native' is supported "
-            "(MLX-native Conv3d decoder).  The 'legacy' PyTorch-layout "
-            "slice-conv decoder was archived 2026-05-23 once the native "
-            "path had been the default for an extended bake-in period; "
-            "see pipelines/archive/simple_decoder.py.bak for the source."
-        ),
+        help="Video VAE decoder backend (MLX-native Conv3d).",
     )
     parser.add_argument(
         "--model-variant",

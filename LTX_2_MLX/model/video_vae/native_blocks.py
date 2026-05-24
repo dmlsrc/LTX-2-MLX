@@ -1,15 +1,8 @@
-"""Shared MLX-native Conv3d building blocks for the video VAE encoder + decoder.
+"""Shared Conv3d primitives for the BFHWC video VAE encoder + decoder.
 
-Both ``NativeConv3dVideoDecoder`` and ``NativeConv3dVideoEncoder`` are
-built on the same channel-last (BFHWC) primitives -- a Conv3d block
-with explicit temporal/spatial padding, a pre-activation residual block
-using ``mx.fast.rms_norm`` as PixelNorm + ``silu`` + Conv, and the
-matching group container.  This module is the single source of truth
-for those primitives so the encoder and decoder stay in lockstep.
-
-Spatial padding: zero-only.  The historical ``reflect`` padding option
-was dropped 2026-05-23 after A/B confirmation that it was a loss in
-every tested workflow; the simpler ``mx.pad`` path stays.
+Single source of truth for ``NativeConv3dBlock``, ``NativeResBlock3d``,
+``NativeResBlockGroup`` and their padding / normalization helpers.
+Zero spatial padding only.
 """
 
 from __future__ import annotations

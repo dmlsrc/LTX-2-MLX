@@ -1,22 +1,10 @@
 """Native MLX Conv3d video VAE encoder.
 
-Mirrors ``NativeConv3dVideoDecoder`` -- uses the shared Conv3d blocks in
-``native_blocks.py`` (``NativeConv3dBlock``, ``NativeResBlock3d``,
-``NativeResBlockGroup``) and runs the VAE in BFHWC/channel-last form.
-
-The older ``simple_encoder.py`` ``SimpleVideoEncoder`` emulated each 3D
-convolution via per-temporal-slice 2D convolutions over PyTorch-layout
-weights, then transposed each slice to MLX layout at runtime.  This
-native encoder calls ``mx.conv3d`` directly with channels-last weights
-(cache schema >= 2 bakes the channels-last layout, see
-``loader/transformer_cache.py:_bake_conv_layout_for_family``).
-
-Public surface matches ``SimpleVideoEncoder``:
-- Constructor takes ``compute_dtype``.
-- ``__call__(video)`` accepts BCFHW ``(B, 3, F, H, W)`` and returns
-  BCFHW ``(B, 128, F', H', W')`` normalized latent.
-- ``per_channel_statistics`` attribute exposes the same normalization
-  helper that callers use to denormalize / re-normalize between stages.
+Mirrors ``NativeConv3dVideoDecoder`` on the shared blocks in
+``native_blocks.py``.  Takes BCFHW ``(B, 3, F, H, W)`` in [-1, 1] and
+returns the normalized BCFHW latent ``(B, 128, F', H', W')``.
+``per_channel_statistics`` is exposed for callers that need to
+de/re-normalize between stages.
 """
 
 from __future__ import annotations

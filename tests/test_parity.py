@@ -353,8 +353,7 @@ class TestFullPipelineParity:
         # Load VAE input from PyTorch
         vae_input = mx.array(pytorch_checkpoints["vae_decoder_input_latent"])
 
-        # Load VAE decoder (native, channels-last Conv3d; legacy
-        # SimpleVideoDecoder was archived 2026-05-23).
+        # Load VAE decoder (native channels-last Conv3d).
         vae_decoder = mlx_models["NativeConv3dVideoDecoder"]()
         mlx_models["load_native_vae_decoder_weights"](vae_decoder, mlx_models["weights_path"])
         vae_decoder.decode_noise_scale = 0.0  # Deterministic

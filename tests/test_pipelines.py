@@ -8,10 +8,6 @@ import tempfile
 from PIL import Image
 
 # Import the modules under test
-from LTX_2_MLX.pipelines.text_to_video import (
-    GenerationConfig,
-    TextToVideoPipeline,
-)
 from LTX_2_MLX.pipelines.common import (
     ImageCondition,
     create_image_conditionings,
@@ -22,58 +18,6 @@ from LTX_2_MLX.pipelines.common import (
 from LTX_2_MLX.conditioning.keyframe import VideoConditionByKeyframeIndex
 from LTX_2_MLX.conditioning.latent import VideoConditionByLatentIndex
 from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
-
-
-# ============================================================================
-# GenerationConfig Tests
-# ============================================================================
-
-class TestGenerationConfig:
-    """Tests for GenerationConfig dataclass."""
-
-    def test_default_config(self):
-        """Test default configuration values."""
-        config = GenerationConfig()
-        assert config.height == 480
-        assert config.width == 704
-        assert config.num_frames == 121
-        assert config.num_inference_steps == 50
-        assert config.cfg_scale == 7.5
-        assert config.seed is None
-        assert config.use_distilled == False
-        assert config.precision == "float16"
-
-    def test_custom_config(self):
-        """Test custom configuration values."""
-        config = GenerationConfig(
-            height=720,
-            width=1280,
-            num_frames=65,
-            num_inference_steps=30,
-            cfg_scale=5.0,
-            seed=42,
-        )
-        assert config.height == 720
-        assert config.width == 1280
-        assert config.num_frames == 65
-        assert config.num_inference_steps == 30
-        assert config.cfg_scale == 5.0
-        assert config.seed == 42
-
-    def test_valid_frame_counts(self):
-        """Test valid frame counts (8k + 1)."""
-        valid_frames = [1, 9, 17, 25, 33, 41, 49, 57, 65, 73, 81, 89, 97, 105, 113, 121]
-        for frames in valid_frames:
-            config = GenerationConfig(num_frames=frames)
-            assert config.num_frames == frames
-
-    def test_invalid_frame_count_raises(self):
-        """Test invalid frame counts raise ValueError."""
-        invalid_frames = [2, 8, 10, 16, 24, 32, 100, 120]
-        for frames in invalid_frames:
-            with pytest.raises(ValueError) as exc_info:
-                GenerationConfig(num_frames=frames)
-            assert "8*k + 1" in str(exc_info.value)
 
 
 # ============================================================================
@@ -310,146 +254,6 @@ class TestVideoLatentShape:
 
 
 # ============================================================================
-# TextToVideoPipeline Tests (with mocks)
-# ============================================================================
-
-class TestTextToVideoPipelineConfig:
-    """Tests for TextToVideoPipeline configuration and shape calculations."""
-
-    @pytest.fixture
-    def mock_pipeline(self):
-        """Create a pipeline with mock components."""
-        from LTX_2_MLX.components.guiders import CFGGuider
-
-        mock_transformer = MagicMock()
-        mock_decoder = MagicMock()
-        mock_patchifier = MagicMock()
-        mock_guider = CFGGuider(scale=7.5)
-
-        return TextToVideoPipeline(
-            transformer=mock_transformer,
-            decoder=mock_decoder,
-            patchifier=mock_patchifier,
-            guider=mock_guider,
-        )
-
-    def test_get_latent_shape(self, mock_pipeline):
-        """Test latent shape calculation."""
-        pipeline = mock_pipeline
-
-        config = GenerationConfig(
-            height=480,
-            width=704,
-            num_frames=121,
-        )
-
-        shape = pipeline.get_latent_shape(config)
-
-        # VAE compression: 32x spatial, 8x temporal
-        assert shape.batch == 1
-        assert shape.channels == 128
-        assert shape.frames == (121 - 1) // 8 + 1  # 16
-        assert shape.height == 480 // 32  # 15
-        assert shape.width == 704 // 32  # 22
-
-    def test_initialize_latent_shape(self, mock_pipeline):
-        """Test latent initialization produces correct shape."""
-        pipeline = mock_pipeline
-
-        shape = VideoLatentShape(
-            batch=1,
-            channels=128,
-            frames=13,
-            height=15,
-            width=22,
-        )
-
-        latent = pipeline.initialize_latent(shape, seed=42)
-
-        assert latent.shape == (1, 128, 13, 15, 22)
-
-    def test_initialize_latent_with_seed(self, mock_pipeline):
-        """Test latent initialization is deterministic with seed."""
-        pipeline = mock_pipeline
-
-        shape = VideoLatentShape(
-            batch=1,
-            channels=4,
-            frames=2,
-            height=4,
-            width=4,
-        )
-
-        latent1 = pipeline.initialize_latent(shape, seed=42)
-        mx.eval(latent1)
-
-        latent2 = pipeline.initialize_latent(shape, seed=42)
-        mx.eval(latent2)
-
-        assert mx.allclose(latent1, latent2)
-
-    def test_prepare_text_context_with_cfg(self, mock_pipeline):
-        """Test text context preparation with CFG (fallback to zeros)."""
-        pipeline = mock_pipeline
-
-        text_encoding = mx.ones((1, 10, 256))
-        text_mask = mx.ones((1, 10))
-
-        context, mask = pipeline.prepare_text_context(
-            text_encoding, text_mask, cfg_scale=7.5
-        )
-
-        # With CFG, batch dimension should double
-        assert context.shape == (2, 10, 256)
-        assert mask.shape == (2, 10)
-
-        # First half should be original, second half zeros (uncond fallback)
-        assert mx.allclose(context[0], text_encoding[0])
-        assert mx.allclose(context[1], mx.zeros((10, 256)))
-
-    def test_prepare_text_context_with_negative_encoding(self, mock_pipeline):
-        """Test text context preparation with explicit negative encoding."""
-        pipeline = mock_pipeline
-
-        text_encoding = mx.ones((1, 10, 256))
-        text_mask = mx.ones((1, 10))
-        # Simulate encoded empty string (non-zero values)
-        negative_encoding = mx.full((1, 10, 256), 0.5)
-        negative_mask = mx.ones((1, 10))
-
-        context, mask = pipeline.prepare_text_context(
-            text_encoding,
-            text_mask,
-            cfg_scale=7.5,
-            negative_encoding=negative_encoding,
-            negative_mask=negative_mask,
-        )
-
-        # With CFG, batch dimension should double
-        assert context.shape == (2, 10, 256)
-        assert mask.shape == (2, 10)
-
-        # First half should be original, second half should be negative encoding
-        assert mx.allclose(context[0], text_encoding[0])
-        assert mx.allclose(context[1], negative_encoding[0])
-
-    def test_prepare_text_context_without_cfg(self, mock_pipeline):
-        """Test text context preparation without CFG."""
-        pipeline = mock_pipeline
-
-        text_encoding = mx.ones((1, 10, 256))
-        text_mask = mx.ones((1, 10))
-
-        context, mask = pipeline.prepare_text_context(
-            text_encoding, text_mask, cfg_scale=1.0
-        )
-
-        # Without CFG (scale <= 1), should return unchanged
-        assert context.shape == (1, 10, 256)
-        assert mask.shape == (1, 10)
-
-
-# ============================================================================
 # Component Integration Tests
 # ============================================================================
 
@@ -486,49 +290,6 @@ class TestPipelineComponents:
         step = EulerDiffusionStep()
         assert step is not None
 
-
-# ============================================================================
-# Error Handling Tests
-# ============================================================================
-
-class TestPipelineErrorHandling:
-    """Tests for pipeline error handling."""
-
-    def test_invalid_resolution_in_config(self):
-        """Test that invalid resolutions don't crash during config creation."""
-        # Very small resolution that should still work for config
-        config = GenerationConfig(height=64, width=64, num_frames=9)
-        assert config.height == 64
-
-    def test_zero_cfg_scale(self):
-        """Test zero CFG scale doesn't cause division errors."""
-        from LTX_2_MLX.components.guiders import CFGGuider
-
-        mock_transformer = MagicMock()
-        mock_decoder = MagicMock()
-        mock_patchifier = MagicMock()
-        mock_guider = CFGGuider(scale=0.0)
-
-        pipeline = TextToVideoPipeline(
-            transformer=mock_transformer,
-            decoder=mock_decoder,
-            patchifier=mock_patchifier,
-            guider=mock_guider,
-        )
-
-        text_encoding = mx.ones((1, 10, 256))
-        text_mask = mx.ones((1, 10))
-
-        # Zero CFG should not cause errors
-        context, _ = pipeline.prepare_text_context(
-            text_encoding, text_mask, cfg_scale=0.0
-        )
-
-        assert context.shape == (1, 10, 256)
-
-
-# ============================================================================
-# Scheduler Integration Tests
 # ============================================================================
 
 class TestSchedulerIntegration:

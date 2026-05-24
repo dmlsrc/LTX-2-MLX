@@ -70,13 +70,7 @@ def make_video_decoder(
     *,
     backend: str = "native",
 ):
-    """Build a VAE decoder matching scripts/generate.py's happy-path defaults.
-
-    Only the ``native`` backend is supported.  The 'legacy' SimpleVideoDecoder
-    was archived 2026-05-23 (see ``archive/simple_decoder.py.bak``) and the
-    spatial padding mode was hardcoded to ``zero`` at the same time after
-    A/B testing showed ``reflect`` was a loss in every tested workflow.
-    """
+    """Build a VAE decoder matching scripts/generate.py's happy-path defaults."""
     from scripts.generate import get_vae_config
     from LTX_2_MLX.model.video_vae.native_decoder import (
         NativeConv3dVideoDecoder, load_native_vae_decoder_weights,
@@ -102,11 +96,8 @@ def make_video_decoder(
         )
         load_native_vae_decoder_weights(decoder, weights_path)
     else:
-        # The 'legacy' SimpleVideoDecoder backend was archived 2026-05-23
-        # to pipelines/archive/simple_decoder.py.bak.  Only 'native' remains.
         raise ValueError(
-            f"Unsupported VAE decoder backend: {backend!r}. "
-            f"Only 'native' is supported; 'legacy' was archived."
+            f"Unsupported VAE decoder backend: {backend!r}. Only 'native' is supported."
         )
 
     import gc as _gc

@@ -1,17 +1,6 @@
-"""Polymorphic decode utilities for video VAE decoders.
-
-``decode_latent`` was historically defined inside ``simple_decoder.py``
-alongside ``SimpleVideoDecoder``, and its type hint suggested it was
-legacy-decoder-only.  In practice it works against any video decoder
-exposing ``decoder(latent, timestep=...)`` -- both the now-archived
-``SimpleVideoDecoder`` and the production ``NativeConv3dVideoDecoder``.
-Moved here in 2026-05-23 so ``simple_decoder.py`` could be archived
-without breaking every pipeline that imports ``decode_latent``.
-
-The decoder argument is typed ``Any`` because this module deliberately
-doesn't depend on either concrete class.  Any object with a callable
-signature matching ``__call__(latent: mx.array, timestep: float | None)
--> mx.array`` is accepted.
+"""Polymorphic ``decode_latent`` -- tiled-decode entry point that
+accepts any decoder callable as ``decoder(latent, timestep=...)``.
+Typed ``Any`` to keep this module concrete-class-free.
 """
 
 from __future__ import annotations
