@@ -238,21 +238,25 @@ Precision exceptions are intentionally narrow:
 
 ### VAE Decode Defaults
 
-Video decode defaults to the native Conv3d VAE decoder with
+Video decode uses the native Conv3d VAE decoder with
 `--vae-spatial-padding zero` and `--vae-tiling auto`. That keeps the common
-command short while using the RAM-aware native tiling planner. Use
-`--vae-decoder legacy` or `--vae-spatial-padding reflect` only when you want an
-A/B baseline against the older decode path:
+command short while using the RAM-aware native tiling planner.
+`--vae-spatial-padding reflect` is still available as an A/B baseline:
 
 ```bash
 python scripts/generate.py "Your prompt" \
-    --vae-decoder legacy \
     --vae-spatial-padding reflect
 ```
 
 Saved-latent A/B tests on motion-heavy bakery and talking-subject clips showed
 `zero` substantially reduced edge ghosting, background flicker, and boundary
 smearing versus `reflect`, with no meaningful decode-time cost.
+
+The older "legacy" VAE decoder (`SimpleVideoDecoder`, PyTorch-layout
+slice-conv) was archived to `LTX_2_MLX/pipelines/archive/simple_decoder.py.bak`
+on 2026-05-23 after the native decoder had been the default for an
+extended bake-in period.  The `--vae-decoder` CLI flag now only accepts
+`native`; pass nothing to use the production default.
 
 ### Transformer Streaming
 

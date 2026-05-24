@@ -157,9 +157,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--vae-decoder",
-        choices=["native-conv3d", "simple"],
+        choices=["native-conv3d"],
         default="native-conv3d",
-        help="Video VAE decoder backend.",
+        help=(
+            "Video VAE decoder backend.  Only 'native-conv3d' is supported; "
+            "the 'simple' backend was archived 2026-05-23."
+        ),
     )
     parser.add_argument(
         "--vae-spatial-padding",
@@ -496,24 +499,15 @@ def main() -> None:
     decoder_blocks = vae_config.get("decoder_blocks", None)
     base_channels = vae_config.get("decoder_base_channels", 128)
     timestep_cond = vae_config.get("timestep_conditioning", True)
-    if args.vae_decoder == "native-conv3d":
-        vae_decoder = gen.NativeConv3dVideoDecoder(
-            decoder_blocks=decoder_blocks,
-            base_channels=base_channels,
-            timestep_conditioning=timestep_cond,
-            compute_dtype=compute_dtype,
-            spatial_padding_mode=args.vae_spatial_padding,
-        )
-        gen.load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
-    else:
-        vae_decoder = gen.SimpleVideoDecoder(
-            decoder_blocks=decoder_blocks,
-            base_channels=base_channels,
-            timestep_conditioning=timestep_cond,
-            compute_dtype=compute_dtype,
-            spatial_padding_mode=args.vae_spatial_padding,
-        )
-        gen.load_vae_decoder_weights(vae_decoder, video_vae_load_path)
+    # Legacy SimpleVideoDecoder was archived 2026-05-23; only native remains.
+    vae_decoder = gen.NativeConv3dVideoDecoder(
+        decoder_blocks=decoder_blocks,
+        base_channels=base_channels,
+        timestep_conditioning=timestep_cond,
+        compute_dtype=compute_dtype,
+        spatial_padding_mode=args.vae_spatial_padding,
+    )
+    gen.load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
 
     video_encoder = gen.SimpleVideoEncoder(compute_dtype=compute_dtype)
     gen.load_vae_encoder_weights(video_encoder, video_vae_load_path)

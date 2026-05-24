@@ -139,11 +139,14 @@ class ModelLedger:
         if self.checkpoint_path is None:
             raise ValueError("checkpoint_path is required to load video decoder")
 
-        from ..model.video_vae import SimpleVideoDecoder, load_vae_decoder_weights
+        from ..model.video_vae import (
+            NativeConv3dVideoDecoder,
+            load_native_vae_decoder_weights,
+        )
 
         print("Loading video decoder...")
-        decoder = SimpleVideoDecoder(compute_dtype=self.compute_dtype)
-        load_vae_decoder_weights(decoder, self.checkpoint_path)
+        decoder = NativeConv3dVideoDecoder(compute_dtype=self.compute_dtype)
+        load_native_vae_decoder_weights(decoder, self.checkpoint_path)
 
         self._video_decoder = decoder
         return decoder

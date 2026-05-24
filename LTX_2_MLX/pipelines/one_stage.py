@@ -55,7 +55,8 @@ from ..conditioning.tools import VideoLatentTools, AudioLatentTools
 from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model, Modality
 from ..components.guiders import STGGuider
 from ..components.perturbations import create_batched_stg_config, BatchedPerturbationConfig
-from ..model.video_vae.simple_decoder import SimpleVideoDecoder, decode_latent
+from ..model.video_vae.decode_utils import decode_latent
+from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.simple_encoder import SimpleVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 from ..model.audio_vae import AudioDecoder, Vocoder
@@ -148,7 +149,7 @@ class OneStagePipeline:
         self,
         transformer: LTXModel,
         video_encoder: Optional[SimpleVideoEncoder],
-        video_decoder: Optional[SimpleVideoDecoder],
+        video_decoder: Optional[NativeConv3dVideoDecoder],
         audio_decoder: Optional[AudioDecoder] = None,
         vocoder: Optional[Vocoder] = None,
     ):
@@ -2194,7 +2195,7 @@ class OneStagePipeline:
 def create_one_stage_pipeline(
     transformer: LTXModel,
     video_encoder: Optional[SimpleVideoEncoder],
-    video_decoder: Optional[SimpleVideoDecoder],
+    video_decoder: Optional[NativeConv3dVideoDecoder],
     audio_decoder: Optional[AudioDecoder] = None,
     vocoder: Optional[Vocoder] = None,
 ) -> OneStagePipeline:

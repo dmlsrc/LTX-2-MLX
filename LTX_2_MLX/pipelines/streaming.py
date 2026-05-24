@@ -52,7 +52,7 @@ import numpy as np
 
 import mlx.core as mx
 
-from ..model.video_vae.simple_decoder import decode_latent
+from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 
 

@@ -58,7 +58,7 @@ The following ship enabled by default:
 - Non-padded tokenizer (no `padding="max_length"`).
 - `--internal-audio auto` (on iff `--generate-audio`).
 - `--mlx-cache-limit-gb 1`.
-- `--vae-decoder native` (lower peak memory than the legacy path).
+- `--vae-decoder native` (the only supported backend; the historical `legacy` path was archived 2026-05-23).
 - `--output-backend auto` — `--encode-tier default` (HEVC Main10 + ALAC)
   goes through AVAssetWriter; other tiers stay on ffmpeg.  Removes a
   raw-frames-to-ffmpeg subprocess pipe from the hot path on macOS.
@@ -178,7 +178,7 @@ from the default stack when running A/Bs.
 | Tokenize without max-length padding | default | none | -5 % AV (256×256×25) | Tokenizer was padding 2 real tokens to 1024 before Gemma forward.  Re-enable: `LTX_PAD_PROMPT_TO_MAX=1`. |
 | `--mlx-cache-limit-gb 1` | default | low | neutral | Same-math allocator-cache cap.  Bakery AV process RAM 44 GB → 40 GB with no time penalty.  `0` returns freed buffers immediately. |
 | Defer AV text encoder load until after Gemma | default | low | neutral; -6 GB prompt-encode peak | Trim Gemma hidden states, materialize, free Gemma, then load AV connector. |
-| `--vae-decoder native` | default | medium | none for denoise | Lower peak memory than `--vae-decoder legacy`.  See [Decode-time notes](#decode-time-notes-not-denoise-speed). |
+| `--vae-decoder native` | only option | medium | none for denoise | The historical `legacy` (`SimpleVideoDecoder`, PyTorch-layout slice-conv) backend was archived 2026-05-23 after the native Conv3d decoder had been the production default for an extended bake-in period — source lives in `LTX_2_MLX/pipelines/archive/simple_decoder.py.bak` for reference. |
 | Terminal redraw throttling | default | none | -5.9 % bakery total on macOS | `DenoiseProgress` no longer spawns a heartbeat thread; `tqdm` uses `ascii=True + mininterval=1-2s`.  Bakery 31m 28s → 29m 38s.  Stage 2 alone -8 %.  See [Terminal redraw throttling](#terminal-redraw-throttling) for the full story. |
 | **--- compute-precision opt-ins ---** | | | | |
 | `--video-ff-dtype float16` | opt-in | none | **-4.6 % bakery 384x640x20s (8m 00s → 7m 38s)** | Cache-baked: cast project_in and project_out weights to FP16 at cache-build time, run the FF interior in FP16 (silu+geglu+matmuls), cast the residual back to BF16 at FF exit.  Attention/RMSNorm/RoPE/SDPA stay BF16.  ~15 % per-matmul FP16 win at production FF shapes (BF16/FP16 ratio 1.17–1.18×) translates to 4.6 % wall savings because FF is ~22 % of total compute and the FF-block win includes boundary casts.  Cosine sim ~0.71 vs BF16 — perceptually close, not bit-equivalent.  **Auto-pairs** with `project_in:pretranspose,project_out:pretranspose` (enforced in `scripts/generate.py:_ensure_ff_layout_for_dtype`).  FP16 *requires* pretranspose: at project_out (K=16384) the FP16 naive kernel falls off a deeper kernel-selection cliff than BF16 (4.95 vs 5.86 TFlops/s, then both recover to >8 TFlops/s with pretranspose).  Disabling pretranspose with FP16 on would be -18 % regression vs BF16 baseline.  Tried `--video-attn-dtype float16` too: net regression (+0.6 % wall) because the SDPA boundary's projection casts outweigh the matmul win; flag dropped.  See "FF FP16 + FP16 cliff" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
@@ -1188,11 +1188,11 @@ VAE tiled decode, VAE spatial padding, and output encoding affect decode
 quality, memory, or save time.  They are useful but **not denoise-speed
 fixes**.  See the matrix entry for `--vae-decoder native`.
 
-Native Conv3d VAE decode is the default generator decode path.  Use
-`--vae-decoder legacy` only when you want the older baseline for A/B.
-`scripts/compare_vae_decoders.py` compares timing, MLX active/cache/peak
-memory, sampled luma stats, contact-sheet diff, and full-motion
-side-by-side MP4 on a saved latent.
+Native Conv3d VAE decode is the only supported generator decode path.
+The historical `--vae-decoder legacy` (`SimpleVideoDecoder`) backend
+and its companion `scripts/compare_vae_decoders.py` A/B script were
+archived 2026-05-23 — see `LTX_2_MLX/pipelines/archive/simple_decoder.py.bak`
+for the legacy source.
 
 ### Native Conv3d output-size limit on MLX 0.31.2
 

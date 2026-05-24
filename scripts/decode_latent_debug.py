@@ -204,7 +204,10 @@ def load_latents(
 
 def make_decoder(weights_path: str, compute_dtype: Any, spatial_padding_mode: str = "reflect"):
     from scripts.generate import get_vae_config
-    from LTX_2_MLX.model.video_vae.simple_decoder import SimpleVideoDecoder, load_vae_decoder_weights
+    from LTX_2_MLX.model.video_vae.native_decoder import (
+        NativeConv3dVideoDecoder,
+        load_native_vae_decoder_weights,
+    )
 
     vae_cfg = get_vae_config(weights_path)
     decoder_blocks = vae_cfg.get("decoder_blocks")
@@ -216,14 +219,14 @@ def make_decoder(weights_path: str, compute_dtype: Any, spatial_padding_mode: st
         f"base_ch={base_channels}, timestep={timestep_conditioning}"
     )
 
-    decoder = SimpleVideoDecoder(
+    decoder = NativeConv3dVideoDecoder(
         decoder_blocks=decoder_blocks,
         base_channels=base_channels,
         timestep_conditioning=timestep_conditioning,
         compute_dtype=compute_dtype,
         spatial_padding_mode=spatial_padding_mode,
     )
-    load_vae_decoder_weights(decoder, weights_path)
+    load_native_vae_decoder_weights(decoder, weights_path)
     gc.collect()
     return decoder
 
@@ -416,7 +419,7 @@ def decode_mode(
     audio_wav_path: Path | None = None,
     audio_sample_rate: int | None = None,
 ) -> None:
-    from LTX_2_MLX.model.video_vae.simple_decoder import decode_latent
+    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     from LTX_2_MLX.model.video_vae.tiling import decode_tiled
 
     print("\n" + "=" * 80)

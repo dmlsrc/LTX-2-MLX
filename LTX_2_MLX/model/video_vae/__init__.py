@@ -26,11 +26,7 @@ from .sampling import (
 )
 from .encoder import VideoEncoder, LogVarianceType
 from .decoder import VideoDecoder, decode_video
-from .simple_decoder import (
-    SimpleVideoDecoder,
-    load_vae_decoder_weights,
-    decode_latent,
-)
+from .decode_utils import decode_latent
 from .native_decoder import (
     NativeConv3dVideoDecoder,
     load_native_vae_decoder_weights,
@@ -78,9 +74,8 @@ __all__ = [
     "VideoDecoder",
     "LogVarianceType",
     "decode_video",
-    # Simple decoder (for weight loading)
-    "SimpleVideoDecoder",
-    "load_vae_decoder_weights",
+    # Video VAE decoder (production = NativeConv3dVideoDecoder; legacy
+    # SimpleVideoDecoder was archived 2026-05-23, see pipelines/archive/)
     "decode_latent",
     "NativeConv3dVideoDecoder",
     "load_native_vae_decoder_weights",

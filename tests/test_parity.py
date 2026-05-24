@@ -137,10 +137,10 @@ def mlx_models():
         load_gemma3_weights,
     )
     from LTX_2_MLX.model.transformer import LTXModel, LTXModelType, Modality, X0Model
-    from LTX_2_MLX.model.video_vae.simple_decoder import (
-        SimpleVideoDecoder,
-        decode_latent,
-        load_vae_decoder_weights,
+    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
+    from LTX_2_MLX.model.video_vae.native_decoder import (
+        NativeConv3dVideoDecoder,
+        load_native_vae_decoder_weights,
     )
     from LTX_2_MLX.types import SpatioTemporalScaleFactors, VideoLatentShape
 
@@ -161,9 +161,9 @@ def mlx_models():
         "LTXModelType": LTXModelType,
         "Modality": Modality,
         "X0Model": X0Model,
-        "SimpleVideoDecoder": SimpleVideoDecoder,
+        "NativeConv3dVideoDecoder": NativeConv3dVideoDecoder,
         "decode_latent": decode_latent,
-        "load_vae_decoder_weights": load_vae_decoder_weights,
+        "load_native_vae_decoder_weights": load_native_vae_decoder_weights,
         "SpatioTemporalScaleFactors": SpatioTemporalScaleFactors,
         "VideoLatentShape": VideoLatentShape,
         "AutoTokenizer": AutoTokenizer,
@@ -353,9 +353,10 @@ class TestFullPipelineParity:
         # Load VAE input from PyTorch
         vae_input = mx.array(pytorch_checkpoints["vae_decoder_input_latent"])
 
-        # Load VAE decoder
-        vae_decoder = mlx_models["SimpleVideoDecoder"]()
-        mlx_models["load_vae_decoder_weights"](vae_decoder, mlx_models["weights_path"])
+        # Load VAE decoder (native, channels-last Conv3d; legacy
+        # SimpleVideoDecoder was archived 2026-05-23).
+        vae_decoder = mlx_models["NativeConv3dVideoDecoder"]()
+        mlx_models["load_native_vae_decoder_weights"](vae_decoder, mlx_models["weights_path"])
         vae_decoder.decode_noise_scale = 0.0  # Deterministic
 
         # Decode

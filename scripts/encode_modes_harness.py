@@ -78,9 +78,6 @@ def make_video_decoder(
     The other combinations exist only for A/B testing.
     """
     from scripts.generate import get_vae_config
-    from LTX_2_MLX.model.video_vae.simple_decoder import (
-        SimpleVideoDecoder, load_vae_decoder_weights,
-    )
     from LTX_2_MLX.model.video_vae.native_decoder import (
         NativeConv3dVideoDecoder, load_native_vae_decoder_weights,
     )
@@ -105,17 +102,13 @@ def make_video_decoder(
             spatial_padding_mode=spatial_padding_mode,
         )
         load_native_vae_decoder_weights(decoder, weights_path)
-    elif backend == "legacy":
-        decoder = SimpleVideoDecoder(
-            decoder_blocks=decoder_blocks,
-            base_channels=base_channels,
-            timestep_conditioning=timestep_conditioning,
-            compute_dtype=compute_dtype,
-            spatial_padding_mode=spatial_padding_mode,
-        )
-        load_vae_decoder_weights(decoder, weights_path)
     else:
-        raise ValueError(f"Unsupported VAE decoder backend: {backend!r}")
+        # The 'legacy' SimpleVideoDecoder backend was archived 2026-05-23
+        # to pipelines/archive/simple_decoder.py.bak.  Only 'native' remains.
+        raise ValueError(
+            f"Unsupported VAE decoder backend: {backend!r}. "
+            f"Only 'native' is supported; 'legacy' was archived."
+        )
 
     import gc as _gc
     _gc.collect()
@@ -445,7 +438,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # NO spatial seams. The legacy simple-decoder branch always splits
     # spatially for width > 512, which is what was creating edge artifacts.
     from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_tiled
-    from LTX_2_MLX.model.video_vae.simple_decoder import decode_latent
+    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     tiling_cfg = TilingConfig.auto(
         height=height, width=width, num_frames=n_frames,
         decoder_backend=args.vae_decoder_backend,

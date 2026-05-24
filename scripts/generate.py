@@ -58,11 +58,7 @@ from LTX_2_MLX.loader import (
 )
 from LTX_2_MLX.loader.lora_loader import fuse_lora_into_weights
 from mlx.utils import tree_flatten
-from LTX_2_MLX.model.video_vae.simple_decoder import (
-    SimpleVideoDecoder,
-    load_vae_decoder_weights,
-    decode_latent,
-)
+from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
 from LTX_2_MLX.model.video_vae.native_decoder import (
     NativeConv3dVideoDecoder,
     load_native_vae_decoder_weights,
@@ -3478,21 +3474,15 @@ def generate_video(
                 compute_dtype=compute_dtype,
                 spatial_padding_mode=vae_spatial_padding,
             )
-        elif vae_decoder_backend == "legacy":
-            vae_decoder = SimpleVideoDecoder(
-                decoder_blocks=decoder_blocks,
-                base_channels=base_channels,
-                timestep_conditioning=timestep_cond,
-                compute_dtype=compute_dtype,
-                spatial_padding_mode=vae_spatial_padding,
-            )
         else:
-            raise ValueError(f"Unsupported VAE decoder backend: {vae_decoder_backend}")
+            # Only "native" is supported; the legacy SimpleVideoDecoder was
+            # archived 2026-05-23 to pipelines/archive/simple_decoder.py.bak.
+            raise ValueError(
+                f"Unsupported VAE decoder backend: {vae_decoder_backend}. "
+                f"Only 'native' is supported; 'legacy' was archived."
+            )
         if video_vae_load_path and not use_placeholder:
-            if vae_decoder_backend == "native":
-                load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
-            else:
-                load_vae_decoder_weights(vae_decoder, video_vae_load_path)
+            load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
         elif use_placeholder:
             print("  Skipping weights load (placeholder)")
     else:
@@ -5031,12 +5021,14 @@ def main():
     )
     parser.add_argument(
         "--vae-decoder",
-        choices=["native", "legacy"],
+        choices=["native"],
         default="native",
         help=(
-            "Video VAE decoder backend.  native (default) is the MLX-native "
-            "Conv3d decoder.  legacy is the PyTorch-layout slice-conv "
-            "baseline kept for A/B testing."
+            "Video VAE decoder backend.  Only 'native' is supported "
+            "(MLX-native Conv3d decoder).  The 'legacy' PyTorch-layout "
+            "slice-conv decoder was archived 2026-05-23 once the native "
+            "path had been the default for an extended bake-in period; "
+            "see pipelines/archive/simple_decoder.py.bak for the source."
         ),
     )
     parser.add_argument(

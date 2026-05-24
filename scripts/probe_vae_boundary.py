@@ -201,7 +201,7 @@ def decode_variant(
     audio_wav_path: Path | None = None,
     audio_sample_rate: int | None = None,
 ) -> int:
-    from LTX_2_MLX.model.video_vae.simple_decoder import decode_latent
+    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     from LTX_2_MLX.model.video_vae.tiling import decode_tiled
 
     print("\n" + "=" * 80)

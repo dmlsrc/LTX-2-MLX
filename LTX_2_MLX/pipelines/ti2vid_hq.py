@@ -36,7 +36,8 @@ from ..components import (
 from ..components.patchifiers import AudioPatchifier
 from ..conditioning.tools import VideoLatentTools, AudioLatentTools
 from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model, Modality
-from ..model.video_vae.simple_decoder import SimpleVideoDecoder, decode_latent
+from ..model.video_vae.decode_utils import decode_latent
+from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.simple_encoder import SimpleVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 from ..model.upscaler import SpatialUpscaler
@@ -111,7 +112,7 @@ class TI2VidHQPipeline:
         self,
         transformer: Union[LTXModel, LTXAVModel],
         video_encoder: SimpleVideoEncoder,
-        video_decoder: SimpleVideoDecoder,
+        video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
         audio_decoder: Optional[AudioDecoder] = None,
         vocoder: Optional[Vocoder] = None,

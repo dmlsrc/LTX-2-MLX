@@ -63,7 +63,9 @@ LTX_2_MLX/
 │   │   └── rope.py           # 3D rotary position embeddings
 │   │
 │   ├── video_vae/
-│   │   ├── simple_decoder.py # VAE decoder with timestep conditioning
+│   │   ├── native_decoder.py # Production MLX-native Conv3d VAE decoder
+│   │   ├── decode_utils.py   # decode_latent() polymorphic decode helper
+│   │   ├── simple_encoder.py # VAE encoder (channels-last Conv3dSimple)
 │   │   └── ops.py            # Depth-to-space, pixel shuffle operations
 │   │
 │   ├── audio_vae/

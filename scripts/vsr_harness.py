@@ -230,7 +230,7 @@ def iter_latent_chunks(
        "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
     """
     from LTX_2_MLX.model.video_vae.tiling import decode_tiled
-    from LTX_2_MLX.model.video_vae.simple_decoder import decode_latent
+    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     from scripts.encode_modes_harness import chunk_to_uint8
 
     convert = chunk_to_rgba_fp16 if output_format == "fp16_rgba" else chunk_to_uint8

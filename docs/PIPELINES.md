@@ -180,7 +180,7 @@ python scripts/generate.py "Your prompt" \
 | `--mlx-cache-limit-gb` | MLX in-memory allocator cache limit in decimal GB | 1 |
 | `--stream-transformer` | Recommended block-streaming preset: r16, compile, 4-block groups | False |
 | `--dtype` | Compute dtype: `bfloat16`, `float16`, or `float32` | bfloat16 |
-| `--vae-decoder` | VAE decoder backend: `native` (default, MLX-native Conv3d) or `legacy` (PyTorch-layout slice-conv A/B baseline). | native |
+| `--vae-decoder` | VAE decoder backend.  Only `native` (MLX-native Conv3d) is supported; the historical `legacy` `SimpleVideoDecoder` was archived 2026-05-23 to `LTX_2_MLX/pipelines/archive/simple_decoder.py.bak`. | native |
 | `--vae-tiling` | VAE decode tiling policy: RAM-aware `auto`, `off`, or `custom` | auto |
 | `--vae-spatial-padding` | VAE decoder spatial padding: default `zero` boundary mitigation or `reflect` A/B baseline | zero |
 | `--video-ff-layout` | Same-math video FF pretranspose layout, or `off` for baseline A/B | project_in/project_out pretranspose |
@@ -215,8 +215,8 @@ python scripts/generate.py "Your prompt" \
 - Scheduler/time/position math and tiled VAE blending keep FP32 where needed for stability.
 - Audio VAE decode and the plain vocoder follow the configured compute dtype.
 - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island, matching the Lightricks BWE precision caution.
-- The VAE decoder defaults to native Conv3d with zero spatial padding and RAM-aware auto tiling. `--vae-decoder legacy` and `--vae-spatial-padding reflect` remain available for decode A/Bs against the earlier baseline.
-- Converted-weight caching, a 1GB MLX allocator cache limit, same-math video projection pretranspose layouts, and native Conv3d/zero/auto VAE decode are enabled by default. Use `--weights-cache off`, `--mlx-cache-limit-gb 0`, `--video-ff-layout off --video-attn-layout off`, or `--vae-decoder legacy` for focused baselines.
+- The VAE decoder is native Conv3d with zero spatial padding and RAM-aware auto tiling.  `--vae-spatial-padding reflect` remains available for decode A/Bs against the earlier boundary policy.  The historical `--vae-decoder legacy` flag was retired 2026-05-23; the `SimpleVideoDecoder` source lives in `LTX_2_MLX/pipelines/archive/simple_decoder.py.bak` for reference.
+- Converted-weight caching, a 1GB MLX allocator cache limit, same-math video projection pretranspose layouts, and native Conv3d/zero/auto VAE decode are enabled by default.  Use `--weights-cache off`, `--mlx-cache-limit-gb 0`, or `--video-ff-layout off --video-attn-layout off` for focused baselines.
 - The `default` encode tier (HEVC HW Main10 + ALAC) auto-routes through `AVAssetWriter` (no ffmpeg dependency). Other tiers still go through ffmpeg. Force the legacy ffmpeg HEVC path with `--output-backend ffmpeg` for A/B comparisons.
 
 ## VideoToolbox post-processing
