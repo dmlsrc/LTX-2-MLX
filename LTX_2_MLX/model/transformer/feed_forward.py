@@ -1,5 +1,7 @@
 """Feed-forward networks for LTX-2 Transformer."""
 
+from typing import Optional
+
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -63,9 +65,31 @@ class FeedForward(nn.Module):
         self._project_out_weight_t = None
 
     def __call__(self, x: mx.array) -> mx.array:
+        # When the cached pre-transposed weight has a different dtype than the
+        # input (e.g. cache was built with `--video-ff-dtype float16` so the
+        # weight is FP16 while the residual stream stays BF16), do the cast
+        # at the FF boundary so the interior — including the huge inner_dim
+        # hidden activation — lives in the weight dtype.  Output is cast back
+        # at exit so the residual stream is unchanged.
+        target_dtype = self._target_compute_dtype()
+        if target_dtype is None or x.dtype == target_dtype:
+            x = self._project_in(x)
+            x = self._project_out(x)
+            return x
+        orig_dtype = x.dtype
+        x = x.astype(target_dtype)
         x = self._project_in(x)
         x = self._project_out(x)
-        return x
+        return x.astype(orig_dtype)
+
+    def _target_compute_dtype(self) -> Optional[mx.Dtype]:
+        """The dtype of the cached pre-transposed weights, or None when both
+        slots are empty (i.e. fall back to `nn.Linear` BF16 path)."""
+        if self._project_in_weight_t is not None:
+            return self._project_in_weight_t.dtype
+        if self._project_out_weight_t is not None:
+            return self._project_out_weight_t.dtype
+        return None
 
     def _project_in_linear(self, x: mx.array) -> mx.array:
         """Run project_in linear, optionally using a pre-transposed contiguous weight."""

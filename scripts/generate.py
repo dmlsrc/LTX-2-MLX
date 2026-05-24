@@ -710,6 +710,46 @@ def parse_video_ff_quantize_specs(value: str | None) -> tuple[tuple[str, str], .
     return tuple(specs)
 
 
+def _ensure_ff_layout_for_dtype(
+    layout_specs: tuple[tuple[str, str], ...],
+    video_ff_dtype: str | None,
+) -> tuple[tuple[str, str], ...]:
+    """Add FF pretranspose when --video-ff-dtype switches FF interior to FP16.
+
+    Pretranspose is mandatory whenever the FF interior dtype is FP16, for
+    two independent reasons (either alone is enough to motivate the
+    auto-pair; both apply here):
+
+    1. **FP32 mixed-dtype promotion.**  Without a dtype-baked
+       pretransposed cache, project_in's `nn.Linear` holds the weight at
+       checkpoint BF16; sending an FP16 activation through it promotes
+       the matmul to FP32 (MLX's mixed-dtype fallback) — slower than
+       either pure path.
+    2. **FP16 kernel-selection cliff.**  Even when both operands are
+       pure FP16, the naive `x @ w.T` layout at project_out's K=16384
+       falls off a kernel-selection cliff: FP16 naive runs at 4.95
+       TFlops/s vs 9.51 TFlops/s pretransposed (47.9% pretranspose win
+       in FP16, compared to BF16's 27.7% at the same shape).  FP16
+       requires pretranspose *more* than BF16 does, not less.  Measured
+       at `scripts/bench_pretranspose_dtype.py`.
+
+    So the FP16 speedup only materializes when BOTH project_in and
+    project_out have pretransposed (and dtype-cast) weight caches.
+    project_out:pretranspose is the production default already; this
+    helper ensures project_in is added too when needed.
+    """
+    if not video_ff_dtype or video_ff_dtype == "bfloat16":
+        return layout_specs
+    have = {target for target, _layout in layout_specs}
+    additions = []
+    for tgt in ("project_in", "project_out"):
+        if tgt not in have:
+            additions.append((tgt, "pretranspose"))
+    if additions:
+        return tuple(additions) + tuple(layout_specs)
+    return layout_specs
+
+
 def parse_video_ff_layout_specs(value: str | None) -> tuple[tuple[str, str], ...]:
     """Parse comma-separated target:layout video FF layout specs."""
     if value is None or value.strip() == "":
@@ -1936,6 +1976,7 @@ def load_transformer(
     transformer_block_resident_blocks: int = 0,
     transformer_block_compile: bool = False,
     transformer_block_compile_group_size: int = 0,
+    video_ff_dtype: mx.Dtype | None = None,
 ) -> LTXModel:
     """Load transformer with weights.
 
@@ -1989,6 +2030,7 @@ def load_transformer(
                 video_ff_quantize_group_size=video_ff_quantize_group_size,
                 video_ff_quantize_bits=video_ff_quantize_bits,
                 resident_blocks=transformer_block_resident_blocks,
+                video_ff_dtype=video_ff_dtype,
             )
             model.transformer_block_compile = transformer_block_compile
             model.transformer_block_compile_group_size = transformer_block_compile_group_size
@@ -2016,6 +2058,7 @@ def load_transformer(
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
                 transformer_cache_quantize=transformer_cache_quantize,
+                video_ff_dtype=video_ff_dtype,
             )
             layouts_loaded_from_cache = True
         else:
@@ -2121,6 +2164,7 @@ def load_av_transformer(
     transformer_block_resident_blocks: int = 0,
     transformer_block_compile: bool = False,
     transformer_block_compile_group_size: int = 0,
+    video_ff_dtype: mx.Dtype | None = None,
 ) -> LTXAVModel:
     """Load AudioVideo transformer with weights.
 
@@ -2183,6 +2227,7 @@ def load_av_transformer(
                 video_ff_quantize_group_size=video_ff_quantize_group_size,
                 video_ff_quantize_bits=video_ff_quantize_bits,
                 resident_blocks=transformer_block_resident_blocks,
+                video_ff_dtype=video_ff_dtype,
             )
             model.transformer_block_compile = transformer_block_compile
             model.transformer_block_compile_group_size = transformer_block_compile_group_size
@@ -2215,6 +2260,7 @@ def load_av_transformer(
                 audio_attn_layout_layers=audio_attn_layout_layers,
                 adaln_pretranspose=adaln_pretranspose,
                 transformer_cache_quantize=transformer_cache_quantize,
+                video_ff_dtype=video_ff_dtype,
             )
             layouts_loaded_from_cache = True
         else:
@@ -2480,6 +2526,7 @@ def generate_video(
     early_layers_only: bool = False,
     enhance_prompt_flag: bool = False,
     cross_attn_scale: float = 1.0,
+    video_ff_dtype: str | None = None,
     distilled_lora: str = None,
     distilled_lora_scale: float = 1.0,
     stg_scale: float = 0.0,
@@ -3247,7 +3294,10 @@ def generate_video(
                 caption_channels=None if v2 else 3840,
                 cross_attention_adaln=v2,
                 apply_gated_attention=v2,
+                video_ff_dtype=(mx.float16 if video_ff_dtype == "float16" else None),
             )
+            if video_ff_dtype is not None:
+                print(f"  Video FF dtype baked into cache: {video_ff_dtype}")
         else:
             model = None
             print("  Skipping model load (placeholder mode)")
@@ -3275,7 +3325,10 @@ def generate_video(
                 transformer_block_resident_blocks=transformer_block_resident_blocks,
                 transformer_block_compile=transformer_block_compile,
                 transformer_block_compile_group_size=transformer_block_compile_group_size,
+                video_ff_dtype=(mx.float16 if video_ff_dtype == "float16" else None),
             )
+            if video_ff_dtype is not None:
+                print(f"  Video FF dtype baked into cache: {video_ff_dtype}")
 
             # Apply cross-attention scaling if specified (improves text conditioning)
             if cross_attn_scale != 1.0:
@@ -5034,6 +5087,24 @@ def main():
              "the GPU is already fully utilized, so this typically doesn't help."
     )
     parser.add_argument(
+        "--video-ff-dtype",
+        type=str,
+        default=None,
+        choices=["bfloat16", "float16"],
+        help=(
+            "Experimental: cast the video FF interior (project_in / GELU / "
+            "project_out) to this dtype.  Residual stream and attention stay "
+            "at the loaded checkpoint dtype.  FP16 is ~14-17%% faster than "
+            "BF16 on the LTX FF matmul shapes per local microbench; the trade "
+            "is FP16's smaller exponent range (max ~65504) vs BF16's "
+            "FP32-equivalent range.  Inputs to the FF are AdaLN-normalized so "
+            "magnitude overflow is unlikely; output goes straight to the "
+            "BF16 residual stream so FP16 drift doesn't propagate beyond one "
+            "block.  Default (omit flag): same as the loaded checkpoint dtype "
+            "(BF16 for LTX 2.3 distilled).  Validate with --save-latents A/B."
+        ),
+    )
+    parser.add_argument(
         "--profile-transformer-once",
         action="store_true",
         help="Diagnostic: profile the first denoise transformer call with forced eval checkpoints. "
@@ -5455,7 +5526,9 @@ def main():
         video_ff_quantize_group_size=args.video_ff_quantize_group_size,
         video_ff_quantize_bits=args.video_ff_quantize_bits,
         video_ff_quantize_layers=args.video_ff_quantize_layers,
-        video_ff_layout_specs=args.video_ff_layout,
+        video_ff_layout_specs=_ensure_ff_layout_for_dtype(
+            args.video_ff_layout, args.video_ff_dtype
+        ),
         video_ff_layout_layers=args.video_ff_layout_layers,
         video_attn_layout_specs=args.video_attn_layout,
         video_attn_layout_layers=args.video_attn_layout_layers,
@@ -5482,6 +5555,7 @@ def main():
         early_layers_only=args.early_layers_only,
         enhance_prompt_flag=args.enhance_prompt,
         cross_attn_scale=args.cross_attn_scale,
+        video_ff_dtype=args.video_ff_dtype,
         # Two-stage pipeline parameters
         steps_stage1=args.steps_stage1,
         steps_stage2=args.steps_stage2,

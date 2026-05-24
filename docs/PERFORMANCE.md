@@ -178,6 +178,8 @@ from the default stack when running A/Bs.
 | Defer AV text encoder load until after Gemma | default | low | neutral; -6 GB prompt-encode peak | Trim Gemma hidden states, materialize, free Gemma, then load AV connector. |
 | `--vae-decoder native` | default | medium | none for denoise | Lower peak memory than `--vae-decoder legacy`.  See [Decode-time notes](#decode-time-notes-not-denoise-speed). |
 | Terminal redraw throttling | default | none | -5.9 % bakery total on macOS | `DenoiseProgress` no longer spawns a heartbeat thread; `tqdm` uses `ascii=True + mininterval=1-2s`.  Bakery 31m 28s → 29m 38s.  Stage 2 alone -8 %.  See [Terminal redraw throttling](#terminal-redraw-throttling) for the full story. |
+| **--- compute-precision opt-ins ---** | | | | |
+| `--video-ff-dtype float16` | opt-in | none | **-4.6 % bakery 384x640x20s (8m 00s → 7m 38s)** | Cache-baked: cast project_in and project_out weights to FP16 at cache-build time, run the FF interior in FP16 (silu+geglu+matmuls), cast the residual back to BF16 at FF exit.  Attention/RMSNorm/RoPE/SDPA stay BF16.  ~15 % per-matmul FP16 win at production FF shapes (BF16/FP16 ratio 1.17–1.18×) translates to 4.6 % wall savings because FF is ~22 % of total compute and the FF-block win includes boundary casts.  Cosine sim ~0.71 vs BF16 — perceptually close, not bit-equivalent.  **Auto-pairs** with `project_in:pretranspose,project_out:pretranspose` (enforced in `scripts/generate.py:_ensure_ff_layout_for_dtype`).  FP16 *requires* pretranspose: at project_out (K=16384) the FP16 naive kernel falls off a deeper kernel-selection cliff than BF16 (4.95 vs 5.86 TFlops/s, then both recover to >8 TFlops/s with pretranspose).  Disabling pretranspose with FP16 on would be -18 % regression vs BF16 baseline.  Tried `--video-attn-dtype float16` too: net regression (+0.6 % wall) because the SDPA boundary's projection casts outweigh the matmul win; flag dropped.  See "FF FP16 + FP16 cliff" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
 | **--- env-toggle opt-ins ---** | | | | |
 | `LTX_VELOCITY_MODE=1` | opt-in | low | neutral | Inline velocity-form Euler update in `_denoise_loop_simple_av`.  Same math.  Kept env-gated for future MLX versions. |
 | `LTX_ROPE_PRECOMPUTE=1` | opt-in | none | neutral | mlx-video pattern: per-stage RoPE precompute via `Modality.positional_embeddings`.  MLX's lazy graph already dedupes per-step RoPE calls. |
@@ -229,6 +231,60 @@ from the default stack when running A/Bs.
 ## Recent Sessions
 
 Reverse chronological.  Most recent at top.
+
+### 2026-05-23: FF compute in FP16 (4.6 % bakery win, attn FP16 dropped)
+
+Added `--video-ff-dtype float16` as an opt-in.  Cache-baked: the transformer
+cache safetensors hold project_in/project_out pretransposed weights cast to
+FP16; the residual stream stays BF16, FF entry/exit casts handle the
+boundary.  Cosine sim ~0.71 vs BF16 baseline — perceptually close but not
+bit-equivalent.
+
+**Bakery 384x640x20s timings** (distilled two-stage, idle machine, fast-mode):
+
+| variant                         | wall      | Δ vs BF16   |
+| ------------------------------- | --------- | ----------- |
+| BF16 baseline                   | 7m 59.6s  | (reference) |
+| `--video-ff-dtype float16`      | **7m 37.6s** | **-22s (-4.6 %)** |
+| `--video-ff-dtype float16 --video-attn-dtype float16` | 7m 56.7s  | -3s |
+| `--video-attn-dtype float16` (attn-only) | 8m 17.0s  | **+18s** |
+
+Attention FP16 is a NET REGRESSION even though the matmul is faster: the
+4 BF16↔FP16 boundary casts per attention block (~528 attention calls per
+generation) cost more than the ~10 ms/projection FP16 win, plus
+`mx.fast.scaled_dot_product_attention` doesn't accept FP16 inputs cleanly.
+The `--video-attn-dtype` flag was tried and removed.
+
+**Why only 4.6 % when microbench shows FP16 matmul is 15 % faster:**
+
+Microbench at production shapes (M=14640, K=4096, N=16384 / 16384→4096):
+
+| projection                       | BF16 pretrans | FP16 pretrans | FP16 saves |
+| -------------------------------- | ------------- | ------------- | ---------- |
+| FF.project_in   (K=4096 N=16384) | 7.99 TFlops/s | 9.38 TFlops/s | +14.8 %    |
+| FF.project_out  (K=16384 N=4096) | 8.10 TFlops/s | 9.51 TFlops/s | +14.9 %    |
+| attn.QKV/O      (K=N=4096)       | 8.09 TFlops/s | 9.53 TFlops/s | +15.0 %    |
+
+Wall savings ≈ (per-matmul FP16 win) × (FF compute share).  FF is ~22 % of
+stage-2 compute (attention is ~3.6× more compute per layer at T=14640), so
+~15 % × 22 % ≈ 3.3 % expected; observed denoise savings ~12 s out of
+~6m 27s = 3.1 %.  Microbench prediction lines up to within 1 s.  The
+remaining ~10 s of the headline 22 s "total wall" delta is noise in
+pre/post phases (audio decode, save, encode) that aren't dtype-sensitive.
+
+**FP16 has a worse kernel-selection cliff than BF16.**  At project_out's
+K=16384 in the naive layout, BF16 falls to 5.86 TFlops/s (the historical
+2026-05-17 cliff this codebase already mitigates via pretranspose).  FP16
+naive falls *further* to 4.95 TFlops/s — i.e. FP16 naive is 18 % slower
+than BF16 naive on this shape.  Both layouts recover to >8 TFlops/s with
+pretranspose.  The auto-pair helper `_ensure_ff_layout_for_dtype` in
+`scripts/generate.py` enforces `project_in:pretranspose,project_out:pretranspose`
+whenever `--video-ff-dtype float16` is set, so a user can't accidentally
+trip the cliff.  Tested via
+`scripts/bench_pretranspose_dtype.py`.
+
+Full bench logs and additional detail in `PERFORMANCE_NOTES.md` "FF FP16
++ FP16 kernel cliff" entry.
 
 ### 2026-05-17 Follow-up: probe + non-sync A/B + sub-phase signposts (gap closed)
 

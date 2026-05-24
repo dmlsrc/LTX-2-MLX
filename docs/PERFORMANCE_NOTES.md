@@ -27,9 +27,23 @@ and failed experiments worth remembering.  This is the working notebook;
 
 ## Open
 
-_(empty — investigation converged 2026-05-18; no actionable hypotheses
-remain.  See Promoted section below for what landed in
-`PERFORMANCE.md`, and Archive section for what was tested and dropped.)_
+### 2026-05-23: Audio FF FP16 -- candidate, gated on microbench `[OPEN]`
+
+Video FF FP16 landed (see Promoted entry below).  User flagged that the
+historical 2026-05-15 audio-pretranspose result showed a slight perf boost
+that was "larger than the math should predict" — possibly indicating an
+audio-side kernel-selection sensitivity similar to the video project_out
+cliff.  Open question: does FP16 give audio FF a measurable bakery-scale
+win, or is audio too small to amortize the dtype change?
+
+Bench script: `scripts/bench_pretranspose_dtype.py`
+adds three audio shape rows (audio.FF.project_in K=2048 N=8192,
+audio.FF.project_out K=8192 N=2048, audio.attn K=N=2048) at T=502 bakery
+audio length.  Pending user run.
+
+If FP16 saves >5 % per audio matmul AND audio FF wall is non-trivial
+(audio has fewer / smaller calls than video, so per-call win may not move
+the needle), implement `--audio-ff-dtype` mirroring `--video-ff-dtype`.
 
 ---
 
@@ -37,6 +51,59 @@ remain.  See Promoted section below for what landed in
 
 (Entries moved to `PERFORMANCE.md` — kept here as one-line stubs for
 cross-reference.)
+
+### 2026-05-23: FF FP16 + FP16 kernel cliff `[PROMOTED]`
+
+Implemented `--video-ff-dtype float16` as a cache-baked opt-in.  Lands in
+`PERFORMANCE.md` matrix row and "2026-05-23: FF compute in FP16" Recent
+Sessions entry.  Headline: **-4.6 % bakery 384x640x20s wall** (8m 00s →
+7m 38s) at cosine sim ~0.71 vs BF16.
+
+**Key finding worth remembering: FP16 has a worse kernel-selection cliff
+than BF16.**  Per
+`scripts/bench_pretranspose_dtype.py`
+on M1 Max with current MLX:
+
+| shape (M=14640)                | BF16 naive | BF16 pretrans | FP16 naive | FP16 pretrans |
+| ------------------------------ | ---------- | ------------- | ---------- | ------------- |
+| FF.project_in   (K=4096 N=16384) | 8.07       | 7.99          | 9.26       | 9.38          |
+| FF.project_out  (K=16384 N=4096) | **5.86**   | 8.10          | **4.95**   | 9.51          |
+| attn  (K=N=4096)               | 8.07       | 8.09          | 9.24       | 9.53          |
+| K=4096 N=10240 (diagnostic)    | 8.06       | 8.07          | 9.24       | 9.50          |
+| K=10240 N=4096 (diagnostic)    | 7.92       | 8.02          | 8.14       | 9.50          |
+
+Three things to note:
+
+1. **Project_out cliff is real and shape-sensitive.**  Triggered when the
+   inner-dim (K) of the strided weight view is "large" — K=16384 hits
+   hard, K=10240 barely, K=4096 no.  Threshold lives somewhere between
+   10240 and 16384.
+2. **FP16's cliff is *deeper* than BF16's** (4.95 vs 5.86 TFlops/s).  At
+   project_out's K=16384 in naive layout, FP16 runs 18 % SLOWER than
+   BF16 — exactly the opposite of expected.  So FP16 *requires*
+   pretranspose, not just benefits from it.
+3. **`_ensure_ff_layout_for_dtype` in `scripts/generate.py` enforces the
+   pair.**  When `--video-ff-dtype float16` is set, both
+   project_in:pretranspose and project_out:pretranspose are added
+   automatically regardless of what the user passes for
+   `--video-ff-layout`.  Cliff trap closed.
+
+**Attention FP16 was tried and dropped.**  `--video-attn-dtype float16`
+gave +18 s regression on bakery despite matmuls being faster.  Two
+contributing factors: (a) 4 BF16↔FP16 boundary casts per attention block
+(~500 attention calls / generation) dominate the per-matmul win;
+(b) `mx.fast.scaled_dot_product_attention` doesn't accept FP16 inputs
+cleanly, forcing additional cast at the SDPA boundary.  Per-projection
+matmul savings exist (1.18× per the bench) but they don't compose into
+a wall-time win once the SDPA boundary tax is paid.  Flag removed in
+2026-05-23 cleanup.
+
+**The microbench prediction matches production within 1 second.**
+Per-matmul FP16 win ~15 %, FF share of stage-2 compute ~22 % →
+3.3 % expected wall savings.  Observed denoise savings ~12 s on
+~6m 27s total denoise = 3.1 %.  The remaining ~10 s of the headline
+22 s "total wall" delta is noise in pre/post phases (audio decode,
+save, encode) that aren't dtype-sensitive.
 
 ### 2026-05-17: Microbench results for FF / attention candidate optimizations `[PROMOTED 2026-05-18]`
 

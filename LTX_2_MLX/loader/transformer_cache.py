@@ -8,7 +8,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -297,6 +297,53 @@ def _canonical_quant_specs(specs: Tuple[Tuple[str, str], ...]) -> list[dict[str,
     return [{"target": target, "mode": mode} for target, mode in specs]
 
 
+_VIDEO_FF_KEY_PATTERNS = ("ff.project_in.proj", "ff.project_out")
+
+
+def _video_cache_dtype_for_key(
+    mlx_key: str,
+    *,
+    video_ff_dtype: Optional[mx.Dtype],
+) -> Optional[mx.Dtype]:
+    """Return the target cache dtype for a video FF projection key.
+
+    Casts both `.weight` and `.bias` keys belonging to the targeted FF
+    projections.  Attention projections, audio-side modules, RMSNorm,
+    AdaLN, etc. return None (kept at checkpoint dtype).  Attention dtype
+    was tried (see PERFORMANCE_NOTES.md) and dropped — at the SDPA
+    boundary the in/out cast overhead outweighs the FP16 matmul win, and
+    attn projections do not hit the kernel-selection cliff that FF
+    project_out does at K=16384.
+    """
+    if video_ff_dtype is None:
+        return None
+    # Strip the trailing suffix so `.weight` and `.bias` both match.
+    base = mlx_key.rsplit(".", 1)[0]
+    if not base.startswith("transformer_blocks."):
+        return None
+    parts = base.split(".", 2)
+    if len(parts) < 3:
+        return None
+    suffix = parts[2]  # e.g. "ff.project_in.proj"
+    for pat in _VIDEO_FF_KEY_PATTERNS:
+        if suffix == pat:
+            return video_ff_dtype
+    return None
+
+
+def _dtype_to_payload_name(dtype: Optional[mx.Dtype]) -> Optional[str]:
+    """Map an MLX dtype to a JSON-friendly name for the payload digest."""
+    if dtype is None:
+        return None
+    if dtype == mx.bfloat16:
+        return "bfloat16"
+    if dtype == mx.float16:
+        return "float16"
+    if dtype == mx.float32:
+        return "float32"
+    return str(dtype)
+
+
 def _cache_payload(
     weights_path: str,
     *,
@@ -315,6 +362,7 @@ def _cache_payload(
     video_ff_quantize_layers: Tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
+    video_ff_dtype: Optional[mx.Dtype] = None,
 ) -> dict[str, Any]:
     if transformer_cache_quantize not in TRANSFORMER_CACHE_QUANTIZE_MODES:
         raise ValueError(f"Unsupported transformer cache quantization mode: {transformer_cache_quantize}")
@@ -346,6 +394,10 @@ def _cache_payload(
             "video_ff_quantize_group_size": video_ff_quantize_group_size,
             "video_ff_quantize_bits": video_ff_quantize_bits,
         })
+    # Only include dtype keys when non-default — keeps existing BF16 caches
+    # valid (their hash doesn't include these keys).
+    if video_ff_dtype is not None and video_ff_dtype != mx.bfloat16:
+        payload["video_ff_dtype"] = _dtype_to_payload_name(video_ff_dtype)
     return payload
 
 
@@ -394,6 +446,7 @@ def transformer_cache_paths(
     video_ff_quantize_layers: Tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
+    video_ff_dtype: Optional[mx.Dtype] = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     """Resolve cache artifact paths and expected metadata payload."""
     payload = _cache_payload(
@@ -413,6 +466,7 @@ def transformer_cache_paths(
         video_ff_quantize_layers=video_ff_quantize_layers,
         video_ff_quantize_group_size=video_ff_quantize_group_size,
         video_ff_quantize_bits=video_ff_quantize_bits,
+        video_ff_dtype=video_ff_dtype,
     )
     root = Path(cache_root).expanduser() if cache_root else default_transformer_cache_root()
     cache_dir = root / f"{_safe_stem(weights_path)}-{_payload_digest(payload)}"
@@ -750,6 +804,7 @@ def build_transformer_cache(
     video_ff_quantize_layers: Tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
+    video_ff_dtype: Optional[mx.Dtype] = None,
 ) -> tuple[int, int, int]:
     """Build a converted transformer-only cache from a stock checkpoint."""
     cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -817,10 +872,25 @@ def build_transformer_cache(
             audio_attn_layout_layers=audio_attn_layout_layers,
             adaln_pretranspose=adaln_pretranspose,
         )
+        # When `--video-ff-dtype` is set, cast the cached tensor BEFORE
+        # writing so the on-disk safetensors holds the target dtype.
+        # Subsequent runs load the pretransposed FP16 weight directly —
+        # no BF16 copy ever lives in RAM.  Applies to both the
+        # pretransposed `.weight_t` tensors and to the plain `.bias`
+        # tensors that flow through the fall-through branch.
+        target_dtype = _video_cache_dtype_for_key(
+            mlx_key,
+            video_ff_dtype=video_ff_dtype,
+        )
         if layout_key is not None:
-            cache_weights[f"{LAYOUT_KEY_PREFIX}{layout_key}"] = mx.contiguous(value.T)
+            stored = mx.contiguous(value.T)
+            if target_dtype is not None and stored.dtype != target_dtype:
+                stored = stored.astype(target_dtype)
+            cache_weights[f"{LAYOUT_KEY_PREFIX}{layout_key}"] = stored
             layout_count += 1
         else:
+            if target_dtype is not None and value.dtype != target_dtype:
+                value = value.astype(target_dtype)
             cache_weights[mlx_key] = value
         loaded_count += 1
 
@@ -1266,6 +1336,7 @@ def ensure_transformer_cache(
     video_ff_quantize_layers: Tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
+    video_ff_dtype: Optional[mx.Dtype] = None,
 ) -> TransformerCacheResult:
     """Build a matching transformer cache artifact if needed."""
     if cache_mode not in {"auto", "rebuild"}:
@@ -1289,6 +1360,7 @@ def ensure_transformer_cache(
         video_ff_quantize_layers=video_ff_quantize_layers,
         video_ff_quantize_group_size=video_ff_quantize_group_size,
         video_ff_quantize_bits=video_ff_quantize_bits,
+        video_ff_dtype=video_ff_dtype,
     )
     rebuilt = False
     cache_valid = cache_file.exists() and _metadata_matches(metadata_file, payload)
@@ -1314,6 +1386,7 @@ def ensure_transformer_cache(
             video_ff_quantize_layers=video_ff_quantize_layers,
             video_ff_quantize_group_size=video_ff_quantize_group_size,
             video_ff_quantize_bits=video_ff_quantize_bits,
+            video_ff_dtype=video_ff_dtype,
         )
         rebuilt = True
     else:
@@ -1344,6 +1417,7 @@ def load_transformer_weights_cached(
     audio_attn_layout_layers: Tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
+    video_ff_dtype: Optional[mx.Dtype] = None,
 ) -> TransformerCacheResult:
     """Build if needed, then load a transformer cache into ``model``."""
     result = ensure_transformer_cache(
@@ -1361,6 +1435,7 @@ def load_transformer_weights_cached(
         audio_attn_layout_layers=audio_attn_layout_layers,
         adaln_pretranspose=adaln_pretranspose,
         transformer_cache_quantize=transformer_cache_quantize,
+        video_ff_dtype=video_ff_dtype,
     )
 
     loaded_count, layout_count, quant_count = load_transformer_cache(
@@ -1403,6 +1478,7 @@ def load_transformer_weights_cached_streaming(
     video_ff_quantize_layers: Tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
+    video_ff_dtype: Optional[mx.Dtype] = None,
 ) -> TransformerCacheResult:
     """Load non-block weights and stream transformer blocks from the cache."""
     if resident_blocks <= 0:
@@ -1427,6 +1503,7 @@ def load_transformer_weights_cached_streaming(
         video_ff_quantize_layers=video_ff_quantize_layers,
         video_ff_quantize_group_size=video_ff_quantize_group_size,
         video_ff_quantize_bits=video_ff_quantize_bits,
+        video_ff_dtype=video_ff_dtype,
     )
 
     if resident_blocks > len(model.transformer_blocks):
