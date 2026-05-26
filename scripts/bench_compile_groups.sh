@@ -46,7 +46,7 @@
 # Live tqdm output is teed to stdout AND the log so you can watch progress.
 #
 # Usage:
-#   export LTX_REPO=/Users/Shared/huggingface/projects/LTX-2-MLX
+#   export LTX_REPO=<path-to-LTX-2-MLX>     # your local checkout
 #   bash scripts/bench_compile_groups.sh                          # off,4 ≈ 12 min
 #   COMPILE_GROUPS=off,1,2,3,4 bash scripts/bench_compile_groups.sh       # full sweep ≈ 30 min
 #   STEPS=3 COMPILE_GROUPS=off,2,4 bash scripts/bench_compile_groups.sh   # mid set, tighter ≈ 25 min
