@@ -4,8 +4,77 @@ These kernels combine multiple operations into single GPU passes,
 reducing memory bandwidth and kernel launch overhead.
 """
 
+import atexit
+import os
+
 import mlx.core as mx
 import numpy as np
+
+
+# ── Dispatch probe ─────────────────────────────────────────────────────────
+#
+# When LTX_FUSED_PROBE=1 is set, every adaln_norm_fused / gated_add_fused
+# call increments a counter for either the kernel path or the MLX fallback
+# path.  At process exit the counters are printed so you can confirm the
+# fused kernels actually fired (and how many times) during a generate.py
+# run vs silently routing through the fallback.
+#
+# Zero overhead when LTX_FUSED_PROBE is unset (single env-var check at
+# module load → no-op increments).
+
+_PROBE_ENABLED = bool(os.environ.get("LTX_FUSED_PROBE"))
+_PROBE_COUNTS: dict[str, int] = {
+    "adaln_kernel": 0,
+    "adaln_fallback": 0,
+    "gated_add_kernel": 0,
+    "gated_add_fallback": 0,
+}
+
+
+def _probe(name: str) -> None:
+    if _PROBE_ENABLED:
+        _PROBE_COUNTS[name] += 1
+
+
+def get_dispatch_counts() -> dict[str, int]:
+    """Return a copy of the dispatch counters (only nonzero when
+    ``LTX_FUSED_PROBE=1`` was set when this module was first imported)."""
+    return dict(_PROBE_COUNTS)
+
+
+def _print_dispatch_summary() -> None:
+    """atexit hook: print the dispatch counter summary if any kernel was
+    invoked.  No-op when the probe wasn't enabled or no calls happened."""
+    if not _PROBE_ENABLED:
+        return
+    total = sum(_PROBE_COUNTS.values())
+    if total == 0:
+        return
+    print("\n[LTX_FUSED_PROBE] fused-op dispatch summary:")
+    for name in (
+        "adaln_kernel",
+        "adaln_fallback",
+        "gated_add_kernel",
+        "gated_add_fallback",
+    ):
+        n = _PROBE_COUNTS[name]
+        pct = (100.0 * n / total) if total else 0.0
+        print(f"  {name:<22} {n:>8}  ({pct:5.1f}%)")
+    # Compute per-op kernel-rate.
+    adaln_total = _PROBE_COUNTS["adaln_kernel"] + _PROBE_COUNTS["adaln_fallback"]
+    gated_total = (
+        _PROBE_COUNTS["gated_add_kernel"] + _PROBE_COUNTS["gated_add_fallback"]
+    )
+    if adaln_total:
+        rate = 100.0 * _PROBE_COUNTS["adaln_kernel"] / adaln_total
+        print(f"  adaln kernel-hit rate:   {rate:5.1f}% ({adaln_total} total)")
+    if gated_total:
+        rate = 100.0 * _PROBE_COUNTS["gated_add_kernel"] / gated_total
+        print(f"  gated-add kernel-hit rate: {rate:5.1f}% ({gated_total} total)")
+
+
+if _PROBE_ENABLED:
+    atexit.register(_print_dispatch_summary)
 
 # Fused SiLU-Multiply kernel: silu(a) * b
 # Used in SwiGLU and gated MLPs.
@@ -412,8 +481,10 @@ def adaln_norm_fused(
         ``(rms_norm(x) * (1 + scale) + shift).astype(x.dtype)``.
     """
     if not _adaln_t2v_broadcast_compatible(x, scale, shift):
+        _probe("adaln_fallback")
         return _adaln_norm_mlx(x, scale, shift, eps)
 
+    _probe("adaln_kernel")
     B, T, C = x.shape
     # Kernel expects (rows, C) layout; flatten B*T together (works for B=1).
     x_2d = mx.contiguous(x.reshape(B * T, C))
@@ -538,8 +609,10 @@ def gated_add_fused(
         ``(residual + branch * gate).astype(residual.dtype)``.
     """
     if not _gated_add_t2v_broadcast_compatible(residual, branch, gate):
+        _probe("gated_add_fallback")
         return _gated_add_mlx(residual, branch, gate)
 
+    _probe("gated_add_kernel")
     B, T, C = residual.shape
     branch_2d = mx.contiguous(branch.reshape(B * T, C))
     residual_2d = mx.contiguous(residual.reshape(B * T, C))

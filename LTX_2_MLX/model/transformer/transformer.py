@@ -73,6 +73,9 @@ else:
 #
 #   LTX_FUSED_ADALN=1      → use adaln_norm_fused kernel
 #   LTX_FUSED_GATED_ADD=1  → use gated_add_fused kernel
+#   LTX_FUSED_PROBE=1      → count kernel vs fallback dispatches per op
+#                            and print a summary at process exit (see
+#                            ``LTX_2_MLX.kernels.fused_ops.get_dispatch_counts``)
 #
 # Both can be set independently.  Measured on M1 Max via cache-protocol
 # microbench at T=14640, C=4096 fp32 scale/shift:
