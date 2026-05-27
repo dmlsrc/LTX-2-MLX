@@ -12,6 +12,8 @@ from .attention import Attention, rms_norm
 from .feed_forward import FeedForward
 from .rope import LTXRopeType
 from ...components.perturbations import BatchedPerturbationConfig, PerturbationType
+from ...kernels import adaln_norm_fused as _adaln_norm_fused_kernel
+from ...kernels import gated_add_fused as _gated_add_fused_kernel
 from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_barrier
 
 
@@ -51,11 +53,57 @@ def _residual_gate_inline(
 # the AdaLN and residual-gate fused kernels.  Used to A/B whether our compile
 # boundaries are preventing MLX from doing cross-operation fusion at large T.
 if os.environ.get("LTX_DISABLE_COMPILED_HELPERS"):
-    _compiled_adaln_forward = _adaln_inline
-    _compiled_residual_gate = _residual_gate_inline
+    _adaln_via_compile = _adaln_inline
+    _residual_gate_via_compile = _residual_gate_inline
 else:
-    _compiled_adaln_forward = mx.compile(_adaln_inline)
-    _compiled_residual_gate = mx.compile(_residual_gate_inline)
+    _adaln_via_compile = mx.compile(_adaln_inline)
+    _residual_gate_via_compile = mx.compile(_residual_gate_inline)
+
+
+# Fused custom-kernel wrappers for AdaLN and residual gate.  Each kernel
+# self-validates its shape/dtype gate (production T2V broadcast: x bf16
+# (B, T, 4096) + scale/shift/gate fp32 with all-singleton leading dims)
+# and falls back to the MLX expression otherwise — so they're safe to
+# enable globally on the perf/ab-tests branch; non-matching shapes (audio
+# C=2048, I2V per-token (B, T, C) scale/shift) route through the stock
+# MLX path automatically.
+#
+# Env-var gates default OFF for the safe-by-default story; set them to
+# turn the fused kernels on for an A/B against ``main``.
+#
+#   LTX_FUSED_ADALN=1      → use adaln_norm_fused kernel
+#   LTX_FUSED_GATED_ADD=1  → use gated_add_fused kernel
+#
+# Both can be set independently.  Measured on M1 Max via cache-protocol
+# microbench at T=14640, C=4096 fp32 scale/shift:
+#   adaln_norm_fused:    ~2.0-2.1x speedup over mx.compile baseline
+#   gated_add_fused:     ~1.26-1.30x speedup over mx.compile baseline
+_FUSED_ADALN_ENABLED = bool(os.environ.get("LTX_FUSED_ADALN"))
+_FUSED_GATED_ADD_ENABLED = bool(os.environ.get("LTX_FUSED_GATED_ADD"))
+
+
+def _compiled_adaln_forward(
+    x: mx.array, scale: mx.array, shift: mx.array, eps: float
+) -> mx.array:
+    """Dispatch AdaLN to the fused Metal kernel when ``LTX_FUSED_ADALN=1``
+    and the shape/dtype gate matches; otherwise the @mx.compile'd MLX path.
+
+    Name kept as ``_compiled_adaln_forward`` so all call sites stay unchanged
+    when the env var flips."""
+    if _FUSED_ADALN_ENABLED:
+        return _adaln_norm_fused_kernel(x, scale, shift, eps)
+    return _adaln_via_compile(x, scale, shift, eps)
+
+
+def _compiled_residual_gate(
+    x: mx.array, residual: mx.array, gate: mx.array
+) -> mx.array:
+    """Dispatch gated residual add to the fused Metal kernel when
+    ``LTX_FUSED_GATED_ADD=1`` and the shape/dtype gate matches; otherwise
+    the @mx.compile'd MLX path."""
+    if _FUSED_GATED_ADD_ENABLED:
+        return _gated_add_fused_kernel(x, residual, gate)
+    return _residual_gate_via_compile(x, residual, gate)
 
 
 @dataclass

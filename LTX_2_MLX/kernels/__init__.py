@@ -1,5 +1,17 @@
 """Custom Metal kernels for LTX-2 MLX optimizations."""
 
-from .fused_ops import silu_mul, gelu_mul, interleaved_rope
+from .fused_ops import (
+    adaln_norm_fused,
+    gated_add_fused,
+    gelu_mul,
+    interleaved_rope,
+    silu_mul,
+)
 
-__all__ = ["silu_mul", "gelu_mul", "interleaved_rope"]
+__all__ = [
+    "adaln_norm_fused",
+    "gated_add_fused",
+    "gelu_mul",
+    "interleaved_rope",
+    "silu_mul",
+]
