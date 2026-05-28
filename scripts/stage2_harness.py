@@ -251,6 +251,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save stage-2 latent sidecar and run log.",
     )
+    parser.add_argument(
+        "--bench-mode",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "A/B bench mode: print per-step wall time to stderr and exit "
+            "immediately after stage-2 step N completes (skipping VAE decode, "
+            "audio decode, and output save).  N=2 is the standard recipe: "
+            "step 1 warms MLX caches + kernels, step 2 is the measured step. "
+            "0 = disabled (default), run full pipeline."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -565,6 +578,19 @@ def main() -> None:
     timings.mark("pipeline object setup")
 
     print("\n[5/5] Running stage 2 from saved latents...")
+
+    # Bench-mode state: track per-step wall time + trigger early exit.
+    # ``_BenchModeStop`` is caught by the bench-mode wrapper just below the
+    # generate_distilled_stage2_from_latents call so we get a clean exit
+    # (with timing summary) instead of a generic traceback.
+    class _BenchModeStop(Exception):
+        pass
+
+    bench_mode_step = max(0, int(args.bench_mode))
+    bench_mode_active = bench_mode_step > 0
+    bench_step_times: list[float] = []
+    bench_step_t_prev: list[float] = [0.0]
+
     with StackedPhaseBars() as denoise_bars:
         stage_bar = denoise_bars.add(
             total=len(gen.STAGE_2_DISTILLED_SIGMA_VALUES) - 1,
@@ -575,22 +601,68 @@ def main() -> None:
 
         def stage_callback(stage_name: str, step: int, total: int) -> None:
             stage_bar.set_n(step)
+            if not bench_mode_active or stage_name != "stage_2":
+                return
+            now = time.perf_counter()
+            if step == 0:
+                # Just before step 1 of stage 2 starts.
+                bench_step_t_prev[0] = now
+                print(
+                    f"[bench-mode] stage_2 begin (will exit after step {bench_mode_step})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            elapsed = now - bench_step_t_prev[0]
+            bench_step_t_prev[0] = now
+            bench_step_times.append(elapsed)
+            label = "WARMUP" if step == 1 else ("MEASURE" if step == bench_mode_step else "extra")
+            print(
+                f"[bench-mode] stage_2 step {step}/{total} done: "
+                f"{elapsed:.3f}s  ({label})",
+                file=sys.stderr,
+                flush=True,
+            )
+            if step >= bench_mode_step:
+                raise _BenchModeStop()
 
         def progress_message(message: str) -> None:
             denoise_bars.write(message, position="below")
 
-        video, audio_waveform = av_pipeline.generate_distilled_stage2_from_latents(
-            stage_1_video_latent=stage1_video,
-            stage_1_audio_latent=stage1_audio,
-            positive_encoding=text_encoding,
-            positive_audio_encoding=text_audio_encoding,
-            config=config,
-            spatial_upscaler=spatial_upscaler,
-            stage_callback=stage_callback,
-            progress_message=progress_message,
-            latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
-            burn_stage1_rng=not args.independent_stage2_noise,
-        )
+        try:
+            video, audio_waveform = av_pipeline.generate_distilled_stage2_from_latents(
+                stage_1_video_latent=stage1_video,
+                stage_1_audio_latent=stage1_audio,
+                positive_encoding=text_encoding,
+                positive_audio_encoding=text_audio_encoding,
+                config=config,
+                spatial_upscaler=spatial_upscaler,
+                stage_callback=stage_callback,
+                progress_message=progress_message,
+                latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
+                burn_stage1_rng=not args.independent_stage2_noise,
+            )
+        except _BenchModeStop:
+            video = None
+            audio_waveform = None
+
+    # Bench-mode early exit: print the per-step summary and stop here
+    # (skip VAE decode, audio decode, output save, run log).
+    if bench_mode_active:
+        print("", file=sys.stderr, flush=True)
+        print("== stage2_harness bench-mode summary ==", file=sys.stderr)
+        for i, dt in enumerate(bench_step_times, start=1):
+            tag = "WARMUP" if i == 1 else ("MEASURE" if i == bench_mode_step else "extra")
+            print(f"  step {i}: {dt:.3f}s  ({tag})", file=sys.stderr)
+        if len(bench_step_times) >= bench_mode_step:
+            print(
+                f"  measured (step {bench_mode_step}): "
+                f"{bench_step_times[bench_mode_step - 1]:.3f}s",
+                file=sys.stderr,
+            )
+        print("== end bench-mode ==", file=sys.stderr, flush=True)
+        return
+
     pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
     if pipeline_timings:
         timings.extend(pipeline_timings)
