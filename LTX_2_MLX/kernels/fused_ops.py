@@ -325,95 +325,121 @@ def interleaved_rope(
 # ── Fused AdaLN: rms_norm(x) * (1 + scale) + shift ─────────────────────────
 #
 # Replaces the ``_adaln_inline`` MLX path in transformer.py.  Production
-# T2V shape is x bf16 (B, T, C=4096), scale/shift fp32 (B, 1, C) broadcast
-# across T (uniform_mask=True path through modality_from_state).  The
-# kernel covers exactly this shape/dtype combo and falls back to the
-# stock MLX expression for anything else (I2V per-token (B, T, C) scale/
-# shift, audio C=2048, non-bf16 x, etc.).
+# T2V shape is x bf16 (B, T, C), scale/shift fp32 (B, 1, C) broadcast
+# across T (uniform_mask=True path through modality_from_state).
 #
-# Validated on M1 Max via a separate cache-protocol microbench: ~2.0-2.1x
-# speedup over mx.compile under all four cache protocols (hot_fixed,
-# rotate, rotate_shuffle, thrash) at T=14640, C=4096; 60% of M1 Max
-# peak DRAM bandwidth (~240 GB/s).  BLOCK=512, VPT=2 → 8 elements/thread
-# per row, 16 simdgroups/threadgroup.
+# Registered for both supported transformer dims:
+#   - C=4096 (video, BLOCK=512, VPT=2 → 8 elem/thread, 16 SG/tg)
+#   - C=2048 (audio, BLOCK=256, VPT=2 → 8 elem/thread, 8 SG/tg)
+# Same algorithmic structure for both; only the constants differ.
+# Other shapes fall back to the stock MLX expression (I2V per-token
+# scale/shift, non-bf16 x, unsupported C, etc.).
+#
+# Video variant validated on M1 Max via a separate cache-protocol
+# microbench: ~2.0-2.1x speedup over mx.compile under all four cache
+# protocols at T=14640, C=4096; 60% of peak DRAM bandwidth (~240 GB/s).
+# Audio variant added 2026-05-27 by analogy; bench has not been redone
+# at C=2048 but the layout (8 elem/thread, single-barrier reduction)
+# is the same shape-portable pattern that survived the C=3584 → C=4096
+# shape correction.  Verified by parity tests; perf will surface in the
+# end-to-end A/B.
 
-_ADALN_FUSED_C = 4096
-_ADALN_FUSED_BLOCK = 512
-_ADALN_FUSED_VPT = 2  # bfloat4 / float4 vectors per thread per dtype
 _ADALN_FUSED_EPS = 1e-6  # hardcoded; matches transformer.py norm_eps default
-assert _ADALN_FUSED_BLOCK * _ADALN_FUSED_VPT * 4 == _ADALN_FUSED_C
 
-_adaln_norm_fused_kernel = mx.fast.metal_kernel(
-    name="adaln_norm_fused_t2v",
-    input_names=["x", "scale", "shift"],
-    output_names=["out"],
-    source=f"""
-        // One threadgroup per row of x.  BLOCK={_ADALN_FUSED_BLOCK} threads,
-        // VPT={_ADALN_FUSED_VPT} bfloat4 vectors of x per thread (= 8 bf16
-        // elements) and matching float4 vectors of scale/shift.
-        // scale/shift are per-channel fp32 (broadcast across all T rows
-        // from the (B, 1, C) AdaLN output); x and out are bf16 (T, C).
+# Map C → (BLOCK, VPT).  BLOCK * VPT * 4 == C; VPT=2 keeps 8 elements/thread
+# across both variants (the layout that won the C=4096 bench).
+_ADALN_FUSED_CONFIGS: dict[int, tuple[int, int]] = {
+    4096: (512, 2),   # video transformer
+    2048: (256, 2),   # audio transformer
+}
 
-        const uint row    = threadgroup_position_in_grid.x;
-        const uint tid    = thread_index_in_threadgroup;
-        const int  C_     = x_shape[1];
-        const float EPS_F = {_ADALN_FUSED_EPS}f;
-        const float INV_C = 1.0f / float(C_);
 
-        device const bfloat4* x_v     = (device const bfloat4*)(x + row * C_);
-        device const float4*  scale_v = (device const float4*)(scale);
-        device const float4*  shift_v = (device const float4*)(shift);
-        device       bfloat4* out_v   = (device       bfloat4*)(out + row * C_);
+def _build_adaln_norm_kernel(c: int, block: int, vpt: int) -> mx.fast.metal_kernel:
+    """Build the AdaLN fused kernel for a specific C / BLOCK / VPT layout."""
+    assert block * vpt * 4 == c, (
+        f"BLOCK ({block}) * VPT ({vpt}) * 4 must equal C ({c}); "
+        "kernel tiling needs to cover the row exactly."
+    )
+    return mx.fast.metal_kernel(
+        name=f"adaln_norm_fused_c{c}",
+        input_names=["x", "scale", "shift"],
+        output_names=["out"],
+        source=f"""
+            // One threadgroup per row of x.  BLOCK={block} threads,
+            // VPT={vpt} bfloat4 vectors of x per thread (= {vpt * 4} bf16
+            // elements) and matching float4 vectors of scale/shift.
+            // scale/shift are per-channel fp32 (broadcast across all T rows
+            // from the (B, 1, C) AdaLN output); x and out are bf16 (T, C={c}).
 
-        // Phase 1: register-cache x, accumulate sum-of-squares in fp32.
-        float xs[{_ADALN_FUSED_VPT * 4}];
-        float local_sum = 0.0f;
-        #pragma unroll
-        for (int v = 0; v < {_ADALN_FUSED_VPT}; ++v) {{
-            bfloat4 chunk = x_v[tid * {_ADALN_FUSED_VPT} + v];
-            float a = float(chunk.x);
-            float b = float(chunk.y);
-            float c = float(chunk.z);
-            float d = float(chunk.w);
-            xs[v*4 + 0] = a;
-            xs[v*4 + 1] = b;
-            xs[v*4 + 2] = c;
-            xs[v*4 + 3] = d;
-            local_sum += a*a + b*b + c*c + d*d;
-        }}
+            const uint row    = threadgroup_position_in_grid.x;
+            const uint tid    = thread_index_in_threadgroup;
+            const int  C_     = x_shape[1];
+            const float EPS_F = {_ADALN_FUSED_EPS}f;
+            const float INV_C = 1.0f / float(C_);
 
-        // Simdgroup reduce → per-SG partials in TGM, single barrier.
-        threadgroup float tg_partials[{_ADALN_FUSED_BLOCK // 32}];
-        float sg_sum = simd_sum(local_sum);
-        if ((tid & 31u) == 0) {{
-            tg_partials[tid / 32] = sg_sum;
-        }}
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+            device const bfloat4* x_v     = (device const bfloat4*)(x + row * C_);
+            device const float4*  scale_v = (device const float4*)(scale);
+            device const float4*  shift_v = (device const float4*)(shift);
+            device       bfloat4* out_v   = (device       bfloat4*)(out + row * C_);
 
-        // Every thread reads all partials, reduces locally.  No second barrier.
-        float total = 0.0f;
-        #pragma unroll
-        for (int s = 0; s < ({_ADALN_FUSED_BLOCK // 32}); ++s) {{
-            total += tg_partials[s];
-        }}
-        const float inv = rsqrt(total * INV_C + EPS_F);
+            // Phase 1: register-cache x, accumulate sum-of-squares in fp32.
+            float xs[{vpt * 4}];
+            float local_sum = 0.0f;
+            #pragma unroll
+            for (int v = 0; v < {vpt}; ++v) {{
+                bfloat4 chunk = x_v[tid * {vpt} + v];
+                float a = float(chunk.x);
+                float b = float(chunk.y);
+                float c = float(chunk.z);
+                float d = float(chunk.w);
+                xs[v*4 + 0] = a;
+                xs[v*4 + 1] = b;
+                xs[v*4 + 2] = c;
+                xs[v*4 + 3] = d;
+                local_sum += a*a + b*b + c*c + d*d;
+            }}
 
-        // Phase 2: modulate from cached registers, vectorized stores.
-        // fp32 scale/shift reads land directly without bfloat→float casts.
-        #pragma unroll
-        for (int v = 0; v < {_ADALN_FUSED_VPT}; ++v) {{
-            float4 sc = scale_v[tid * {_ADALN_FUSED_VPT} + v];
-            float4 sh = shift_v[tid * {_ADALN_FUSED_VPT} + v];
-            bfloat4 result;
-            result.x = bfloat(xs[v*4 + 0] * inv * (1.0f + sc.x) + sh.x);
-            result.y = bfloat(xs[v*4 + 1] * inv * (1.0f + sc.y) + sh.y);
-            result.z = bfloat(xs[v*4 + 2] * inv * (1.0f + sc.z) + sh.z);
-            result.w = bfloat(xs[v*4 + 3] * inv * (1.0f + sc.w) + sh.w);
-            out_v[tid * {_ADALN_FUSED_VPT} + v] = result;
-        }}
-    """,
-    ensure_row_contiguous=True,
-)
+            // Simdgroup reduce → per-SG partials in TGM, single barrier.
+            threadgroup float tg_partials[{block // 32}];
+            float sg_sum = simd_sum(local_sum);
+            if ((tid & 31u) == 0) {{
+                tg_partials[tid / 32] = sg_sum;
+            }}
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Every thread reads all partials, reduces locally.  No second barrier.
+            float total = 0.0f;
+            #pragma unroll
+            for (int s = 0; s < ({block // 32}); ++s) {{
+                total += tg_partials[s];
+            }}
+            const float inv = rsqrt(total * INV_C + EPS_F);
+
+            // Phase 2: modulate from cached registers, vectorized stores.
+            // fp32 scale/shift reads land directly without bfloat→float casts.
+            #pragma unroll
+            for (int v = 0; v < {vpt}; ++v) {{
+                float4 sc = scale_v[tid * {vpt} + v];
+                float4 sh = shift_v[tid * {vpt} + v];
+                bfloat4 result;
+                result.x = bfloat(xs[v*4 + 0] * inv * (1.0f + sc.x) + sh.x);
+                result.y = bfloat(xs[v*4 + 1] * inv * (1.0f + sc.y) + sh.y);
+                result.z = bfloat(xs[v*4 + 2] * inv * (1.0f + sc.z) + sh.z);
+                result.w = bfloat(xs[v*4 + 3] * inv * (1.0f + sc.w) + sh.w);
+                out_v[tid * {vpt} + v] = result;
+            }}
+        """,
+        ensure_row_contiguous=True,
+    )
+
+
+# Build kernels for every supported C at import time.  Each kernel is a
+# closed-over (BLOCK, VPT) instance; the dispatcher in ``adaln_norm_fused``
+# picks the right one based on ``x.shape[-1]``.
+_adaln_norm_fused_kernels: dict[int, mx.fast.metal_kernel] = {
+    c: _build_adaln_norm_kernel(c, block, vpt)
+    for c, (block, vpt) in _ADALN_FUSED_CONFIGS.items()
+}
 
 
 def _adaln_norm_mlx(
@@ -422,7 +448,7 @@ def _adaln_norm_mlx(
     """Stock MLX AdaLN — matches ``transformer.py::_adaln_inline``.
 
     Used as fallback when the fused kernel's shape/dtype gate doesn't
-    match (audio C=2048, I2V per-token scale/shift, etc.).
+    match (I2V per-token scale/shift, unsupported C, non-bf16 x, etc.).
     """
     normed = mx.fast.rms_norm(x, None, eps)
     return (normed * (1 + scale) + shift).astype(x.dtype)
@@ -432,21 +458,24 @@ def _adaln_t2v_broadcast_compatible(
     x: mx.array, scale: mx.array, shift: mx.array
 ) -> bool:
     """Check whether (x, scale, shift) match the T2V broadcast pattern
-    the fused kernel expects.
+    the fused kernels expect, for any of the supported ``C`` values.
 
     Returns True iff:
-      - x is 3D bfloat16 with x.shape[-1] == 4096
-      - scale, shift are fp32 with last dim 4096
+      - x is 3D bfloat16 with x.shape[-1] in ``_ADALN_FUSED_CONFIGS``
+      - scale, shift are fp32 with last dim == x.shape[-1]
       - scale, shift have all-singleton leading dims (i.e. (1, 1, C) or
         (C,) up to broadcast) so the kernel's per-channel read is valid
 
     Any per-token scale/shift (B, T, C) returns False → MLX fallback.
     """
-    if x.dtype != mx.bfloat16 or x.ndim != 3 or x.shape[-1] != _ADALN_FUSED_C:
+    if x.dtype != mx.bfloat16 or x.ndim != 3:
+        return False
+    c = x.shape[-1]
+    if c not in _adaln_norm_fused_kernels:
         return False
     if scale.dtype != mx.float32 or shift.dtype != mx.float32:
         return False
-    if scale.shape[-1] != _ADALN_FUSED_C or shift.shape[-1] != _ADALN_FUSED_C:
+    if scale.shape[-1] != c or shift.shape[-1] != c:
         return False
     # All leading dims must be 1 — covers (C,), (1, C), (1, 1, C).
     for d in scale.shape[:-1]:
@@ -463,9 +492,10 @@ def adaln_norm_fused(
 ) -> mx.array:
     """Fused RMSNorm + AdaLN modulation: ``rms_norm(x) * (1+scale) + shift``.
 
-    Production T2V shape only: x bf16 (B, T, 4096), scale/shift fp32 with
-    last dim 4096 and all-singleton leading dims (the (B, 1, C) broadcast
-    pattern produced by ``modality_from_state`` when ``uniform_mask=True``).
+    Supports both video (C=4096) and audio (C=2048) production T2V shapes:
+    x bf16 (B, T, C) with scale/shift fp32 with last dim C and all-singleton
+    leading dims (the (B, 1, C) broadcast pattern produced by
+    ``modality_from_state`` when ``uniform_mask=True``).
 
     Falls back to the stock MLX expression (matching ``_adaln_inline``)
     for any other shape/dtype combination, so the function is a drop-in
@@ -486,15 +516,18 @@ def adaln_norm_fused(
 
     _probe("adaln_kernel")
     B, T, C = x.shape
+    block, _vpt = _ADALN_FUSED_CONFIGS[C]
+    kernel = _adaln_norm_fused_kernels[C]
+
     # Kernel expects (rows, C) layout; flatten B*T together (works for B=1).
     x_2d = mx.contiguous(x.reshape(B * T, C))
     scale_1d = mx.contiguous(scale.reshape(-1))
     shift_1d = mx.contiguous(shift.reshape(-1))
 
     rows = B * T
-    grid = (rows * _ADALN_FUSED_BLOCK, 1, 1)
-    threadgroup = (_ADALN_FUSED_BLOCK, 1, 1)
-    outputs = _adaln_norm_fused_kernel(
+    grid = (rows * block, 1, 1)
+    threadgroup = (block, 1, 1)
+    outputs = kernel(
         inputs=[x_2d, scale_1d, shift_1d],
         output_shapes=[(rows, C)],
         output_dtypes=[mx.bfloat16],
@@ -507,54 +540,73 @@ def adaln_norm_fused(
 # ── Fused gated add: residual + branch * gate ──────────────────────────────
 #
 # Replaces the ``_residual_gate_inline`` MLX path in transformer.py.
-# Production T2V shape: x_prev bf16 (B, T, C=4096), branch bf16 (B, T, C),
+# Production T2V shape: residual bf16 (B, T, C), branch bf16 (B, T, C),
 # gate fp32 (B, 1, C) broadcast across T.  Kernel computes
 # ``out = branch * gate + residual``.
 #
-# Validated on M1 Max via a separate cache-protocol microbench:
-# 1.26-1.30x speedup over mx.compile under all four cache protocols
-# at T=14640, C=4096; 72% of M1 Max peak DRAM bandwidth (~288 GB/s).
-# BLOCK=512, VPT=2 → 8 elements/thread per row.
+# Registered for both supported transformer dims (same configs as AdaLN):
+#   - C=4096 (video, BLOCK=512, VPT=2 → 8 elem/thread, 16 SG/tg)
+#   - C=2048 (audio, BLOCK=256, VPT=2 → 8 elem/thread, 8 SG/tg)
+# Other shapes fall back to the stock MLX expression.
+#
+# Video variant validated on M1 Max: 1.26-1.30x speedup over mx.compile
+# under all four cache protocols at T=14640, C=4096; 72% of peak DRAM
+# bandwidth (~288 GB/s).  Audio variant added 2026-05-27 by analogy.
 
-_GATED_ADD_FUSED_C = 4096
-_GATED_ADD_FUSED_BLOCK = 512
-_GATED_ADD_FUSED_VPT = 2
-assert _GATED_ADD_FUSED_BLOCK * _GATED_ADD_FUSED_VPT * 4 == _GATED_ADD_FUSED_C
+# Same (BLOCK, VPT) configs as AdaLN — these are bandwidth-bound kernels
+# with the same per-row tiling story.
+_GATED_ADD_FUSED_CONFIGS: dict[int, tuple[int, int]] = {
+    4096: (512, 2),   # video transformer
+    2048: (256, 2),   # audio transformer
+}
 
-_gated_add_fused_kernel = mx.fast.metal_kernel(
-    name="gated_add_fused_t2v",
-    input_names=["branch", "gate", "residual"],
-    output_names=["out"],
-    source=f"""
-        // One threadgroup per row.  BLOCK={_GATED_ADD_FUSED_BLOCK} threads,
-        // VPT={_GATED_ADD_FUSED_VPT} vectors/thread per dtype.  No
-        // reductions — pure elementwise FMA.
 
-        const uint row    = threadgroup_position_in_grid.x;
-        const uint tid    = thread_index_in_threadgroup;
-        const int  C_     = branch_shape[1];
+def _build_gated_add_kernel(c: int, block: int, vpt: int) -> mx.fast.metal_kernel:
+    """Build the gated_add fused kernel for a specific C / BLOCK / VPT layout."""
+    assert block * vpt * 4 == c, (
+        f"BLOCK ({block}) * VPT ({vpt}) * 4 must equal C ({c}); "
+        "kernel tiling needs to cover the row exactly."
+    )
+    return mx.fast.metal_kernel(
+        name=f"gated_add_fused_c{c}",
+        input_names=["branch", "gate", "residual"],
+        output_names=["out"],
+        source=f"""
+            // One threadgroup per row.  BLOCK={block} threads,
+            // VPT={vpt} vectors/thread per dtype.  No reductions —
+            // pure elementwise FMA over C={c} bf16 elements per row.
 
-        device const bfloat4* branch_v   = (device const bfloat4*)(branch + row * C_);
-        device const float4*  gate_v     = (device const float4*)(gate);
-        device const bfloat4* residual_v = (device const bfloat4*)(residual + row * C_);
-        device       bfloat4* out_v      = (device       bfloat4*)(out + row * C_);
+            const uint row    = threadgroup_position_in_grid.x;
+            const uint tid    = thread_index_in_threadgroup;
+            const int  C_     = branch_shape[1];
 
-        #pragma unroll
-        for (int v = 0; v < {_GATED_ADD_FUSED_VPT}; ++v) {{
-            bfloat4 br  = branch_v[tid * {_GATED_ADD_FUSED_VPT} + v];
-            float4  g   = gate_v[tid * {_GATED_ADD_FUSED_VPT} + v];
-            bfloat4 res = residual_v[tid * {_GATED_ADD_FUSED_VPT} + v];
-            bfloat4 result;
-            // fp32 accumulator inside the FMA for precision; bf16 output.
-            result.x = bfloat(g.x * float(br.x) + float(res.x));
-            result.y = bfloat(g.y * float(br.y) + float(res.y));
-            result.z = bfloat(g.z * float(br.z) + float(res.z));
-            result.w = bfloat(g.w * float(br.w) + float(res.w));
-            out_v[tid * {_GATED_ADD_FUSED_VPT} + v] = result;
-        }}
-    """,
-    ensure_row_contiguous=True,
-)
+            device const bfloat4* branch_v   = (device const bfloat4*)(branch + row * C_);
+            device const float4*  gate_v     = (device const float4*)(gate);
+            device const bfloat4* residual_v = (device const bfloat4*)(residual + row * C_);
+            device       bfloat4* out_v      = (device       bfloat4*)(out + row * C_);
+
+            #pragma unroll
+            for (int v = 0; v < {vpt}; ++v) {{
+                bfloat4 br  = branch_v[tid * {vpt} + v];
+                float4  g   = gate_v[tid * {vpt} + v];
+                bfloat4 res = residual_v[tid * {vpt} + v];
+                bfloat4 result;
+                // fp32 accumulator inside the FMA for precision; bf16 output.
+                result.x = bfloat(g.x * float(br.x) + float(res.x));
+                result.y = bfloat(g.y * float(br.y) + float(res.y));
+                result.z = bfloat(g.z * float(br.z) + float(res.z));
+                result.w = bfloat(g.w * float(br.w) + float(res.w));
+                out_v[tid * {vpt} + v] = result;
+            }}
+        """,
+        ensure_row_contiguous=True,
+    )
+
+
+_gated_add_fused_kernels: dict[int, mx.fast.metal_kernel] = {
+    c: _build_gated_add_kernel(c, block, vpt)
+    for c, (block, vpt) in _GATED_ADD_FUSED_CONFIGS.items()
+}
 
 
 def _gated_add_mlx(
@@ -568,19 +620,24 @@ def _gated_add_t2v_broadcast_compatible(
     residual: mx.array, branch: mx.array, gate: mx.array
 ) -> bool:
     """Check whether (residual, branch, gate) match the T2V broadcast
-    pattern the fused gated_add kernel expects.
+    pattern the fused gated_add kernels expect, for any supported ``C``.
 
     Returns True iff:
-      - residual, branch are 3D bf16 with last dim 4096 and same shape
-      - gate is fp32 with last dim 4096 and all-singleton leading dims
+      - residual, branch are 3D bf16 with last dim in ``_GATED_ADD_FUSED_CONFIGS``
+        and ``residual.shape == branch.shape``
+      - gate is fp32 with last dim == residual.shape[-1] and all-singleton
+        leading dims
     """
     if residual.dtype != mx.bfloat16 or branch.dtype != mx.bfloat16:
         return False
-    if residual.ndim != 3 or residual.shape[-1] != _GATED_ADD_FUSED_C:
+    if residual.ndim != 3:
+        return False
+    c = residual.shape[-1]
+    if c not in _gated_add_fused_kernels:
         return False
     if residual.shape != branch.shape:
         return False
-    if gate.dtype != mx.float32 or gate.shape[-1] != _GATED_ADD_FUSED_C:
+    if gate.dtype != mx.float32 or gate.shape[-1] != c:
         return False
     for d in gate.shape[:-1]:
         if d != 1:
@@ -593,9 +650,10 @@ def gated_add_fused(
 ) -> mx.array:
     """Fused gated add: ``residual + branch * gate``, cast to residual.dtype.
 
-    Production T2V shape only: residual/branch bf16 (B, T, 4096), gate fp32
-    with last dim 4096 and all-singleton leading dims.  Falls back to the
-    stock MLX expression for any other shape/dtype.
+    Supports both video (C=4096) and audio (C=2048) production T2V shapes:
+    residual/branch bf16 (B, T, C), gate fp32 with last dim C and all-
+    singleton leading dims.  Falls back to the stock MLX expression for
+    any other shape/dtype.
 
     Argument order matches ``_residual_gate_inline(x, residual, gate)``
     where x ≡ residual_arg, residual ≡ branch_arg, gate ≡ gate_arg.
@@ -614,14 +672,17 @@ def gated_add_fused(
 
     _probe("gated_add_kernel")
     B, T, C = residual.shape
+    block, _vpt = _GATED_ADD_FUSED_CONFIGS[C]
+    kernel = _gated_add_fused_kernels[C]
+
     branch_2d = mx.contiguous(branch.reshape(B * T, C))
     residual_2d = mx.contiguous(residual.reshape(B * T, C))
     gate_1d = mx.contiguous(gate.reshape(-1))
 
     rows = B * T
-    grid = (rows * _GATED_ADD_FUSED_BLOCK, 1, 1)
-    threadgroup = (_GATED_ADD_FUSED_BLOCK, 1, 1)
-    outputs = _gated_add_fused_kernel(
+    grid = (rows * block, 1, 1)
+    threadgroup = (block, 1, 1)
+    outputs = kernel(
         inputs=[branch_2d, gate_1d, residual_2d],
         output_shapes=[(rows, C)],
         output_dtypes=[mx.bfloat16],

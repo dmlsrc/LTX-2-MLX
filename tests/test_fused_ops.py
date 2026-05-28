@@ -104,9 +104,31 @@ def test_adaln_fallback_on_per_token_scale(prod_inputs):
     assert _cos_sim(y_mlx, y_fused) >= 0.99999
 
 
-def test_adaln_fallback_on_audio_dim():
-    """C=2048 (audio inner dim) doesn't match the C=4096 gate → MLX fallback."""
+def test_adaln_audio_dim_t2v_parity():
+    """C=2048 (audio inner dim) hits the audio kernel variant, parity vs MLX."""
     B, T, C = 1, 1024, 2048
+    mx.random.seed(0)
+    x = mx.random.normal(shape=(B, T, C), dtype=mx.float32).astype(mx.bfloat16)
+    scale = mx.random.normal(shape=(B, 1, C), dtype=mx.float32) * 0.1
+    shift = mx.random.normal(shape=(B, 1, C), dtype=mx.float32) * 0.1
+    mx.eval(x, scale, shift)
+
+    # Audio C is now a supported kernel variant (BLOCK=256, VPT=2) so the
+    # T2V gate predicate passes for it.
+    assert _adaln_t2v_broadcast_compatible(x, scale, shift)
+
+    y_mlx = _adaln_norm_mlx(x, scale, shift, EPS)
+    y_fused = adaln_norm_fused(x, scale, shift, EPS)
+    mx.eval(y_mlx, y_fused)
+    assert y_fused.shape == y_mlx.shape
+    assert y_fused.dtype == mx.bfloat16
+    assert _cos_sim(y_mlx, y_fused) >= 0.9999
+
+
+def test_adaln_unsupported_dim_falls_back():
+    """An unsupported C (e.g. 3584) doesn't match any registered kernel and
+    routes to MLX fallback."""
+    B, T, C = 1, 256, 3584  # not in _ADALN_FUSED_CONFIGS
     mx.random.seed(0)
     x = mx.random.normal(shape=(B, T, C), dtype=mx.float32).astype(mx.bfloat16)
     scale = mx.random.normal(shape=(B, 1, C), dtype=mx.float32) * 0.1
@@ -160,9 +182,28 @@ def test_gated_add_fallback_on_per_token_gate(prod_inputs):
     assert _cos_sim(z_mlx, z_fused) >= 0.99999
 
 
-def test_gated_add_fallback_on_audio_dim():
-    """C=2048 doesn't match the C=4096 gate → MLX fallback."""
+def test_gated_add_audio_dim_t2v_parity():
+    """C=2048 (audio inner dim) hits the audio kernel variant, parity vs MLX."""
     B, T, C = 1, 1024, 2048
+    mx.random.seed(0)
+    residual = mx.random.normal(shape=(B, T, C), dtype=mx.float32).astype(mx.bfloat16)
+    branch = mx.random.normal(shape=(B, T, C), dtype=mx.float32).astype(mx.bfloat16)
+    gate = mx.random.normal(shape=(B, 1, C), dtype=mx.float32) * 0.5
+    mx.eval(residual, branch, gate)
+
+    assert _gated_add_t2v_broadcast_compatible(residual, branch, gate)
+
+    z_mlx = _gated_add_mlx(residual, branch, gate)
+    z_fused = gated_add_fused(residual, branch, gate)
+    mx.eval(z_mlx, z_fused)
+    assert z_fused.shape == z_mlx.shape
+    assert z_fused.dtype == mx.bfloat16
+    assert _cos_sim(z_mlx, z_fused) >= 0.9999
+
+
+def test_gated_add_unsupported_dim_falls_back():
+    """An unsupported C doesn't match any registered kernel → MLX fallback."""
+    B, T, C = 1, 256, 3584  # not in _GATED_ADD_FUSED_CONFIGS
     mx.random.seed(0)
     residual = mx.random.normal(shape=(B, T, C), dtype=mx.float32).astype(mx.bfloat16)
     branch = mx.random.normal(shape=(B, T, C), dtype=mx.float32).astype(mx.bfloat16)
