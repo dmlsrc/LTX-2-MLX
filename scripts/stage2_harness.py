@@ -591,46 +591,46 @@ def main() -> None:
     bench_step_times: list[float] = []
     bench_step_t_prev: list[float] = [0.0]
 
-    with StackedPhaseBars() as denoise_bars:
-        stage_bar = denoise_bars.add(
-            total=len(gen.STAGE_2_DISTILLED_SIGMA_VALUES) - 1,
-            desc="Stage 2 denoising",
-            unit="step",
-            show_step1=True,
-        )
+    if bench_mode_active:
+        # Skip the StackedPhaseBars UI entirely in bench mode: progress
+        # messages from generate_distilled_stage2_from_latents (the
+        # "Upsampling..." / "Distilled stage 2: ..." inter-stage notes)
+        # use position="below" which freezes the bar stack and detaches
+        # subsequent bar updates from the cursor accounting — so any
+        # per-step bench print collides with the in-place bar redraws.
+        # We don't need a polished UI for a timing-only run, and plain
+        # stderr prints (no bars, no \r updates) have no clobbering risk.
 
         def stage_callback(stage_name: str, step: int, total: int) -> None:
-            stage_bar.set_n(step)
-            if not bench_mode_active or stage_name != "stage_2":
+            if stage_name != "stage_2":
                 return
             now = time.perf_counter()
             if step == 0:
-                # Just before step 1 of stage 2 starts.
                 bench_step_t_prev[0] = now
-                denoise_bars.write(
+                print(
                     f"[bench-mode] stage_2 begin (will exit after step {bench_mode_step})",
-                    position="above",
+                    file=sys.stderr,
+                    flush=True,
                 )
                 return
             elapsed = now - bench_step_t_prev[0]
             bench_step_t_prev[0] = now
             bench_step_times.append(elapsed)
             label = "WARMUP" if step == 1 else ("MEASURE" if step == bench_mode_step else "extra")
-            # Route through the bars' write() so the message doesn't collide
-            # with the in-place \r updates of the stage-2 progress bar.
-            denoise_bars.write(
+            print(
                 f"[bench-mode] stage_2 step {step}/{total} done: "
                 f"{elapsed:.3f}s  ({label})",
-                position="above",
+                file=sys.stderr,
+                flush=True,
             )
             if step >= bench_mode_step:
                 raise _BenchModeStop()
 
         def progress_message(message: str) -> None:
-            denoise_bars.write(message, position="below")
+            print(message, file=sys.stderr, flush=True)
 
         try:
-            video, audio_waveform = av_pipeline.generate_distilled_stage2_from_latents(
+            av_pipeline.generate_distilled_stage2_from_latents(
                 stage_1_video_latent=stage1_video,
                 stage_1_audio_latent=stage1_audio,
                 positive_encoding=text_encoding,
@@ -639,16 +639,14 @@ def main() -> None:
                 spatial_upscaler=spatial_upscaler,
                 stage_callback=stage_callback,
                 progress_message=progress_message,
-                latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
+                latent_save_path=None,
                 burn_stage1_rng=not args.independent_stage2_noise,
             )
         except _BenchModeStop:
-            video = None
-            audio_waveform = None
+            pass
 
-    # Bench-mode early exit: print the per-step summary and stop here
-    # (skip VAE decode, audio decode, output save, run log).
-    if bench_mode_active:
+        # Print the per-step summary and stop here (skip VAE decode,
+        # audio decode, output save, run log).
         print("", file=sys.stderr, flush=True)
         print("== stage2_harness bench-mode summary ==", file=sys.stderr)
         for i, dt in enumerate(bench_step_times, start=1):
@@ -662,6 +660,34 @@ def main() -> None:
             )
         print("== end bench-mode ==", file=sys.stderr, flush=True)
         return
+
+    # Normal (non-bench) path: use the StackedPhaseBars UI.
+    with StackedPhaseBars() as denoise_bars:
+        stage_bar = denoise_bars.add(
+            total=len(gen.STAGE_2_DISTILLED_SIGMA_VALUES) - 1,
+            desc="Stage 2 denoising",
+            unit="step",
+            show_step1=True,
+        )
+
+        def stage_callback(stage_name: str, step: int, total: int) -> None:
+            stage_bar.set_n(step)
+
+        def progress_message(message: str) -> None:
+            denoise_bars.write(message, position="below")
+
+        video, audio_waveform = av_pipeline.generate_distilled_stage2_from_latents(
+            stage_1_video_latent=stage1_video,
+            stage_1_audio_latent=stage1_audio,
+            positive_encoding=text_encoding,
+            positive_audio_encoding=text_audio_encoding,
+            config=config,
+            spatial_upscaler=spatial_upscaler,
+            stage_callback=stage_callback,
+            progress_message=progress_message,
+            latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
+            burn_stage1_rng=not args.independent_stage2_noise,
+        )
 
     pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
     if pipeline_timings:
