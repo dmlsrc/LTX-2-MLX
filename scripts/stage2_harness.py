@@ -607,21 +607,21 @@ def main() -> None:
             if step == 0:
                 # Just before step 1 of stage 2 starts.
                 bench_step_t_prev[0] = now
-                print(
+                denoise_bars.write(
                     f"[bench-mode] stage_2 begin (will exit after step {bench_mode_step})",
-                    file=sys.stderr,
-                    flush=True,
+                    position="above",
                 )
                 return
             elapsed = now - bench_step_t_prev[0]
             bench_step_t_prev[0] = now
             bench_step_times.append(elapsed)
             label = "WARMUP" if step == 1 else ("MEASURE" if step == bench_mode_step else "extra")
-            print(
+            # Route through the bars' write() so the message doesn't collide
+            # with the in-place \r updates of the stage-2 progress bar.
+            denoise_bars.write(
                 f"[bench-mode] stage_2 step {step}/{total} done: "
                 f"{elapsed:.3f}s  ({label})",
-                file=sys.stderr,
-                flush=True,
+                position="above",
             )
             if step >= bench_mode_step:
                 raise _BenchModeStop()
