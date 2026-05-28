@@ -7,6 +7,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from ...kernels.steel_attention import maybe_steel_attention
 from .rope import LTXRopeType, apply_rotary_emb
 from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_barrier
 
@@ -14,6 +15,22 @@ from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_bar
 # Set LTX_DISABLE_COMPILED_ATTN=1 to bypass the @mx.compile wrappers around the
 # reshape+SDPA+reshape sequence.  Used to A/B compile overhead vs fusion.
 _USE_COMPILED_ATTN = not os.environ.get("LTX_DISABLE_COMPILED_ATTN")
+_USE_STEEL_ATTN = bool(os.environ.get("LTX_STEEL_ATTN"))
+
+
+def _sdpa(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    *,
+    scale: float,
+    mask: Optional[mx.array] = None,
+) -> mx.array:
+    if _USE_STEEL_ATTN:
+        out = maybe_steel_attention(q, k, v, scale=scale, mask=mask)
+        if out is not None:
+            return out
+    return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
 
 
 def _attention_core_inline_no_mask(
@@ -34,7 +51,7 @@ def _attention_core_inline_no_mask(
 
     # Compute attention using Flash Attention
     scale = 1.0 / (dim_head ** 0.5)
-    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
+    out = _sdpa(q, k, v, scale=scale)
 
     # Reshape back: (B, H, T, D) -> (B, T, H*D)
     return out.transpose(0, 2, 1, 3).reshape(b, t_q, heads * dim_head)
@@ -75,7 +92,7 @@ def _attention_core_inline_with_mask(
 
     # Compute attention using Flash Attention
     scale = 1.0 / (dim_head ** 0.5)
-    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
+    out = _sdpa(q, k, v, scale=scale, mask=mask)
 
     # Reshape back: (B, H, T, D) -> (B, T, H*D)
     return out.transpose(0, 2, 1, 3).reshape(b, t_q, heads * dim_head)
@@ -159,7 +176,7 @@ def scaled_dot_product_attention(
     if scale is None:
         scale = 1.0 / (q.shape[-1] ** 0.5)
 
-    return mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
+    return _sdpa(q, k, v, scale=scale, mask=mask)
 
 
 class Attention(nn.Module):

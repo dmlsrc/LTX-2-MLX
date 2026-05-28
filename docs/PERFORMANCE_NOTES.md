@@ -806,6 +806,64 @@ sdpa_d_sweep` -- the bench that closed this hypothesis is in the
 repo and re-runnable if anyone wants to verify on different M1 Max
 units or after MLX upstream changes.
 
+### 2026-05-28: MLX STEEL attention wrapper retile -- BQ64/BK32 wins on M1 Max `[OPT-IN]`
+
+Follow-up to the abandoned SDPA tile hypothesis.  The D-sweep was too
+indirect: it tested MLX's built-in `bk` selection through different head
+dimensions, but it did not directly test the actual LTX `D=128` kernel
+with a larger Q tile.
+
+Implementation:
+
+- Added `LTX_2_MLX/kernels/steel_attention.py`.
+- Reads MLX's local reference checkout and inlines MLX's own STEEL
+  `steel_attention.h` dependency tree.
+- Uses `mx.fast.metal_kernel(..., ensure_row_contiguous=False)` so the
+  kernel accepts the real reshape/transpose strides.
+- Emits a row-contiguous physical `(B, L, H, D)` output and returns
+  `.transpose(0, 2, 1, 3)`, matching MLX full-attention's physical output
+  layout trick.
+- Specializes no-mask `BQ=64, BK=32` for `D=128` and `D=64`.
+- Gated by `LTX_STEEL_ATTN=1`; `LTX_STEEL_ATTN_PROBE=1` prints
+  `hit_d128`, `hit_d64`, fallback reasons and sample shapes.
+- D64 is default-on under `LTX_STEEL_ATTN=1`; use
+  `LTX_STEEL_ATTN_DISABLE_D64=1` only for bisects.
+
+Validation:
+
+- Small parity:
+  - D128 self: `max_abs=0.000488`
+  - D64 self: `max_abs=0.000000`
+  - D64 cross-length A2V/V2A smoke: `max_abs=0.000000`
+- Integrated `_attention_core` synthetic:
+  - stage1 D128: stock `230.3 ms`, steel `199.6 ms`
+  - stage2 D128: stock `3730.2 ms`, steel `3129.2 ms`
+
+Production-ish kitten smoke, 576x320, 721 frames, distilled 8+3,
+BF16, audio on, seed 42:
+
+| Run | Total | Stage 1 denoise | Stage 2 denoise | Denoise total |
+|---|---:|---:|---:|---:|
+| fresh stock (`kitten_smoke_steel_attn_perf_ab_no_same_patch_20260528_024126`) | 562.6s | 155.1s | 310.2s | 465.4s |
+| D128 only (`kitten_smoke_steel_attn_perf_ab_yes_20260528_022259`) | 546.5s | 152.7s | 292.0s | 444.6s |
+| D64 default (`kitten_smoke_steel_attn_d64_exp_20260528_031448`) | 535.7s | 151.5s | 286.9s | 438.4s |
+
+The D64 microbench was neutral to slightly slower in isolation, but the
+integrated run won: stage 2 improved another 5.1s over D128-only and
+23.4s over stock.  Probe for the D64-default run:
+
+```text
+hit_d128          4
+hit_d64           6
+fallback          2
+fallback reason: mask
+```
+
+Remaining uncovered attention is masked text cross-attention; leave it on
+stock MLX unless a future masked wrapper is explicitly benchmarked.  This
+result supersedes the 2026-05-18 "custom FlashAttention-2 Metal kernel"
+abandonment note for this narrow no-mask STEEL-retile path.
+
 ### 2026-05-18: Draw Things / MFA research summary -- nothing portable for M1 Max `[ABANDONED]`
 
 Triggered by the "LTX 2.3 became 1.7x faster in just one month" Reddit
