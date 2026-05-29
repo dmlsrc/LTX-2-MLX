@@ -1,9 +1,8 @@
-"""Opt-in MLX STEEL attention tile override for local A/B testing.
+"""MLX STEEL attention tile override for supported LTX-2.3 shapes.
 
-This deliberately reads MLX's own local reference checkout and emits a
-custom ``mx.fast.metal_kernel`` wrapper around the regular STEEL attention
-body.  It is gated by the caller and intended for local perf experiments, not
-as a portable packaged kernel.
+This emits a custom ``mx.fast.metal_kernel`` wrapper around a vendored
+snapshot of MLX's regular STEEL attention body.  Unsupported shapes fall back
+to stock MLX SDPA in the caller.
 """
 
 from __future__ import annotations
@@ -17,6 +16,11 @@ from pathlib import Path
 from typing import Optional
 
 import mlx.core as mx
+
+from ._steel_attention_vendor import (
+    HEADER as _VENDORED_HEADER,
+    SOURCE as _VENDORED_SOURCE,
+)
 
 
 @dataclass(frozen=True)
@@ -48,7 +52,7 @@ _PROBE_COUNTS = {
 _PROBE_REASONS: dict[str, int] = {}
 _PROBE_SAMPLES: dict[str, str] = {}
 _HEADER_CACHE: dict[Path, str] = {}
-_KERNEL_CACHE: dict[Path, object] = {}
+_KERNEL_CACHE: dict[str, object] = {}
 
 
 def _shape_sample(
@@ -106,13 +110,14 @@ if _PROBE_ENABLED:
     atexit.register(_print_probe_summary)
 
 
-def _reference_dir() -> Path:
+def _reference_dir_override() -> Optional[Path]:
     candidates: list[Path] = []
     if env_path := os.environ.get("LTX_STEEL_ATTN_MLX_REFERENCE"):
         candidates.append(Path(env_path))
     if env_path := os.environ.get("MLX_REFERENCE_DIR"):
         candidates.append(Path(env_path))
-    candidates.append(Path("/Users/Shared/huggingface/reference/mlx"))
+    if not candidates:
+        return None
 
     for candidate in candidates:
         if (
@@ -123,7 +128,8 @@ def _reference_dir() -> Path:
 
     tried = ", ".join(str(path) for path in candidates)
     raise RuntimeError(
-        "LTX_STEEL_ATTN=1 requires a local MLX reference checkout; tried "
+        "LTX_STEEL_ATTN_MLX_REFERENCE/MLX_REFERENCE_DIR was set, but no "
+        "usable MLX reference checkout was found; tried "
         f"{tried}."
     )
 
@@ -209,7 +215,7 @@ def _inline_header(root: Path) -> str:
         return "".join(chunks)
 
     return (
-        "// LTX opt-in MLX STEEL attention wrapper header.\n"
+        "// LTX MLX STEEL attention wrapper header.\n"
         "#define MLX_METAL_JIT 1\n"
         + inline("mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h")
     )
@@ -263,20 +269,27 @@ def _source(root: Path) -> str:
     return prefix + body
 
 
-def _kernel(root: Path):
-    root = root.resolve()
-    if root not in _KERNEL_CACHE:
-        if root not in _HEADER_CACHE:
-            _HEADER_CACHE[root] = _inline_header(root)
-        _KERNEL_CACHE[root] = mx.fast.metal_kernel(
+def _kernel(root: Optional[Path]):
+    key = "vendor" if root is None else f"ref:{root.resolve()}"
+    if key not in _KERNEL_CACHE:
+        if root is None:
+            header = _VENDORED_HEADER
+            source = _VENDORED_SOURCE
+        else:
+            root = root.resolve()
+            if root not in _HEADER_CACHE:
+                _HEADER_CACHE[root] = _inline_header(root)
+            header = _HEADER_CACHE[root]
+            source = _source(root)
+        _KERNEL_CACHE[key] = mx.fast.metal_kernel(
             name="ltx_steel_attention_bq64_bk32",
             input_names=["Q", "K", "V"],
             output_names=["O"],
-            source=_source(root),
-            header=_HEADER_CACHE[root],
+            source=source,
+            header=header,
             ensure_row_contiguous=False,
         )
-    return _KERNEL_CACHE[root]
+    return _KERNEL_CACHE[key]
 
 
 def _scale_supported(scale: Optional[float], dim: int) -> bool:
@@ -327,13 +340,13 @@ def maybe_steel_attention(
     scale: Optional[float] = None,
     mask: Optional[mx.array] = None,
 ) -> Optional[mx.array]:
-    """Return custom STEEL attention output when this call matches the A/B gate."""
+    """Return custom STEEL attention output when this call matches the gate."""
     config, reason = _select_config(q, k, v, scale, mask)
     if config is None:
         _probe_fallback(reason, q, k, v, mask)
         return None
 
-    root = _reference_dir()
+    root = _reference_dir_override()
     batch, heads, seq, dim = q.shape
     n_q_tiles = (seq + config.bq - 1) // config.bq
     out = _kernel(root)(

@@ -806,7 +806,7 @@ sdpa_d_sweep` -- the bench that closed this hypothesis is in the
 repo and re-runnable if anyone wants to verify on different M1 Max
 units or after MLX upstream changes.
 
-### 2026-05-28: MLX STEEL attention wrapper retile -- BQ64/BK32 wins on M1 Max `[OPT-IN]`
+### 2026-05-28: MLX STEEL attention wrapper retile -- BQ64/BK32 wins on M1 Max `[DEFAULT]`
 
 Follow-up to the abandoned SDPA tile hypothesis.  The D-sweep was too
 indirect: it tested MLX's built-in `bk` selection through different head
@@ -816,18 +816,21 @@ with a larger Q tile.
 Implementation:
 
 - Added `LTX_2_MLX/kernels/steel_attention.py`.
-- Reads MLX's local reference checkout and inlines MLX's own STEEL
-  `steel_attention.h` dependency tree.
+- Uses a vendored snapshot of MLX's own STEEL `steel_attention.h`
+  dependency tree, with Apple's MIT license notice preserved in
+  `LTX_2_MLX/kernels/_steel_attention_vendor.py`.
 - Uses `mx.fast.metal_kernel(..., ensure_row_contiguous=False)` so the
   kernel accepts the real reshape/transpose strides.
 - Emits a row-contiguous physical `(B, L, H, D)` output and returns
   `.transpose(0, 2, 1, 3)`, matching MLX full-attention's physical output
   layout trick.
 - Specializes no-mask `BQ=64, BK=32` for `D=128` and `D=64`.
-- Gated by `LTX_STEEL_ATTN=1`; `LTX_STEEL_ATTN_PROBE=1` prints
-  `hit_d128`, `hit_d64`, fallback reasons and sample shapes.
-- D64 is default-on under `LTX_STEEL_ATTN=1`; use
-  `LTX_STEEL_ATTN_DISABLE_D64=1` only for bisects.
+- Default-on for supported no-mask D128/D64 shapes.  Disable with
+  `LTX_DISABLE_STEEL_ATTN=1` or `LTX_STEEL_ATTN=0`.
+  `LTX_STEEL_ATTN_PROBE=1` prints `hit_d128`, `hit_d64`, fallback
+  reasons and sample shapes.
+- D64 is default-on; use `LTX_STEEL_ATTN_DISABLE_D64=1` only for
+  bisects.
 
 Validation:
 

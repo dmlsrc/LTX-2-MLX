@@ -15,7 +15,19 @@ from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_bar
 # Set LTX_DISABLE_COMPILED_ATTN=1 to bypass the @mx.compile wrappers around the
 # reshape+SDPA+reshape sequence.  Used to A/B compile overhead vs fusion.
 _USE_COMPILED_ATTN = not os.environ.get("LTX_DISABLE_COMPILED_ATTN")
-_USE_STEEL_ATTN = bool(os.environ.get("LTX_STEEL_ATTN"))
+
+
+def _env_enabled_by_default(name: str, disable_name: str) -> bool:
+    false_values = {"", "0", "false", "no", "off"}
+    if os.environ.get(disable_name, "").strip().lower() not in false_values:
+        return False
+    value = os.environ.get(name)
+    return value is None or value.strip().lower() not in false_values
+
+
+# The local STEEL retile is the default for supported no-mask D128/D64 shapes.
+# Set LTX_DISABLE_STEEL_ATTN=1 or LTX_STEEL_ATTN=0 to force stock MLX SDPA.
+_USE_STEEL_ATTN = _env_enabled_by_default("LTX_STEEL_ATTN", "LTX_DISABLE_STEEL_ATTN")
 
 
 def _sdpa(
