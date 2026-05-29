@@ -30,6 +30,150 @@ def _env_enabled_by_default(name: str, disable_name: str) -> bool:
 _USE_STEEL_ATTN = _env_enabled_by_default("LTX_STEEL_ATTN", "LTX_DISABLE_STEEL_ATTN")
 
 
+_KV_DOWNSAMPLE_CONFIG: Optional[dict[str, object]] = None
+_KV_DOWNSAMPLE_COUNTS: dict[str, int] = {"applied": 0, "fallback": 0}
+_KV_DOWNSAMPLE_REASONS: dict[str, int] = {}
+
+
+def configure_kv_downsample(
+    *,
+    pool_h: int,
+    pool_w: int,
+    frames: int,
+    height: int,
+    width: int,
+    heads: int = 32,
+    dim_head: int = 128,
+    mode: str = "mean",
+    max_applied: Optional[int] = None,
+) -> None:
+    """Enable a failed-experiment K/V reduction path for video self-attn.
+
+    This stays diagnostic-only in the stage-2 harness.  Local A/B showed real
+    latency wins but unacceptable blur/ghosting, even when disabled for the
+    final stage-2 refinement step.
+    """
+    if pool_h < 1 or pool_w < 1:
+        raise ValueError("K/V downsample pool dimensions must be positive")
+    if height % pool_h or width % pool_w:
+        raise ValueError(
+            f"K/V downsample pool {pool_h}x{pool_w} does not divide "
+            f"stage-2 grid {height}x{width}"
+        )
+    if mode not in {"mean", "stride"}:
+        raise ValueError(f"Unsupported K/V downsample mode: {mode}")
+    if max_applied is not None and max_applied < 0:
+        raise ValueError("K/V downsample max_applied must be non-negative")
+
+    global _KV_DOWNSAMPLE_CONFIG
+    _KV_DOWNSAMPLE_CONFIG = {
+        "pool_h": int(pool_h),
+        "pool_w": int(pool_w),
+        "frames": int(frames),
+        "height": int(height),
+        "width": int(width),
+        "tokens": int(frames * height * width),
+        "heads": int(heads),
+        "dim_head": int(dim_head),
+        "mode": mode,
+    }
+    if max_applied is not None:
+        _KV_DOWNSAMPLE_CONFIG["max_applied"] = int(max_applied)
+    reset_kv_downsample_stats()
+
+
+def clear_kv_downsample() -> None:
+    global _KV_DOWNSAMPLE_CONFIG
+    _KV_DOWNSAMPLE_CONFIG = None
+    reset_kv_downsample_stats()
+
+
+def reset_kv_downsample_stats() -> None:
+    _KV_DOWNSAMPLE_COUNTS["applied"] = 0
+    _KV_DOWNSAMPLE_COUNTS["fallback"] = 0
+    _KV_DOWNSAMPLE_REASONS.clear()
+
+
+def kv_downsample_summary() -> Optional[dict]:
+    if _KV_DOWNSAMPLE_CONFIG is None:
+        return None
+    return {
+        "config": dict(_KV_DOWNSAMPLE_CONFIG),
+        "counts": dict(_KV_DOWNSAMPLE_COUNTS),
+        "fallback_reasons": dict(sorted(_KV_DOWNSAMPLE_REASONS.items())),
+    }
+
+
+def _kv_downsample_record(reason: Optional[str]) -> None:
+    if reason is None:
+        _KV_DOWNSAMPLE_COUNTS["applied"] += 1
+        return
+    _KV_DOWNSAMPLE_COUNTS["fallback"] += 1
+    _KV_DOWNSAMPLE_REASONS[reason] = _KV_DOWNSAMPLE_REASONS.get(reason, 0) + 1
+
+
+def _kv_downsample_candidate(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    heads: int,
+    dim_head: int,
+) -> tuple[bool, str]:
+    cfg = _KV_DOWNSAMPLE_CONFIG
+    if cfg is None:
+        return False, "disabled"
+    if q.ndim != 3 or k.ndim != 3 or v.ndim != 3:
+        return False, "ndim"
+    if heads != cfg["heads"] or dim_head != cfg["dim_head"]:
+        return False, "heads_dim"
+    if q.shape[0] != 1:
+        return False, "batch"
+    if q.shape[2] != heads * dim_head:
+        return False, "inner_dim"
+    if k.shape != q.shape or v.shape != q.shape:
+        return False, "not_self_attn"
+    if q.shape[1] != cfg["tokens"]:
+        return False, "tokens"
+    if q.dtype not in (mx.bfloat16, mx.float16):
+        return False, "dtype"
+    if k.dtype != q.dtype or v.dtype != q.dtype:
+        return False, "dtype_mismatch"
+    max_applied = cfg.get("max_applied")
+    if max_applied is not None and _KV_DOWNSAMPLE_COUNTS["applied"] >= max_applied:
+        return False, "budget"
+    return True, ""
+
+
+def _pool_spatial_heads(x: mx.array) -> mx.array:
+    cfg = _KV_DOWNSAMPLE_CONFIG
+    if cfg is None:
+        return x
+    dtype = x.dtype
+    b, heads, tokens, dim = x.shape
+    frames = cfg["frames"]
+    height = cfg["height"]
+    width = cfg["width"]
+    pool_h = cfg["pool_h"]
+    pool_w = cfg["pool_w"]
+
+    x = x.reshape(
+        b,
+        heads,
+        frames,
+        height // pool_h,
+        pool_h,
+        width // pool_w,
+        pool_w,
+        dim,
+    )
+    if cfg.get("mode", "mean") == "stride":
+        x = x[:, :, :, :, 0, :, 0, :]
+    else:
+        x = mx.mean(x.astype(mx.float32), axis=(4, 6)).astype(dtype)
+    pooled_tokens = frames * (height // pool_h) * (width // pool_w)
+    return mx.contiguous(x.reshape(b, heads, pooled_tokens, dim))
+
+
 def _sdpa(
     q: mx.array,
     k: mx.array,
@@ -66,6 +210,29 @@ def _attention_core_inline_no_mask(
     out = _sdpa(q, k, v, scale=scale)
 
     # Reshape back: (B, H, T, D) -> (B, T, H*D)
+    return out.transpose(0, 2, 1, 3).reshape(b, t_q, heads * dim_head)
+
+
+def _attention_core_inline_no_mask_kv_downsample(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    heads: int,
+    dim_head: int,
+) -> mx.array:
+    """Inline no-mask attention with experimental spatial K/V pooling."""
+    b, t_q, _ = q.shape
+    _, t_k, _ = k.shape
+
+    q = q.reshape(b, t_q, heads, dim_head).transpose(0, 2, 1, 3)
+    k = k.reshape(b, t_k, heads, dim_head).transpose(0, 2, 1, 3)
+    v = v.reshape(b, t_k, heads, dim_head).transpose(0, 2, 1, 3)
+    k = _pool_spatial_heads(k)
+    v = _pool_spatial_heads(v)
+
+    scale = 1.0 / (dim_head ** 0.5)
+    out = _sdpa(q, k, v, scale=scale)
+
     return out.transpose(0, 2, 1, 3).reshape(b, t_q, heads * dim_head)
 
 
@@ -130,6 +297,14 @@ def _attention_core(
 ) -> mx.array:
     """Dispatch to compiled attention core based on mask presence."""
     if mask is None:
+        if _KV_DOWNSAMPLE_CONFIG is not None:
+            use_kv_pool, reason = _kv_downsample_candidate(q, k, v, heads, dim_head)
+            if use_kv_pool:
+                _kv_downsample_record(None)
+                return _attention_core_inline_no_mask_kv_downsample(
+                    q, k, v, heads, dim_head
+                )
+            _kv_downsample_record(reason)
         return _compiled_attention_core_no_mask(q, k, v, heads, dim_head)
     else:
         return _compiled_attention_core_with_mask(q, k, v, heads, dim_head, mask)

@@ -432,7 +432,7 @@ Defaults trimmed in `scripts/generate.py`:
 Microbench evidence: `bench_ff_microbench.py bf16_layout` showed
 project_out is a 35 % win (rescues kernel-selection cliff:
 5.17 → 7.95 TFlops/s) but project_in is +2.5 % regression and all
-four attention projections are tied within ±1 %.  Kitten smoke
+four attention projections are tied within ±1 %.  A standard smoke run
 verified safe at bakery scale: 75.4 s/it vs 75.9 s/it (-0.7 %, no
 regression).  Documented in `PERFORMANCE.md` matrix rows for
 `--video-ff-layout` and `--video-attn-layout`.
@@ -449,6 +449,46 @@ brutal-efficiency targets" table.
 ## Archive
 
 (Abandoned investigations kept for negative-result evidence.)
+
+### 2026-05-28: Stage-2 video self-attn K/V token reduction `[ABANDONED]`
+
+**Bottom line:** real speed win, unacceptable quality loss.  Do not wire
+this into `generate.py`.
+
+Experiment: `scripts/stage2_harness.py` gained a diagnostic-only
+`--stage2-video-attn-kv-pool HxW` path that spatially reduces K/V tokens
+only for stage-2 D128 video self-attention.  The guard behaved correctly:
+on the 576x320x721 stage-2 harness it hit exactly one video
+self-attention call per block per pooled step (`48 layers * steps`) and
+fell back for D64/audio and cross/text attention.
+
+Timing evidence:
+
+| Variant | Measured stage-2 step | Denoise wall | K/V hits |
+| --- | ---: | ---: | --- |
+| baseline | 96.425s | not run full quality in this pass | none |
+| `1x2` mean, all 3 steps | 80.296s | 4m 04.7s | 144 / 864 no-mask calls |
+| `1x2` mean, first 2 steps only | not bench-mode isolated | 4m 20.7s | 96 / 864 no-mask calls |
+
+The all-step `1x2` path saved ~16.7% on the measured stage-2 step, but
+the decoded output was a blurred mess.  Limiting pooling to the first
+two stage-2 steps did not recover quality: the output still showed
+smearing and vertical-line ghosting.  The diagnostic count confirmed the
+final stage-2 refinement step was full-resolution (`budget` fallback for
+the last 48 video self-attention calls), so the early pooled trajectory
+had already moved into the wrong basin.
+
+Failure mode is consistent with the operation.  `1x2` mean pooling
+averages adjacent latent-width tokens, which low-passes horizontal detail
+and creates vertical-edge ghost/echo artifacts.  `2x1` would predictably
+move the smear axis, `2x2` should be worse, and stride selection would
+likely trade blur for aliasing.  This is not a VAE artifact: the harness
+was corrected to match the real distilled path (`--vae-decoder native`,
+auto tiling `temporal=256/8`, streaming VAE decode into VideoToolbox)
+before the quality verdict.
+
+The code path is intentionally kept as a harness diagnostic / negative
+evidence tool, not a production candidate.
 
 ### 2026-05-18: Consolidated quiet-machine microbench sweep -- RoPE has the only marginal remaining lever `[ABANDONED]`
 
@@ -501,13 +541,12 @@ exploratory ITERS=10 run):
 - Per-step: production RoPE = **0.82 s/run = 0.90 % of step**.
 - **Lever A (BF16 cos/sin):** TESTED 2026-05-18, **DEAD**.  Patched
   `apply_split_rotary_emb` with env-gated cast (`LTX_ROPE_BF16_FREQS=1`),
-  ran kitten one-stage (288x512x721, 8 steps, seed 42) baseline vs
+  ran a one-stage smoke A/B (288x512x721, 8 steps, seed 42) baseline vs
   experimental.  Speed: 75.9 → 74.5 s/it = -1.85 %, but baseline ran
   with the older `project_in+project_out+full-attention` layout stack
   vs the trimmed default — comparison confounded, real RoPE delta is
   within noise of single-sample runs.  Quality: same-seed output
-  shows visible drift (e.g. light switch on the wall renders
-  differently).  Precision change cascades into the render through
+  shows visible same-seed drift.  Precision change cascades into the render through
   AdaLN-conditioned attention.  Patch reverted, env var removed, A/B
   script deleted.
 - **Lever B (merge RoPE into QKV matmul epilogue):** caps at **0.90 %
@@ -842,14 +881,14 @@ Validation:
   - stage1 D128: stock `230.3 ms`, steel `199.6 ms`
   - stage2 D128: stock `3730.2 ms`, steel `3129.2 ms`
 
-Production-ish kitten smoke, 576x320, 721 frames, distilled 8+3,
+Production-ish smoke, 576x320, 721 frames, distilled 8+3,
 BF16, audio on, seed 42:
 
 | Run | Total | Stage 1 denoise | Stage 2 denoise | Denoise total |
 |---|---:|---:|---:|---:|
-| fresh stock (`kitten_smoke_steel_attn_perf_ab_no_same_patch_20260528_024126`) | 562.6s | 155.1s | 310.2s | 465.4s |
-| D128 only (`kitten_smoke_steel_attn_perf_ab_yes_20260528_022259`) | 546.5s | 152.7s | 292.0s | 444.6s |
-| D64 default (`kitten_smoke_steel_attn_d64_exp_20260528_031448`) | 535.7s | 151.5s | 286.9s | 438.4s |
+| fresh stock | 562.6s | 155.1s | 310.2s | 465.4s |
+| D128 only | 546.5s | 152.7s | 292.0s | 444.6s |
+| D64 default | 535.7s | 151.5s | 286.9s | 438.4s |
 
 The D64 microbench was neutral to slightly slower in isolation, but the
 integrated run won: stage 2 improved another 5.1s over D128-only and

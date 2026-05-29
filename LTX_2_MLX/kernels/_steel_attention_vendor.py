@@ -2312,7 +2312,7 @@ SOURCE = r"""
         tidl.y * params.O_strides[1] + // Head
         tidl.x * BQ * params.O_strides[2]; // Sequence
 
-  
+
 
     // Prepare threadgroup memory
     constexpr short padQ = 16 / sizeof(T);
@@ -2432,7 +2432,7 @@ SOURCE = r"""
       max_score[i] = Limits<AccumType>::finite_min;
     }
 
-  
+
 
     int kb_lim = params.NK;
     int kb_min_causal = params.NK;
@@ -2527,7 +2527,7 @@ SOURCE = r"""
       }
 
       // Other masking as needed
-    
+
 
       threadgroup_barrier(mem_flags::mem_threadgroup);
 

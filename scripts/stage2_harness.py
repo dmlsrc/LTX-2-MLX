@@ -106,6 +106,54 @@ def video_tensor_to_frames(video: mx.array) -> list[np.ndarray]:
     return frames
 
 
+def parse_spatial_pool(value: str) -> tuple[int, int] | None:
+    lowered = value.strip().lower()
+    if lowered in {"", "0", "off", "none", "false", "no"}:
+        return None
+    if "x" in lowered:
+        left, right = lowered.split("x", 1)
+        pool = (int(left), int(right))
+    else:
+        n = int(lowered)
+        pool = (n, n)
+    if pool[0] < 1 or pool[1] < 1:
+        raise argparse.ArgumentTypeError("pool dimensions must be positive")
+    return pool
+
+
+def print_kv_downsample_summary(attention_module, *, stream=None) -> None:
+    if attention_module is None:
+        return
+    summary = attention_module.kv_downsample_summary()
+    if not summary:
+        return
+    stream = stream or sys.stdout
+    config = summary["config"]
+    counts = summary["counts"]
+    reasons = summary["fallback_reasons"]
+    total = counts.get("applied", 0) + counts.get("fallback", 0)
+    print("", file=stream)
+    print("[stage2-video-attn-kv-pool] summary:", file=stream)
+    print(
+        "  pool: "
+        f"{config['pool_h']}x{config['pool_w']}  "
+        f"mode={config.get('mode', 'mean')}  "
+        f"grid={config['frames']}x{config['height']}x{config['width']}  "
+        f"tokens={config['tokens']}",
+        file=stream,
+    )
+    if config.get("max_applied") is not None:
+        print(f"  budget: {config['max_applied']} applied calls", file=stream)
+    print(
+        f"  applied: {counts.get('applied', 0)} / {total} no-mask attention calls",
+        file=stream,
+    )
+    if reasons:
+        print("  fallback reasons:", file=stream)
+        for reason, count in sorted(reasons.items(), key=lambda item: (-item[1], item[0])):
+            print(f"    {reason:<14} {count}", file=stream)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Resume distilled LTX-2.3 two-stage generation from saved stage-1 latents.",
@@ -157,8 +205,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--vae-decoder",
-        choices=["native-conv3d"],
-        default="native-conv3d",
+        choices=["native"],
+        default="native",
         help="Video VAE decoder backend (MLX-native Conv3d).",
     )
     parser.add_argument(
@@ -262,6 +310,39 @@ def parse_args() -> argparse.Namespace:
             "audio decode, and output save).  N=2 is the standard recipe: "
             "step 1 warms MLX caches + kernels, step 2 is the measured step. "
             "0 = disabled (default), run full pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-video-attn-kv-pool",
+        type=parse_spatial_pool,
+        default=None,
+        metavar="HxW",
+        help=(
+            "Failed diagnostic approximation: spatially reduce K/V tokens for "
+            "stage-2 D128 video self-attention only.  1x2 measured faster but "
+            "produced blur/ghosting; keep this for negative-evidence probes, "
+            "not production."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-video-attn-kv-pool-mode",
+        choices=["mean", "stride"],
+        default="mean",
+        help=(
+            "K/V reduction mode for --stage2-video-attn-kv-pool. mean averages "
+            "each spatial window; stride keeps the top-left token from each window. "
+            "Both are diagnostic-only."
+        ),
+    )
+    parser.add_argument(
+        "--stage2-video-attn-kv-pool-steps",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Apply K/V pooling only to the first N stage-2 steps.  Leave unset "
+            "to pool all stage-2 steps.  First-2-step 1x2 mean still produced "
+            "visible smear/ghosting in local A/B."
         ),
     )
     return parser.parse_args()
@@ -447,6 +528,41 @@ def main() -> None:
         layers = gen.describe_transformer_layers(attn_layout_layers)
         print(f"Video attention layout: ENABLED (specs={spec}, layers={layers})")
     print(f"Stage-1 RNG burn: {'disabled' if args.independent_stage2_noise else 'ENABLED'}")
+
+    stage2_kv_pool_attention = None
+    if args.stage2_video_attn_kv_pool is not None:
+        from LTX_2_MLX.model.transformer import attention as stage2_kv_pool_attention
+
+        pool_h, pool_w = args.stage2_video_attn_kv_pool
+        stage2_frames = int(stage1_video.shape[2])
+        stage2_latent_h = int(stage1_video.shape[3]) * 2
+        stage2_latent_w = int(stage1_video.shape[4]) * 2
+        pool_steps = args.stage2_video_attn_kv_pool_steps
+        if pool_steps is not None and pool_steps < 0:
+            raise ValueError("--stage2-video-attn-kv-pool-steps must be non-negative")
+        max_applied = None if pool_steps is None else pool_steps * 48
+        stage2_kv_pool_attention.configure_kv_downsample(
+            pool_h=pool_h,
+            pool_w=pool_w,
+            frames=stage2_frames,
+            height=stage2_latent_h,
+            width=stage2_latent_w,
+            mode=args.stage2_video_attn_kv_pool_mode,
+            max_applied=max_applied,
+        )
+        pooled_tokens = stage2_frames * (stage2_latent_h // pool_h) * (stage2_latent_w // pool_w)
+        full_tokens = stage2_frames * stage2_latent_h * stage2_latent_w
+        budget_desc = (
+            "all stage-2 steps"
+            if pool_steps is None
+            else f"first {pool_steps} stage-2 step{'s' if pool_steps != 1 else ''}"
+        )
+        print(
+            "Stage-2 video self-attn K/V pooling: ENABLED [FAILED DIAGNOSTIC] "
+            f"(pool={pool_h}x{pool_w}, mode={args.stage2_video_attn_kv_pool_mode}, "
+            f"K/V tokens {full_tokens}->{pooled_tokens}, {budget_desc}; "
+            "not same-math, known blur/ghosting)"
+        )
 
     print("\n[1/5] Loading text conditioning...")
     conditioning = gen.load_text_conditioning(args.embedding, use_av_encoder=True)
@@ -658,8 +774,18 @@ def main() -> None:
                 f"{bench_step_times[bench_mode_step - 1]:.3f}s",
                 file=sys.stderr,
             )
+        print_kv_downsample_summary(stage2_kv_pool_attention, stream=sys.stderr)
         print("== end bench-mode ==", file=sys.stderr, flush=True)
         return
+
+    # Normal (non-bench) path: mirror generate.py's default output route.
+    # The default HEVC tier uses VideoToolbox, so ask the pipeline to return
+    # final latents and stream VAE chunks directly into the encoder instead of
+    # materializing a full decoded video tensor first.
+    output_tier = "default"
+    output_backend = "auto"
+    resolved_output_backend = gen.resolve_output_backend(output_backend, output_tier)
+    stream_decode = resolved_output_backend == "videotoolbox"
 
     # Normal (non-bench) path: use the StackedPhaseBars UI.
     with StackedPhaseBars() as denoise_bars:
@@ -687,6 +813,7 @@ def main() -> None:
             progress_message=progress_message,
             latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
             burn_stage1_rng=not args.independent_stage2_noise,
+            decode_video=not stream_decode,
         )
 
     pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
@@ -694,24 +821,81 @@ def main() -> None:
         timings.extend(pipeline_timings)
     else:
         timings.mark("stage2 + decode")
+    print_kv_downsample_summary(stage2_kv_pool_attention)
 
-    frames = video_tensor_to_frames(video)
-    if audio_waveform is not None:
-        print(f"  Generated audio: {audio_waveform.shape}")
-    timings.mark("frame conversion")
-
-    print(f"\nSaving video to {output_path}...")
-    if audio_waveform is not None:
-        gen.save_video_with_audio(
-            frames,
-            audio_waveform,
-            output_path,
-            fps=fps,
-            audio_sample_rate=audio_sample_rate,
+    final_path = output_path
+    if stream_decode:
+        from LTX_2_MLX.pipelines.streaming import (
+            iter_decoded_chunks,
+            latent_dims,
+            plan_vae_tiling,
         )
+
+        final_video_latent = video
+        effective_tiling = config._get_tiling_config()
+        n_total_frames, latent_h, latent_w = latent_dims(final_video_latent)
+        n_vae_chunks, tiling_desc = plan_vae_tiling(final_video_latent, effective_tiling)
+        decoder_name = av_pipeline.video_decoder.__class__.__name__
+        print(
+            f"  Streaming VAE decode -> encoder: latent shape "
+            f"{tuple(final_video_latent.shape)} -> {latent_w}x{latent_h}, "
+            f"{n_total_frames} frames"
+        )
+        print(
+            f"  VAE decoder: {decoder_name} ({tiling_desc}, "
+            f"{n_vae_chunks} chunk{'s' if n_vae_chunks != 1 else ''})"
+        )
+        if audio_waveform is not None:
+            print(f"  Generated audio: {audio_waveform.shape}")
+        timings.mark("post-pipeline prep")
+
+        print(f"\nSaving video to {output_path}...")
+        with StackedPhaseBars() as stream_bars:
+            vae_pbar = stream_bars.add(
+                total=n_vae_chunks,
+                desc="VAE chunks",
+                unit="chunk",
+            )
+
+            def chunk_aware_frames():
+                for chunk_frames in iter_decoded_chunks(
+                    final_video_latent,
+                    av_pipeline.video_decoder,
+                    tiling=effective_tiling,
+                    output_format="fp16_rgba",
+                ):
+                    vae_pbar.update(1)
+                    while chunk_frames:
+                        yield chunk_frames.pop(0)
+
+            final_path = gen.encode_video_dispatch(
+                chunk_aware_frames(),
+                output_path,
+                tier=output_tier,
+                fps=fps,
+                audio_waveform=audio_waveform if audio_waveform is not None else None,
+                audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
+                output_backend=output_backend,
+                n_source_frames=n_total_frames,
+                progress_stack=stream_bars,
+            )
     else:
-        gen.save_video(frames, output_path, fps=fps)
-    print(f"Done! Video saved to {output_path}")
+        frames = video_tensor_to_frames(video)
+        if audio_waveform is not None:
+            print(f"  Generated audio: {audio_waveform.shape}")
+        timings.mark("frame conversion")
+
+        print(f"\nSaving video to {output_path}...")
+        final_path = gen.encode_video_dispatch(
+            frames,
+            output_path,
+            tier=output_tier,
+            fps=fps,
+            audio_waveform=audio_waveform if audio_waveform is not None else None,
+            audio_sample_rate=audio_sample_rate if audio_waveform is not None else None,
+            output_backend=output_backend,
+        )
+    print(f"Done! Video saved to {final_path}")
     timings.mark("output save")
 
     if args.save_run_log:
@@ -720,7 +904,7 @@ def main() -> None:
             "started_at": datetime.now(timezone.utc).isoformat(),
             "argv": sys.argv[:],
             "cwd": os.getcwd(),
-            "output_path": output_path,
+            "output_path": str(final_path),
             "stage1_latents": args.stage1_latents,
             "embedding": args.embedding,
             "sidecars": {
@@ -764,6 +948,21 @@ def main() -> None:
                     for target, layout in args.video_attn_layout
                 ],
                 "video_attn_layout_layers": list(attn_layout_layers),
+                "stage2_video_attn_kv_pool": (
+                    {
+                        "pool_h": args.stage2_video_attn_kv_pool[0],
+                        "pool_w": args.stage2_video_attn_kv_pool[1],
+                        "mode": args.stage2_video_attn_kv_pool_mode,
+                        "steps": args.stage2_video_attn_kv_pool_steps,
+                    }
+                    if args.stage2_video_attn_kv_pool is not None
+                    else None
+                ),
+                "stage2_video_attn_kv_pool_summary": (
+                    stage2_kv_pool_attention.kv_downsample_summary()
+                    if stage2_kv_pool_attention is not None
+                    else None
+                ),
                 "transformer_cache_quantize": args.transformer_cache_quantize,
                 "transformer_cache_quantize_layouts_disabled": transformer_cache_quantize_layouts_disabled,
             },
