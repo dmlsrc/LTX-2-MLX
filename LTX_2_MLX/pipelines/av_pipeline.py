@@ -1495,6 +1495,7 @@ class AVPipeline:
         latent_save_path: Optional[str] = None,
         burn_stage1_rng: bool = True,
         decode_video: bool = True,
+        stage2_state_probe: Optional[Callable[[LatentState, Optional[LatentState], mx.array], None]] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Resume the distilled two-stage pipeline from saved stage-1 latents.
@@ -1662,6 +1663,9 @@ class AVPipeline:
                 initial_latent=stage_1_audio_latent,
             )
             audio_state_2 = noiser(audio_state_2, noise_scale=float(stage_2_sigmas[0]))
+
+        if stage2_state_probe is not None:
+            stage2_state_probe(video_state_2, audio_state_2, stage_2_sigmas)
 
         emit_progress_message(
             f"  Distilled stage 2: {len(stage_2_sigmas) - 1} steps at "

@@ -368,6 +368,8 @@ class MultiModalTransformerArgsPreprocessor:
     - Cross-attention timestep embeddings (scale/shift and gate)
     """
 
+    AV_CROSS_TIMESTEP_MODES = ("official", "legacy")
+
     def __init__(
         self,
         simple_preprocessor: TransformerArgsPreprocessor,
@@ -376,6 +378,7 @@ class MultiModalTransformerArgsPreprocessor:
         cross_pe_max_pos: int,
         audio_cross_attention_dim: int,
         av_ca_timestep_scale_multiplier: int = 1,  # PyTorch default (av_ca_factor = 1/1000)
+        av_cross_timestep_mode: str = "official",
     ):
         """
         Initialize multi-modal preprocessor.
@@ -394,6 +397,16 @@ class MultiModalTransformerArgsPreprocessor:
         self.cross_pe_max_pos = cross_pe_max_pos
         self.audio_cross_attention_dim = audio_cross_attention_dim
         self.av_ca_timestep_scale_multiplier = av_ca_timestep_scale_multiplier
+        self.av_cross_timestep_mode = self._validate_av_cross_timestep_mode(
+            av_cross_timestep_mode
+        )
+
+    @classmethod
+    def _validate_av_cross_timestep_mode(cls, mode: str) -> str:
+        if mode not in cls.AV_CROSS_TIMESTEP_MODES:
+            valid = ", ".join(cls.AV_CROSS_TIMESTEP_MODES)
+            raise ValueError(f"Invalid AV cross-attention timestep mode {mode!r}; expected one of: {valid}")
+        return mode
 
     def _prepare_cross_positional_embeddings(
         self,
@@ -422,7 +435,8 @@ class MultiModalTransformerArgsPreprocessor:
 
     def _prepare_cross_attention_timestep(
         self,
-        timestep: mx.array,
+        scale_shift_timestep: mx.array,
+        gate_timestep: mx.array,
         batch_size: int,
     ) -> Tuple[mx.array, mx.array]:
         """
@@ -430,15 +444,18 @@ class MultiModalTransformerArgsPreprocessor:
 
         Returns scale/shift and gate embeddings separately.
         """
-        scaled_timestep = timestep * self.simple_preprocessor.timestep_scale_multiplier
+        timestep_scale = self.simple_preprocessor.timestep_scale_multiplier
 
-        # Scale/shift timestep (AdaLayerNormSingle returns tuple, we only need processed emb)
-        scale_shift_emb, _ = self.cross_scale_shift_adaln(scaled_timestep.flatten())
+        # Upstream LTX-2 uses own-modality per-token timesteps for the
+        # cross-attn scale/shift AdaLN, and cross-modality sigma for the gate.
+        scale_shift_emb, _ = self.cross_scale_shift_adaln(
+            (scale_shift_timestep * timestep_scale).flatten()
+        )
         scale_shift_emb = scale_shift_emb.reshape(batch_size, -1, 4, self.simple_preprocessor.inner_dim)
 
         # Gate timestep (with AV CA scale)
-        av_ca_factor = self.av_ca_timestep_scale_multiplier / self.simple_preprocessor.timestep_scale_multiplier
-        gate_emb, _ = self.cross_gate_adaln((scaled_timestep * av_ca_factor).flatten())
+        gate_scale = self.av_ca_timestep_scale_multiplier
+        gate_emb, _ = self.cross_gate_adaln((gate_timestep * gate_scale).flatten())
         gate_emb = gate_emb.reshape(batch_size, -1, 1, self.simple_preprocessor.inner_dim)
 
         return scale_shift_emb, gate_emb
@@ -469,16 +486,20 @@ class MultiModalTransformerArgsPreprocessor:
         # Cross-modal positional embeddings use THIS modality's temporal positions
         cross_pe = self._prepare_cross_positional_embeddings(modality.positions)
 
-        # Cross-attention timestep uses the OTHER modality's sigma
-        # This is critical: audio cross-attn timestep comes from video's sigma,
-        # and video cross-attn timestep comes from audio's sigma
         cross_sigma = cross_modality.sigma if cross_modality.sigma is not None else cross_modality.timesteps
         if cross_sigma.ndim > 1:
             cross_sigma = cross_sigma[:, 0]  # Per-token: use first token's sigma
 
+        if self.av_cross_timestep_mode == "legacy":
+            scale_shift_timestep = cross_sigma
+        else:
+            scale_shift_timestep = modality.timesteps
+
         batch_size = args.x.shape[0]
         cross_scale_shift, cross_gate = self._prepare_cross_attention_timestep(
-            cross_sigma, batch_size
+            scale_shift_timestep,
+            cross_sigma,
+            batch_size,
         )
 
         return args.replace(
@@ -528,6 +549,7 @@ class LTXModel(nn.Module):
         # AV cross-attn timestep scale: PyTorch defaults to 1, giving av_ca_factor = 1/1000
         # This controls the timestep scaling for audio-video cross attention
         av_ca_timestep_scale_multiplier: int = 1,
+        av_cross_timestep_mode: str = "official",
         use_middle_indices_grid: bool = True,
         # RoPE type: LTX-2 distilled weights use SPLIT
         rope_type: LTXRopeType = LTXRopeType.SPLIT,
@@ -556,6 +578,9 @@ class LTXModel(nn.Module):
             timestep_scale_multiplier: Scale for timestep (1000).
             av_ca_timestep_scale_multiplier: Scale for AV cross-attention timestep.
                 PyTorch default is 1, giving av_ca_factor = 1/1000.
+            av_cross_timestep_mode: "official" uses own-modality timesteps for
+                cross-attn scale/shift and cross-modality sigma for gates;
+                "legacy" uses cross-modality sigma for both.
             use_middle_indices_grid: Use middle of position bounds for RoPE.
             rope_type: Type of RoPE. LTX-2 distilled uses SPLIT.
             compute_dtype: Dtype for computation.
@@ -574,6 +599,9 @@ class LTXModel(nn.Module):
         self.compute_dtype = compute_dtype
         self.low_memory = low_memory
         self.fast_mode = fast_mode
+        self.av_cross_timestep_mode = MultiModalTransformerArgsPreprocessor._validate_av_cross_timestep_mode(
+            av_cross_timestep_mode
+        )
         self.profile_transformer_once = profile_transformer_once
         self.profile_transformer_label: Optional[str] = None
         self.profile_transformer_blocks: Tuple[int, ...] = ()
@@ -756,6 +784,7 @@ class LTXModel(nn.Module):
                     cross_pe_max_pos=self.AUDIO_CROSS_PE_MAX_POS,
                     audio_cross_attention_dim=self.audio_inner_dim,
                     av_ca_timestep_scale_multiplier=av_ca_timestep_scale_multiplier,
+                    av_cross_timestep_mode=self.av_cross_timestep_mode,
                 )
             else:
                 self._video_args_preprocessor = video_simple_preprocessor
@@ -783,9 +812,19 @@ class LTXModel(nn.Module):
                     cross_pe_max_pos=self.AUDIO_CROSS_PE_MAX_POS,
                     audio_cross_attention_dim=self.audio_inner_dim,
                     av_ca_timestep_scale_multiplier=av_ca_timestep_scale_multiplier,
+                    av_cross_timestep_mode=self.av_cross_timestep_mode,
                 )
             else:
                 self._audio_args_preprocessor = audio_simple_preprocessor
+
+    def set_av_cross_timestep_mode(self, mode: str) -> None:
+        """Switch A/V cross-attention timestep semantics for diagnostics."""
+        mode = MultiModalTransformerArgsPreprocessor._validate_av_cross_timestep_mode(mode)
+        self.av_cross_timestep_mode = mode
+        for attr in ("_video_args_preprocessor", "_audio_args_preprocessor"):
+            preprocessor = getattr(self, attr, None)
+            if isinstance(preprocessor, MultiModalTransformerArgsPreprocessor):
+                preprocessor.av_cross_timestep_mode = mode
 
     def enable_video_ff_quantization(
         self,

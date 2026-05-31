@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import generate as gen  # noqa: E402
 
 from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
+from LTX_2_MLX.pipelines.common import audio_modality_from_state, modality_from_state  # noqa: E402
 
 
 def adjacent_run_log_path(latents_path: str) -> str:
@@ -152,6 +153,108 @@ def print_kv_downsample_summary(attention_module, *, stream=None) -> None:
         print("  fallback reasons:", file=stream)
         for reason, count in sorted(reasons.items(), key=lambda item: (-item[1], item[0])):
             print(f"    {reason:<14} {count}", file=stream)
+
+
+def _mx_float(value: mx.array) -> float:
+    return float(np.array(value))
+
+
+def _delta_stats(a: mx.array, b: mx.array) -> dict:
+    a32 = a.astype(mx.float32)
+    b32 = b.astype(mx.float32)
+    diff = a32 - b32
+    abs_diff = mx.abs(diff)
+    dot = mx.sum(a32 * b32)
+    norm_a = mx.sqrt(mx.sum(a32 * a32))
+    norm_b = mx.sqrt(mx.sum(b32 * b32))
+    denom = norm_a * norm_b
+    max_abs = mx.max(abs_diff)
+    mean_abs = mx.mean(abs_diff)
+    rms_abs = mx.sqrt(mx.mean(diff * diff))
+    mx.eval(max_abs, mean_abs, rms_abs, dot, denom)
+    denom_f = _mx_float(denom)
+    cos = _mx_float(dot) / denom_f if denom_f else float("nan")
+    if not np.isnan(cos):
+        cos = max(-1.0, min(1.0, cos))
+    return {
+        "official_shape": tuple(a.shape),
+        "legacy_shape": tuple(b.shape),
+        "max_abs": _mx_float(max_abs),
+        "mean_abs": _mx_float(mean_abs),
+        "rms_abs": _mx_float(rms_abs),
+        "cos": cos,
+    }
+
+
+def _cross_sigma(modality):
+    sigma = modality.sigma if modality.sigma is not None else modality.timesteps
+    if sigma.ndim > 1:
+        sigma = sigma[:, 0]
+    return sigma
+
+
+def _cross_scale_shift_pair(preprocessor, modality, cross_modality) -> tuple[mx.array, mx.array]:
+    batch_size = modality.latent.shape[0]
+    cross_sigma = _cross_sigma(cross_modality)
+    official, _ = preprocessor._prepare_cross_attention_timestep(
+        modality.timesteps,
+        cross_sigma,
+        batch_size,
+    )
+    legacy, _ = preprocessor._prepare_cross_attention_timestep(
+        cross_sigma,
+        cross_sigma,
+        batch_size,
+    )
+    return official, legacy
+
+
+def print_av_cross_timestep_probe(
+    model,
+    video_state,
+    audio_state,
+    video_context: mx.array,
+    audio_context: mx.array | None,
+    sigma: float,
+    *,
+    stream=None,
+) -> None:
+    stream = stream or sys.stdout
+    if audio_state is None or audio_context is None:
+        print("[av-cross-timestep-probe] skipped: audio branch inactive", file=stream)
+        return
+    video_modality = modality_from_state(video_state, video_context, sigma)
+    audio_modality = audio_modality_from_state(audio_state, audio_context, sigma)
+
+    video_preprocessor = getattr(model, "_video_args_preprocessor", None)
+    audio_preprocessor = getattr(model, "_audio_args_preprocessor", None)
+    if video_preprocessor is None or audio_preprocessor is None:
+        print("[av-cross-timestep-probe] skipped: AV preprocessors unavailable", file=stream)
+        return
+
+    video_official, video_legacy = _cross_scale_shift_pair(
+        video_preprocessor,
+        video_modality,
+        audio_modality,
+    )
+    audio_official, audio_legacy = _cross_scale_shift_pair(
+        audio_preprocessor,
+        audio_modality,
+        video_modality,
+    )
+    video_stats = _delta_stats(video_official, video_legacy)
+    audio_stats = _delta_stats(audio_official, audio_legacy)
+
+    print("", file=stream)
+    print("[av-cross-timestep-probe] official scale/shift vs legacy scale/shift", file=stream)
+    for label, stats in (("video<-audio", video_stats), ("audio<-video", audio_stats)):
+        print(
+            f"  {label:<13} official_shape={stats['official_shape']} "
+            f"legacy_shape={stats['legacy_shape']} "
+            f"max_abs={stats['max_abs']:.6g} mean_abs={stats['mean_abs']:.6g} "
+            f"rms_abs={stats['rms_abs']:.6g} cos={stats['cos']:.9f}",
+            file=stream,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -298,6 +401,24 @@ def parse_args() -> argparse.Namespace:
         "--save-all-sidecars",
         action="store_true",
         help="Save stage-2 latent sidecar and run log.",
+    )
+    parser.add_argument(
+        "--av-cross-timestep-mode",
+        choices=["official", "legacy"],
+        default="official",
+        help=(
+            "A/V cross-attention timestep semantics. official matches current "
+            "Lightricks: own-modality timesteps for scale/shift, cross-modality "
+            "sigma for gates. legacy uses cross-modality sigma for both."
+        ),
+    )
+    parser.add_argument(
+        "--probe-av-cross-timestep",
+        action="store_true",
+        help=(
+            "At the first stage-2 state, print official-vs-legacy cross-attn "
+            "scale/shift embedding deltas, then continue the requested run."
+        ),
     )
     parser.add_argument(
         "--bench-mode",
@@ -527,6 +648,9 @@ def main() -> None:
         spec = ",".join(f"{target}:{layout}" for target, layout in args.video_attn_layout)
         layers = gen.describe_transformer_layers(attn_layout_layers)
         print(f"Video attention layout: ENABLED (specs={spec}, layers={layers})")
+    print(f"AV cross-attn timestep mode: {args.av_cross_timestep_mode}")
+    if args.probe_av_cross_timestep:
+        print("AV cross-attn timestep probe: ENABLED")
     print(f"Stage-1 RNG burn: {'disabled' if args.independent_stage2_noise else 'ENABLED'}")
 
     stage2_kv_pool_attention = None
@@ -611,6 +735,8 @@ def main() -> None:
         cross_attention_adaln=True,
         apply_gated_attention=True,
     )
+    if hasattr(model, "set_av_cross_timestep_mode"):
+        model.set_av_cross_timestep_mode(args.av_cross_timestep_mode)
     print("  CFG disabled (distilled stage-2 harness)")
     timings.mark("transformer load")
 
@@ -660,6 +786,7 @@ def main() -> None:
         audio_decoder=audio_decoder,
         vocoder=vocoder,
     )
+    probe_model = av_pipeline._velocity_transformer() if args.probe_av_cross_timestep else None
 
     # LTX_MONO_INLINED=1: swap the pipeline's transformer with InlinedAVModel
     # (mono_pipeline.transformer_step + flat pretransposed weights).  Same
@@ -694,6 +821,19 @@ def main() -> None:
     timings.mark("pipeline object setup")
 
     print("\n[5/5] Running stage 2 from saved latents...")
+
+    def stage2_state_probe(video_state, audio_state, stage_2_sigmas):
+        if probe_model is None:
+            return
+        print_av_cross_timestep_probe(
+            probe_model,
+            video_state,
+            audio_state,
+            text_encoding,
+            text_audio_encoding,
+            float(np.array(stage_2_sigmas[0])),
+            stream=sys.stderr if bench_mode_active else sys.stdout,
+        )
 
     # Bench-mode state: track per-step wall time + trigger early exit.
     # ``_BenchModeStop`` is caught by the bench-mode wrapper just below the
@@ -757,6 +897,7 @@ def main() -> None:
                 progress_message=progress_message,
                 latent_save_path=None,
                 burn_stage1_rng=not args.independent_stage2_noise,
+                stage2_state_probe=stage2_state_probe if args.probe_av_cross_timestep else None,
             )
         except _BenchModeStop:
             pass
@@ -814,6 +955,7 @@ def main() -> None:
             latent_save_path=gen.latent_sidecar_path(output_path) if args.save_latents else None,
             burn_stage1_rng=not args.independent_stage2_noise,
             decode_video=not stream_decode,
+            stage2_state_probe=stage2_state_probe if args.probe_av_cross_timestep else None,
         )
 
     pipeline_timings = getattr(av_pipeline, "last_timing_sections", None)
@@ -948,6 +1090,8 @@ def main() -> None:
                     for target, layout in args.video_attn_layout
                 ],
                 "video_attn_layout_layers": list(attn_layout_layers),
+                "av_cross_timestep_mode": args.av_cross_timestep_mode,
+                "probe_av_cross_timestep": args.probe_av_cross_timestep,
                 "stage2_video_attn_kv_pool": (
                     {
                         "pool_h": args.stage2_video_attn_kv_pool[0],
