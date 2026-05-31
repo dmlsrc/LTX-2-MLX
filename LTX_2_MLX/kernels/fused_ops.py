@@ -243,17 +243,17 @@ _interleaved_rope_kernel = mx.fast.metal_kernel(
             uint even_idx = batch_idx * seq_dim + seq_idx * dim + pair_idx * 2;
             uint odd_idx = even_idx + 1;
 
-            T x_even = x[even_idx];
-            T x_odd = x[odd_idx];
-            T cos_val = cos_freq[idx];
-            T sin_val = sin_freq[idx];
+            float x_even = float(x[even_idx]);
+            float x_odd = float(x[odd_idx]);
+            float cos_val = float(cos_freq[idx]);
+            float sin_val = float(sin_freq[idx]);
 
             // Interleaved rotation: out_even = x_even * cos - x_odd * sin
             //                       out_odd = x_odd * cos + x_even * sin
             if (is_even) {
-                out[idx] = x_even * cos_val - x_odd * sin_val;
+                out[idx] = T(x_even * cos_val - x_odd * sin_val);
             } else {
-                out[idx] = x_odd * cos_val + x_even * sin_val;
+                out[idx] = T(x_odd * cos_val + x_even * sin_val);
             }
         }
     """,
@@ -510,6 +510,9 @@ def adaln_norm_fused(
     Returns:
         ``(rms_norm(x) * (1 + scale) + shift).astype(x.dtype)``.
     """
+    if eps != _ADALN_FUSED_EPS:
+        _probe("adaln_fallback")
+        return _adaln_norm_mlx(x, scale, shift, eps)
     if not _adaln_t2v_broadcast_compatible(x, scale, shift):
         _probe("adaln_fallback")
         return _adaln_norm_mlx(x, scale, shift, eps)

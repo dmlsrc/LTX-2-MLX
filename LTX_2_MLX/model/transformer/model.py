@@ -255,9 +255,14 @@ class TransformerArgsPreprocessor:
         if attention_mask is None:
             return None
 
-        # If already a float mask, return as-is
+        # If already an additive float mask, preserve its values but normalize
+        # the common (B, S) / (B, T, S) forms to SDPA-broadcastable shape.
         if attention_mask.dtype in (mx.float16, mx.float32, mx.bfloat16):
-            return attention_mask
+            if attention_mask.ndim == 2:
+                attention_mask = attention_mask[:, None, None, :]
+            elif attention_mask.ndim == 3:
+                attention_mask = attention_mask[:, None, :, :]
+            return attention_mask.astype(target_dtype)
 
         # Use dtype-appropriate max value (matches PyTorch finfo behavior)
         # PyTorch uses (mask - 1) * finfo(dtype).max
@@ -271,7 +276,10 @@ class TransformerArgsPreprocessor:
         # Convert boolean mask to additive mask
         # True = attend (0), False = don't attend (large negative)
         mask = (1 - attention_mask.astype(mx.float32)) * mask_value
-        mask = mask.reshape(attention_mask.shape[0], 1, 1, attention_mask.shape[-1])
+        if attention_mask.ndim == 2:
+            mask = mask.reshape(attention_mask.shape[0], 1, 1, attention_mask.shape[-1])
+        elif attention_mask.ndim == 3:
+            mask = mask[:, None, :, :]
         return mask.astype(target_dtype)
 
     def _prepare_positional_embeddings(
