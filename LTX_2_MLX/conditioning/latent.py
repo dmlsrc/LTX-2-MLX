@@ -70,8 +70,9 @@ class VideoConditionByLatentIndex:
                 "Make sure the image and latent have the same spatial shape."
             )
 
-        # Patchify the conditioning latent
-        tokens = latent_tools.patchifier.patchify(self.latent)
+        # Patchify the conditioning latent and keep the denoise stream dtype
+        # stable; encoded conditioning latents may arrive as float32.
+        tokens = latent_tools.patchifier.patchify(self.latent).astype(latent_state.latent.dtype)
 
         # Calculate token range for replacement
         # Get token count up to latent_idx

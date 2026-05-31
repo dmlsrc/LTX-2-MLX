@@ -48,8 +48,9 @@ class VideoConditionByKeyframeIndex:
         Returns:
             Modified latent state with keyframe tokens appended.
         """
-        # Patchify keyframe: (B, C, 1, H, W) -> (B, N_kf, D)
-        tokens = latent_tools.patchifier.patchify(self.keyframes)
+        # Patchify keyframe: (B, C, 1, H, W) -> (B, N_kf, D).  Encoded
+        # keyframes can be float32; preserve the current denoise stream dtype.
+        tokens = latent_tools.patchifier.patchify(self.keyframes).astype(latent_state.latent.dtype)
 
         # Get patch grid bounds for keyframe
         keyframe_shape = VideoLatentShape.from_shape(self.keyframes.shape)
@@ -75,7 +76,7 @@ class VideoConditionByKeyframeIndex:
         denoise_mask = mx.full(
             shape=(tokens.shape[0], tokens.shape[1], 1),
             vals=1.0 - self.strength,
-            dtype=self.keyframes.dtype,
+            dtype=latent_state.denoise_mask.dtype,
         )
 
         # Concatenate to existing state

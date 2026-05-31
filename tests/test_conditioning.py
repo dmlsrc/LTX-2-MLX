@@ -57,6 +57,36 @@ class TestVideoConditionByLatentIndex:
         assert conditioned_state.denoise_mask.shape == initial_state.denoise_mask.shape
         assert conditioned_state.positions.shape == initial_state.positions.shape
 
+    def test_fp32_conditioning_keeps_bf16_latent_dtype(self):
+        """FP32 encoded conditioning should not promote a BF16 denoise stream."""
+        target_shape = VideoLatentShape(
+            batch=1,
+            channels=128,
+            frames=9,
+            height=8,
+            width=8,
+        )
+        patchifier = VideoLatentPatchifier(patch_size=1)
+        tools = VideoLatentTools(
+            patchifier=patchifier,
+            target_shape=target_shape,
+            fps=NATIVE_FPS,
+        )
+        initial_state = tools.create_initial_state(dtype=mx.bfloat16)
+        cond_latent = mx.random.normal((1, 128, 1, 8, 8)).astype(mx.float32)
+
+        conditioning = VideoConditionByLatentIndex(
+            latent=cond_latent,
+            strength=0.5,
+            latent_idx=0,
+        )
+        conditioned_state = conditioning.apply_to(initial_state, tools)
+        mx.eval(conditioned_state.latent, conditioned_state.clean_latent)
+
+        assert conditioned_state.latent.dtype == mx.bfloat16
+        assert conditioned_state.clean_latent.dtype == mx.bfloat16
+        assert conditioned_state.denoise_mask.dtype == initial_state.denoise_mask.dtype
+
     def test_conditioning_strength(self):
         """Test that conditioning strength affects denoise mask correctly."""
         target_shape = VideoLatentShape(
@@ -274,6 +304,36 @@ class TestVideoConditionByKeyframeIndex:
         # Keyframe conditioning appends tokens, so output should be larger
         assert conditioned_state.latent.shape[1] > initial_state.latent.shape[1]
         assert conditioned_state.denoise_mask.shape[1] > initial_state.denoise_mask.shape[1]
+
+    def test_fp32_keyframe_keeps_bf16_latent_dtype(self):
+        """FP32 encoded keyframes should not promote a BF16 denoise stream."""
+        target_shape = VideoLatentShape(
+            batch=1,
+            channels=128,
+            frames=9,
+            height=8,
+            width=8,
+        )
+        patchifier = VideoLatentPatchifier(patch_size=1)
+        tools = VideoLatentTools(
+            patchifier=patchifier,
+            target_shape=target_shape,
+            fps=NATIVE_FPS,
+        )
+        initial_state = tools.create_initial_state(dtype=mx.bfloat16)
+        keyframe = mx.random.normal((1, 128, 1, 8, 8)).astype(mx.float32)
+
+        conditioning = VideoConditionByKeyframeIndex(
+            keyframes=keyframe,
+            frame_idx=0,
+            strength=0.5,
+        )
+        conditioned_state = conditioning.apply_to(initial_state, tools)
+        mx.eval(conditioned_state.latent, conditioned_state.clean_latent)
+
+        assert conditioned_state.latent.dtype == mx.bfloat16
+        assert conditioned_state.clean_latent.dtype == mx.bfloat16
+        assert conditioned_state.denoise_mask.dtype == initial_state.denoise_mask.dtype
 
     def test_keyframe_strength(self):
         """Test that keyframe strength affects denoise mask."""

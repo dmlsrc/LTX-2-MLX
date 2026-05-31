@@ -21,6 +21,7 @@ from LTX_2_MLX.model.transformer import (
     LTXAVModel,
     LTXModel,
     LTXModelType,
+    LTXRopeType,
     Modality,
     MultiModalTransformerArgsPreprocessor,
     X0Model,
@@ -1116,7 +1117,6 @@ from LTX_2_MLX.model.video_vae.native_encoder import (
 
 def _read_checkpoint_config(checkpoint_path: str) -> dict:
     """Read the JSON config from checkpoint metadata."""
-    import json
     try:
         from safetensors import safe_open
         with safe_open(checkpoint_path, framework="numpy") as f:
@@ -1125,6 +1125,41 @@ def _read_checkpoint_config(checkpoint_path: str) -> dict:
         return json.loads(config_str)
     except Exception:
         return {}
+
+
+def _read_transformer_config(checkpoint_path: str | None) -> dict:
+    """Read the transformer config from checkpoint metadata."""
+    if not checkpoint_path:
+        return {}
+    config = _read_checkpoint_config(checkpoint_path)
+    transformer_config = config.get("transformer", {})
+    return transformer_config if isinstance(transformer_config, dict) else {}
+
+
+def _parse_rope_type_from_metadata(value) -> LTXRopeType:
+    if isinstance(value, LTXRopeType):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("split", "interleaved"):
+            return LTXRopeType(normalized)
+    return LTXRopeType.SPLIT
+
+
+def _parse_int_metadata(value, fallback: int) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _normalize_positional_embedding_max_pos(value) -> list[int] | None:
+    if isinstance(value, (list, tuple)) and value:
+        try:
+            return [int(v) for v in value]
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def create_vocoder_for_checkpoint(
@@ -2129,6 +2164,8 @@ def load_av_transformer(
     transformer_block_compile_group_size: int = 0,
     video_ff_dtype: mx.Dtype | None = None,
     audio_ff_dtype: mx.Dtype | None = None,
+    config_weights_path: str | None = None,
+    double_precision_rope: bool | None = None,
 ) -> LTXAVModel:
     """Load AudioVideo transformer with weights.
 
@@ -2140,11 +2177,32 @@ def load_av_transformer(
         cross_attention_adaln: V2 cross-attention AdaLN (prompt_adaln_single).
         apply_gated_attention: V2 per-head gating in attention.
     """
+    transformer_config = _read_transformer_config(config_weights_path or weights_path)
+    if double_precision_rope is None:
+        double_precision_rope = transformer_config.get("frequencies_precision") == "float64"
+    rope_type = _parse_rope_type_from_metadata(
+        transformer_config.get("rope_type", transformer_config.get("split_rope"))
+    )
+    positional_embedding_max_pos = _normalize_positional_embedding_max_pos(
+        transformer_config.get("positional_embedding_max_pos")
+    )
+    av_ca_timestep_scale_multiplier = _parse_int_metadata(
+        transformer_config.get("av_ca_timestep_scale_multiplier"),
+        1000,
+    )
+
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
     profile_str = " (profile first call)" if profile_transformer_once else ""
     v2_str = " (V2)" if cross_attention_adaln else ""
     print(f"Loading AudioVideo transformer ({compute_dtype_name(compute_dtype)}{mem_str}{fast_str}{profile_str}{v2_str})...")
+    if transformer_config:
+        print(
+            "  Transformer config: "
+            f"rope={rope_type.value}, "
+            f"double_precision_rope={'on' if double_precision_rope else 'off'}, "
+            f"av_ca_timestep_scale={av_ca_timestep_scale_multiplier}"
+        )
 
     model = LTXAVModel(
         model_type=LTXModelType.AudioVideo,
@@ -2156,13 +2214,16 @@ def load_av_transformer(
         cross_attention_dim=4096,
         caption_channels=caption_channels,
         positional_embedding_theta=10000.0,
+        positional_embedding_max_pos=positional_embedding_max_pos,
+        rope_type=rope_type,
+        use_double_precision_rope=bool(double_precision_rope),
         compute_dtype=compute_dtype,
         low_memory=low_memory,
         fast_mode=fast_mode,
         profile_transformer_once=profile_transformer_once,
         cross_attention_adaln=cross_attention_adaln,
         apply_gated_attention=apply_gated_attention,
-        av_ca_timestep_scale_multiplier=1000,
+        av_ca_timestep_scale_multiplier=av_ca_timestep_scale_multiplier,
     )
 
     layouts_loaded_from_cache = False
@@ -3266,6 +3327,7 @@ def generate_video(
                 apply_gated_attention=v2,
                 video_ff_dtype=(mx.float16 if video_ff_dtype == "float16" else None),
                 audio_ff_dtype=(mx.float16 if audio_ff_dtype == "float16" else None),
+                config_weights_path=config_weights_path,
             )
             if video_ff_dtype is not None:
                 print(f"  Video FF dtype baked into cache: {video_ff_dtype}")

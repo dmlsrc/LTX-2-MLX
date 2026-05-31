@@ -334,7 +334,7 @@ class RMSNorm(nn.Module):
         self.weight = mx.ones((dims,))
 
     def __call__(self, x: mx.array) -> mx.array:
-        return rms_norm(x, self.weight, self.eps)
+        return rms_norm(x, self.weight, self.eps).astype(x.dtype)
 
 
 def scaled_dot_product_attention(

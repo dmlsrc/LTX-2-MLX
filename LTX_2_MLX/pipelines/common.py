@@ -220,6 +220,7 @@ def modality_from_state(
     sigma: float,
     enabled: bool = True,
     positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
+    cross_positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
 ) -> Modality:
     """Create a Modality from a latent state.
 
@@ -231,6 +232,8 @@ def modality_from_state(
         positional_embeddings: Optional precomputed (cos, sin) RoPE tuple.
             When provided the preprocessor reuses it instead of recomputing
             ``precompute_freqs_cis`` every step.
+        cross_positional_embeddings: Optional precomputed cross-modal RoPE
+            tuple for this modality's temporal positions.
 
     Returns:
         Modality object ready for transformer input
@@ -256,6 +259,7 @@ def modality_from_state(
         context_mask=None,
         sigma=sigma_tensor,
         positional_embeddings=positional_embeddings,
+        cross_positional_embeddings=cross_positional_embeddings,
     )
 
 
@@ -265,6 +269,7 @@ def audio_modality_from_state(
     sigma: float,
     enabled: bool = True,
     positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
+    cross_positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
 ) -> Modality:
     """Create a Modality from an audio latent state.
 
@@ -274,6 +279,8 @@ def audio_modality_from_state(
         sigma: Current noise level (sigma value from scheduler)
         enabled: Whether this modality is enabled
         positional_embeddings: Optional precomputed (cos, sin) RoPE tuple.
+        cross_positional_embeddings: Optional precomputed cross-modal RoPE
+            tuple for this modality's temporal positions.
 
     Returns:
         Modality object ready for transformer input
@@ -295,6 +302,7 @@ def audio_modality_from_state(
         context_mask=None,
         sigma=sigma_tensor,
         positional_embeddings=positional_embeddings,
+        cross_positional_embeddings=cross_positional_embeddings,
     )
 
 

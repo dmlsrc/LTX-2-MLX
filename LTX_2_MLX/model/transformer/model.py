@@ -140,6 +140,7 @@ class Modality:
     # the per-step ``precompute_freqs_cis`` call.  Caller is responsible for
     # invalidation when positions/max_pos/theta change between stages.
     positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None
+    cross_positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None
 
 
 class TransformerArgsPreprocessor:
@@ -298,6 +299,7 @@ class TransformerArgsPreprocessor:
             use_middle_indices_grid=self.use_middle_indices_grid,
             num_attention_heads=self.num_attention_heads,
             rope_type=self.rope_type,
+            use_double_precision=self.use_double_precision,
         )
         return pe
 
@@ -430,6 +432,7 @@ class MultiModalTransformerArgsPreprocessor:
             use_middle_indices_grid=True,
             num_attention_heads=self.simple_preprocessor.num_attention_heads,
             rope_type=self.simple_preprocessor.rope_type,
+            use_double_precision=self.simple_preprocessor.use_double_precision,
         )
         return pe
 
@@ -483,8 +486,14 @@ class MultiModalTransformerArgsPreprocessor:
         if cross_modality is None:
             return args
 
-        # Cross-modal positional embeddings use THIS modality's temporal positions
-        cross_pe = self._prepare_cross_positional_embeddings(modality.positions)
+        # Cross-modal positional embeddings use THIS modality's temporal
+        # positions.  Reuse a per-stage precompute when supplied by the
+        # pipeline; otherwise compute on demand for parity with the generic
+        # preprocessor path.
+        if modality.cross_positional_embeddings is not None:
+            cross_pe = modality.cross_positional_embeddings
+        else:
+            cross_pe = self._prepare_cross_positional_embeddings(modality.positions)
 
         cross_sigma = cross_modality.sigma if cross_modality.sigma is not None else cross_modality.timesteps
         if cross_sigma.ndim > 1:
@@ -553,6 +562,7 @@ class LTXModel(nn.Module):
         use_middle_indices_grid: bool = True,
         # RoPE type: LTX-2 distilled weights use SPLIT
         rope_type: LTXRopeType = LTXRopeType.SPLIT,
+        use_double_precision_rope: bool = False,
         compute_dtype: mx.Dtype = mx.bfloat16,
         low_memory: bool = False,
         fast_mode: bool = False,
@@ -583,6 +593,8 @@ class LTXModel(nn.Module):
                 "legacy" uses cross-modality sigma for both.
             use_middle_indices_grid: Use middle of position bounds for RoPE.
             rope_type: Type of RoPE. LTX-2 distilled uses SPLIT.
+            use_double_precision_rope: Use a float64 frequency grid before
+                casting RoPE cos/sin to the runtime dtype.
             compute_dtype: Dtype for computation.
             low_memory: If True, use aggressive memory optimization (eval every 4 layers).
             fast_mode: If True, skip intermediate evals for faster inference (uses more memory).
@@ -595,6 +607,7 @@ class LTXModel(nn.Module):
         self.timestep_scale_multiplier = timestep_scale_multiplier
         self.positional_embedding_theta = positional_embedding_theta
         self.use_middle_indices_grid = use_middle_indices_grid
+        self.use_double_precision_rope = use_double_precision_rope
         self.norm_eps = norm_eps
         self.compute_dtype = compute_dtype
         self.low_memory = low_memory
@@ -775,6 +788,7 @@ class LTXModel(nn.Module):
                 rope_type=self.rope_type,
                 compute_dtype=self.compute_dtype,
                 prompt_adaln=self.prompt_adaln_single,
+                use_double_precision=self.use_double_precision_rope,
             )
             if self.model_type.is_audio_enabled():
                 self._video_args_preprocessor = MultiModalTransformerArgsPreprocessor(
@@ -803,6 +817,7 @@ class LTXModel(nn.Module):
                 rope_type=self.rope_type,
                 compute_dtype=self.compute_dtype,
                 prompt_adaln=self.audio_prompt_adaln_single,
+                use_double_precision=self.use_double_precision_rope,
             )
             if self.model_type.is_video_enabled():
                 self._audio_args_preprocessor = MultiModalTransformerArgsPreprocessor(

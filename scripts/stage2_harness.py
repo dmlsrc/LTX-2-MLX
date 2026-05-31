@@ -421,6 +421,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--rope-precision",
+        choices=["metadata", "float64", "fp32"],
+        default="metadata",
+        help=(
+            "RoPE frequency-grid precision for transformer positional embeddings. "
+            "metadata uses checkpoint config (production default); fp32 recreates "
+            "the old MLX behavior for A/B testing."
+        ),
+    )
+    parser.add_argument(
         "--bench-mode",
         type=int,
         default=0,
@@ -649,6 +659,12 @@ def main() -> None:
         layers = gen.describe_transformer_layers(attn_layout_layers)
         print(f"Video attention layout: ENABLED (specs={spec}, layers={layers})")
     print(f"AV cross-attn timestep mode: {args.av_cross_timestep_mode}")
+    rope_precision_override = {
+        "metadata": None,
+        "float64": True,
+        "fp32": False,
+    }[args.rope_precision]
+    print(f"RoPE precision: {args.rope_precision}")
     if args.probe_av_cross_timestep:
         print("AV cross-attn timestep probe: ENABLED")
     print(f"Stage-1 RNG burn: {'disabled' if args.independent_stage2_noise else 'ENABLED'}")
@@ -734,6 +750,8 @@ def main() -> None:
         caption_channels=None,
         cross_attention_adaln=True,
         apply_gated_attention=True,
+        config_weights_path=config_weights_path,
+        double_precision_rope=rope_precision_override,
     )
     if hasattr(model, "set_av_cross_timestep_mode"):
         model.set_av_cross_timestep_mode(args.av_cross_timestep_mode)
@@ -1091,6 +1109,7 @@ def main() -> None:
                 ],
                 "video_attn_layout_layers": list(attn_layout_layers),
                 "av_cross_timestep_mode": args.av_cross_timestep_mode,
+                "rope_precision": args.rope_precision,
                 "probe_av_cross_timestep": args.probe_av_cross_timestep,
                 "stage2_video_attn_kv_pool": (
                     {

@@ -234,6 +234,62 @@ Subagent line-by-line audit of `AVPipeline.generate_distilled_two_stage` vs cano
 | **`LTX_VELOCITY_MODE` fastpath is MLX-specific** | Bypasses the X0Model wrapper and runs velocity model directly when latent mask is uniform-ones.  Algebraically identical to the canonical's wrap→unwrap→step round-trip, just skips the redundant `to_velocity` / `to_denoised` calls.  Subagent verified equivalence. |
 | **`uniform_mask` flag footgun** | [`LTX_2_MLX/types.py:198-209`](../LTX_2_MLX/types.py) documents that `uniform_mask=True` must stay honest.  If conditioning ever produces a non-uniform mask but the flag isn't cleared, the scalar-timestep optimization picks up incorrect data.  Existing call sites are correct. |
 
+### 2026-05-31 distilled two-stage precision scan
+
+Scope: LTX-2.3 distilled two-stage AV hot path (`8+3` Euler steps, BF16
+default compute, internal audio branch enabled), checked against the official
+Lightricks checkout at `/Users/Shared/huggingface/reference/Lightricks-LTX-2`
+and the local `ltx-2.3-22b-distilled-1.1.safetensors` metadata.
+
+Official precision baseline:
+
+- Transformer, latent payloads, attention, FFN, and AdaLN modulation use BF16
+  payload compute by default.
+- Sigma schedules, timestep basis, Euler / X0 denoising arithmetic, and
+  noising scalars stay FP32, then cast back to the latent payload dtype.
+- V2.3 RoPE frequency setup is configured as `frequencies_precision=float64`;
+  upstream builds the frequency grid with the double-precision path, then casts
+  final cos/sin to hidden dtype.
+- BWE vocoder is a scoped FP32 island and then returns the input dtype.  This is
+  official parity behavior, not a local bug.
+- HQ / res2s is not the distilled two-stage path, but if ported it has deliberate
+  FP64 sampler math.
+
+Findings:
+
+| Item | Triage | Details |
+|---|---|---|
+| **V2.3 RoPE double-precision setup** | **Fixed 2026-05-31** | The checkpoint metadata says `frequencies_precision=float64`, and local [`precompute_freqs_cis`](../LTX_2_MLX/model/transformer/rope.py) supports `use_double_precision`, but the video/audio/cross positional-embedding calls in [`model.py`](../LTX_2_MLX/model/transformer/model.py) did not pass the flag through.  A sparse stage-2-shape probe saw fp32-grid vs fp64-grid differences up to ~`0.0064` in cos and ~`0.0074` in sin before the hidden-dtype cast.  `load_av_transformer` now reads the transformer metadata (`frequencies_precision`, `rope_type`, `positional_embedding_max_pos`, `av_ca_timestep_scale_multiplier`) and wires double-precision RoPE into the simple and cross-modal preprocessors; covered by `tests/test_precision_plumbing.py`. |
+| **A/V cross-attention timestep scale** | **Not a bug** | Local `generate.py` passes `av_ca_timestep_scale_multiplier=1000`.  The official safetensor metadata also has `av_ca_timestep_scale_multiplier: 1000.0`; upstream's `av_ca_factor = av_ca_timestep_scale_multiplier / timestep_scale_multiplier` makes the gate input equivalent to `cross_sigma * 1000`. |
+| **Q/K RMSNorm dtype promotion** | **Guard fixed 2026-05-31** | `mx.fast.rms_norm(BF16 activation, FP32 weight)` promotes the result to FP32, which would bypass the BF16/FP16 STEEL attention selector.  The actual LTX-2.3 checkpoint has BF16 q/k norm weights (sampled count: 608 BF16), so the default path was already safe.  `RMSNorm.__call__` now casts back to `x.dtype`, preventing external/random-init weights from changing attention precision; covered by `tests/test_precision_plumbing.py`. |
+| **Image/keyframe conditioning dtype promotion** | **Fixed 2026-05-31** | The native video encoder returns conditioning latents as FP32 to match the simple encoder, and `VideoConditionByLatentIndex` / `VideoConditionByKeyframeIndex` concatenated tokens without casting to the existing latent dtype.  Plain text-only distilled generation was unaffected, but image/keyframe-conditioned BF16 runs could silently move the denoise state to FP32.  Conditioning tokens now cast to `latent_state.latent.dtype` before concatenation, and keyframe masks keep the existing mask dtype; covered by `tests/test_conditioning.py`. |
+| **BWE vocoder output dtype** | **Not a bug** | Both local and official code run the BWE chain in FP32 and cast the clipped waveform back to the input dtype.  Returning FP32 could be tested as a quality experiment, but it would be a deliberate divergence from official parity. |
+| **Fused AdaLN env path** | **Off-default semantic edge** | `LTX_FUSED_ADALN=1` uses a custom kernel with hardcoded `eps=1e-6` and BF16 output.  That matches the default distilled BF16 path, but is not a general replacement for non-default `norm_eps` or non-BF16 compute. |
+| **Fused interleaved RoPE** | **Not on distilled hot path** | The fused interleaved path computes with template `T=x.dtype`, so BF16 inputs downcast FP32 cos/sin before rotation.  LTX-2.3 distilled uses split RoPE, so this is only a legacy/interleaved risk. |
+| **2D float attention masks** | **Low edge case** | Float masks are returned as-is by the preprocessor; a caller-provided 2D float mask can be reshaped differently from the bool/int mask path.  The distilled two-stage hot path uses `context_mask=None`, so no production effect. |
+
+Full stage-2 RoPE A/B (same saved stage-1 latents, `--save-all-sidecars`,
+audio enabled, 576x320x721, seed 42):
+
+| Run | RoPE precision | Denoise | Total | Sidecar |
+|---|---:|---:|---:|---|
+| `stage2_rope_metadata_full_20260531_023011` | metadata / float64 grid | 300.7s | 391.0s | `/Users/Shared/huggingface/output/stage2_rope_metadata_full_20260531_023011.npz` |
+| `stage2_rope_fp32_full_20260531_023700` | forced fp32 grid | 294.9s | 384.5s | `/Users/Shared/huggingface/output/stage2_rope_fp32_full_20260531_023700.npz` |
+
+Stage-1 video/audio latents compared exactly equal between the two sidecars.
+Final stage-2 drift was non-zero but modest: video latent
+`max_abs=0.9765625`, `mean_abs=0.0192177`, `rms=0.0276312`,
+`cos=0.999641218686`; audio latent `max_abs=2.17578125`,
+`mean_abs=0.0133171`, `rms=0.0490743`, `cos=0.999144662049`.  Treat timing
+as a busy-machine smoke read, not a performance result; this A/B is mainly
+evidence that metadata-driven float64 RoPE is a real numerical parity change.
+
+RoPE recompute follow-up: `LTX_ROPE_PRECOMPUTE=1` now precomputes both
+self-RoPE and A/V cross temporal RoPE once per stage.  Keep it opt-in: a
+stage-2 bench-mode pair on the same saved latents measured `96.945s` with
+precompute vs `96.480s` with `LTX_DISABLE_ROPE_PRECOMPUTE=1`, so resident
+FP32 RoPE tables did not produce an actionable denoise win on M1 Max.
+
 ### Upstream features not yet ported
 
 Lightricks has shipped two pipeline-level features since our V2.3 baseline that we don't have.  Neither affects the distilled two-stage hot path (so they're not parity bugs), but they're net-new functionality:

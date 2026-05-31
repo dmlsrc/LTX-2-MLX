@@ -29,6 +29,23 @@ import numpy as np
 _USE_VELOCITY_MODE = bool(os.environ.get("LTX_VELOCITY_MODE"))
 _NORMALIZE_AUDIO_NOISE = bool(os.environ.get("LTX_NORMALIZE_AUDIO_NOISE"))
 
+
+def _env_enabled(name: str, disable_name: str | None = None) -> bool:
+    false_values = {"", "0", "false", "no", "off"}
+    if (
+        disable_name is not None
+        and os.environ.get(disable_name, "").strip().lower() not in false_values
+    ):
+        return False
+    value = os.environ.get(name)
+    return value is not None and value.strip().lower() not in false_values
+
+
+_PRECOMPUTE_ROPE = _env_enabled(
+    "LTX_ROPE_PRECOMPUTE",
+    "LTX_DISABLE_ROPE_PRECOMPUTE",
+)
+
 from .common import (
     ImageCondition,
     apply_conditionings,
@@ -924,11 +941,16 @@ class AVPipeline:
             self._velocity_transformer() if velocity_mode else None
         )
 
-        # Optional per-stage RoPE precompute (mirrors mlx-video's pattern).
-        # Measured neutral-to-slight-regression at small T because MLX's lazy
-        # graph already deduplicates the per-step ``precompute_freqs_cis``
-        # calls.  Off by default; opt-in with LTX_ROPE_PRECOMPUTE=1 for
-        # workloads where per-step setup might be heavier.
+        # Optional per-stage RoPE precompute.  Positions are fixed for the
+        # whole stage, while sigma/timestep changes each denoise step, so the
+        # cos/sin tables are safe to reuse until the stage shape/positions
+        # change.  This covers self-RoPE and A/V cross temporal RoPE.
+        #
+        # M1 Max stage-2 A/B with metadata-float64 RoPE measured neutral to
+        # slight-regression, likely because the large resident FP32 tables add
+        # memory pressure while MLX already handles the per-step setup cheaply.
+        # Keep it opt-in for diagnostics:
+        #   LTX_ROPE_PRECOMPUTE=1
         def _simple_preprocessor_of(preproc):
             # Multi-modal preprocessor wraps a simple preprocessor; video-only
             # is the simple preprocessor itself.
@@ -936,24 +958,37 @@ class AVPipeline:
 
         video_rope = None
         audio_rope = None
-        if os.environ.get("LTX_ROPE_PRECOMPUTE"):
+        video_cross_rope = None
+        audio_cross_rope = None
+        if _PRECOMPUTE_ROPE:
             velocity_model = (
                 self.transformer.velocity_model
                 if hasattr(self.transformer, "velocity_model")
                 else self.transformer
             )
+            rope_arrays: List[mx.array] = []
             video_pre = getattr(velocity_model, "_video_args_preprocessor", None)
             if video_pre is not None:
                 video_rope = _simple_preprocessor_of(video_pre)._prepare_positional_embeddings(
                     video_state.positions,
                 )
-                mx.eval(*video_rope)
+                rope_arrays.extend(video_rope)
+                prepare_cross = getattr(video_pre, "_prepare_cross_positional_embeddings", None)
+                if self.is_av_model and audio_state is not None and prepare_cross is not None:
+                    video_cross_rope = prepare_cross(video_state.positions)
+                    rope_arrays.extend(video_cross_rope)
             audio_pre = getattr(velocity_model, "_audio_args_preprocessor", None)
             if audio_state is not None and audio_pre is not None:
                 audio_rope = _simple_preprocessor_of(audio_pre)._prepare_positional_embeddings(
                     audio_state.positions,
                 )
-                mx.eval(*audio_rope)
+                rope_arrays.extend(audio_rope)
+                prepare_cross = getattr(audio_pre, "_prepare_cross_positional_embeddings", None)
+                if self.is_av_model and prepare_cross is not None:
+                    audio_cross_rope = prepare_cross(audio_state.positions)
+                    rope_arrays.extend(audio_cross_rope)
+            if rope_arrays:
+                mx.eval(*rope_arrays)
 
         for step_idx in range(num_steps):
             sigma = float(sigmas[step_idx])
@@ -979,6 +1014,7 @@ class AVPipeline:
             video_modality = modality_from_state(
                 video_state, video_context, sigma,
                 positional_embeddings=video_rope,
+                cross_positional_embeddings=video_cross_rope,
             )
             mark_profile("modality setup")
 
@@ -988,6 +1024,7 @@ class AVPipeline:
                     audio_modality_from_state(
                         audio_state, audio_context, sigma,
                         positional_embeddings=audio_rope,
+                        cross_positional_embeddings=audio_cross_rope,
                     )
                     if audio_state is not None
                     else None
