@@ -116,15 +116,10 @@
     loader_q.load_unsafe();
   }
 
-  constexpr short kRowsPT = decltype(Stile)::kRowsPerThread;
+  constexpr AccumType neg_inf = -3.4028234663852886e+38F;
 
-  AccumType max_score[kRowsPT];
-  AccumType sum_score[kRowsPT] = {0};
-
-  STEEL_PRAGMA_UNROLL
-  for (short i = 0; i < kRowsPT; ++i) {
-    max_score[i] = -3.4028234663852886e+38F;
-  }
+  AccumType max_score[1] = {neg_inf};
+  AccumType sum_score[1] = {0};
 
   for (int kb = 0; kb < NK; kb++) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -162,7 +157,6 @@
 
     if (!AlignK && kb == NK_aligned) {
       using stile_t = decltype(Stile);
-      constexpr AccumType neg_inf = -3.4028234663852886e+38F;
 
       STEEL_PRAGMA_UNROLL
       for (short j = 0; j < stile_t::kTileCols; j++) {
@@ -184,35 +178,21 @@
       loader_v.load_unsafe();
     }
 
-    AccumType new_max[kRowsPT];
-    AccumType factor[kRowsPT];
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kRowsPT; ++i) {
-      new_max[i] = max_score[i];
-    }
+    AccumType new_max[1] = {max_score[0]};
+    AccumType factor[1];
 
-    Stile.template row_reduce<MaxOp>(new_max);
-    Stile.template row_bin_op<ExpSubOp>(new_max);
+    Stile.row_max(new_max);
+    Stile.exp2_sub(new_max);
 
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kRowsPT; ++i) {
-      factor[i] = fast::exp2(max_score[i] - new_max[i]);
-    }
+    factor[0] = fast::exp2(max_score[0] - new_max[0]);
+    max_score[0] = new_max[0];
 
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kRowsPT; ++i) {
-      max_score[i] = new_max[i];
-    }
+    AccumType sum_score_tmp[1] = {0};
+    Stile.row_sum(sum_score_tmp);
 
-    AccumType sum_score_tmp[kRowsPT] = {0};
-    Stile.template row_reduce<SumOp>(sum_score_tmp);
+    sum_score[0] = sum_score[0] * factor[0] + sum_score_tmp[0];
 
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kRowsPT; ++i) {
-      sum_score[i] = sum_score[i] * factor[i] + sum_score_tmp[i];
-    }
-
-    Otile.template row_bin_op<MulOp>(factor);
+    Otile.mul_by(factor);
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -245,7 +225,7 @@
     loader_v.next();
   }
 
-  Otile.template row_bin_op<DivOp>(sum_score);
+  Otile.div_by(sum_score);
   threadgroup_barrier(mem_flags::mem_none);
 
   O += (tm + sm) * O_stride_t + sn;

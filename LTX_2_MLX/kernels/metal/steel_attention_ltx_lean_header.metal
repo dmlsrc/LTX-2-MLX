@@ -147,25 +147,6 @@ METAL_FUNC static void mma_fragment(
   D = reinterpret_cast<thread mma_frag_t&>(D_mat.thread_elements());
 }
 
-template <typename Op>
-METAL_FUNC static constexpr void row_reduce_fragment(
-    thread const mma_frag_t& inp_vals,
-    thread float* reduced_vals) {
-  float thr_reduce = Op::apply(inp_vals.x, inp_vals.y);
-  float qgr_reduce = simd_shuffle_xor(thr_reduce, ushort(1));
-  qgr_reduce = Op::apply(thr_reduce, qgr_reduce);
-  float sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
-  sgr_reduce = Op::apply(qgr_reduce, sgr_reduce);
-  reduced_vals[0] = Op::apply(reduced_vals[0], sgr_reduce);
-}
-
-template <typename Op>
-METAL_FUNC static constexpr void
-row_bin_op_fragment(thread mma_frag_t& inp_vals, thread float* row_vals) {
-  inp_vals[0] = Op::apply(inp_vals[0], row_vals[0]);
-  inp_vals[1] = Op::apply(inp_vals[1], row_vals[0]);
-}
-
 template <int COLS>
 struct RowTile {
   STEEL_CONST int kFragRows = 8;
@@ -173,7 +154,6 @@ struct RowTile {
   STEEL_CONST int kElemCols = 2;
   STEEL_CONST int kTileCols = COLS;
   STEEL_CONST int kElemsPerTile = COLS * kElemCols;
-  STEEL_CONST int kRowsPerThread = 1;
 
   mma_frag_t val_frags[COLS];
 
@@ -194,19 +174,51 @@ struct RowTile {
     return reinterpret_cast<thread float*>(val_frags);
   }
 
-  template <typename Op>
-  METAL_FUNC void row_reduce(thread float vals[kRowsPerThread]) const {
+  METAL_FUNC void row_max(thread float* vals) const {
     STEEL_PRAGMA_UNROLL
     for (short j = 0; j < COLS; ++j) {
-      row_reduce_fragment<Op>(val_frags[j], vals);
+      float thr_reduce = metal::max(val_frags[j].x, val_frags[j].y);
+      float qgr_reduce = simd_shuffle_xor(thr_reduce, ushort(1));
+      qgr_reduce = metal::max(thr_reduce, qgr_reduce);
+      float sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
+      sgr_reduce = metal::max(qgr_reduce, sgr_reduce);
+      vals[0] = metal::max(vals[0], sgr_reduce);
     }
   }
 
-  template <typename Op>
-  METAL_FUNC void row_bin_op(thread float vals[kRowsPerThread]) {
+  METAL_FUNC void row_sum(thread float* vals) const {
     STEEL_PRAGMA_UNROLL
     for (short j = 0; j < COLS; ++j) {
-      row_bin_op_fragment<Op>(val_frags[j], vals);
+      float thr_reduce = val_frags[j].x + val_frags[j].y;
+      float qgr_reduce = simd_shuffle_xor(thr_reduce, ushort(1));
+      qgr_reduce = thr_reduce + qgr_reduce;
+      float sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
+      sgr_reduce = qgr_reduce + sgr_reduce;
+      vals[0] += sgr_reduce;
+    }
+  }
+
+  METAL_FUNC void exp2_sub(thread float* vals) {
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < COLS; ++j) {
+      val_frags[j][0] = fast::exp2(val_frags[j][0] - vals[0]);
+      val_frags[j][1] = fast::exp2(val_frags[j][1] - vals[0]);
+    }
+  }
+
+  METAL_FUNC void mul_by(thread float* vals) {
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < COLS; ++j) {
+      val_frags[j][0] *= vals[0];
+      val_frags[j][1] *= vals[0];
+    }
+  }
+
+  METAL_FUNC void div_by(thread float* vals) {
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < COLS; ++j) {
+      val_frags[j][0] /= vals[0];
+      val_frags[j][1] /= vals[0];
     }
   }
 
@@ -243,33 +255,3 @@ struct RowTile {
 #pragma METAL internals : disable
 
 using namespace mlx::steel;
-
-struct MaxOp {
-  METAL_FUNC static constexpr float apply(float x, float y) {
-    return metal::max(x, y);
-  }
-};
-
-struct SumOp {
-  METAL_FUNC static constexpr float apply(float x, float y) {
-    return x + y;
-  }
-};
-
-struct MulOp {
-  METAL_FUNC static constexpr float apply(float x, float y) {
-    return x * y;
-  }
-};
-
-struct ExpSubOp {
-  METAL_FUNC static constexpr float apply(float x, float y) {
-    return fast::exp2(x - y);
-  }
-};
-
-struct DivOp {
-  METAL_FUNC static constexpr float apply(float x, float y) {
-    return x / y;
-  }
-};
