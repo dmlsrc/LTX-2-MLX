@@ -1056,6 +1056,11 @@ Split-K-tail follow-up (2026-06-01):
   self-attention and D64 audio/cross-modal shapes; D128 vs stock MLX SDPA is
   back to tiny BF16-level delta (`max_abs <= 4.9e-4` in the probe).  Do not
   remove the full-loop advances; only post-epilogue advances are dead.
+- Kernel-parity rule from that miss: validating new source only against the
+  immediately previous source can prove "same as broken".  For future STEEL
+  edits, use three anchors before trusting parity: immediate previous source,
+  last-known-good source/saved sidecar, and stock MLX SDPA on real hot-path
+  shapes.  Full 8+3 smoke NPZ comparison remains the final guard.
 
 Validation:
 
