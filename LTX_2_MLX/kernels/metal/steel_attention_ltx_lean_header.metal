@@ -105,11 +105,7 @@ METAL_FUNC static void mma_fragment(
 
 template <int COLS>
 struct RowTile {
-  STEEL_CONST int kFragRows = 8;
   STEEL_CONST int kFragCols = 8;
-  STEEL_CONST int kElemCols = 2;
-  STEEL_CONST int kTileCols = COLS;
-  STEEL_CONST int kElemsPerTile = COLS * kElemCols;
 
   mma_frag_t val_frags[COLS];
 
@@ -124,10 +120,6 @@ struct RowTile {
 
   METAL_FUNC constexpr thread mma_frag_t& frag_at(const short j) {
     return val_frags[j];
-  }
-
-  METAL_FUNC thread float* elems() {
-    return reinterpret_cast<thread float*>(val_frags);
   }
 
   METAL_FUNC void row_max(thread float* vals) const {
@@ -151,6 +143,14 @@ struct RowTile {
       float sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
       sgr_reduce = qgr_reduce + sgr_reduce;
       vals[0] += sgr_reduce;
+    }
+  }
+
+  METAL_FUNC void scale_by(float scale) {
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < COLS; ++j) {
+      val_frags[j][0] *= scale;
+      val_frags[j][1] *= scale;
     }
   }
 

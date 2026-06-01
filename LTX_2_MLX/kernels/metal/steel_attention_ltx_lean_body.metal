@@ -140,19 +140,14 @@
       }
     }
 
-    STEEL_PRAGMA_UNROLL
-    for (short ii = 0; ii < decltype(Stile)::kElemsPerTile; ii++) {
-      Stile.elems()[ii] *= scale;
-    }
+    Stile.scale_by(scale);
 
     if (!AlignK && kb == NK_aligned) {
-      using stile_t = decltype(Stile);
-
       STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < stile_t::kTileCols; j++) {
-        short col_pos = sn + (j * stile_t::kFragCols);
+      for (short j = 0; j < TK; j++) {
+        short col_pos = sn + (j * kFragSize);
         STEEL_PRAGMA_UNROLL
-        for (short jj = 0; jj < stile_t::kElemCols; jj++) {
+        for (short jj = 0; jj < 2; jj++) {
           if ((col_pos + jj) >= kL_rem) {
             Stile.frag_at(j)[jj] = neg_inf;
           }
