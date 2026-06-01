@@ -104,31 +104,6 @@ METAL_FUNC static constexpr short2 mma_coord(
   return short2{fn, fm};
 }
 
-METAL_FUNC static constexpr void
-load_fragment(thread mma_frag_t& dst, const threadgroup bfloat* src) {
-  dst[0] = static_cast<float>(src[0]);
-  dst[1] = static_cast<float>(src[1]);
-}
-
-METAL_FUNC static constexpr void
-store_fragment(const thread mma_frag_t& src, device bfloat* dst) {
-  dst[0] = static_cast<bfloat>(src[0]);
-  dst[1] = static_cast<bfloat>(src[1]);
-}
-
-METAL_FUNC static constexpr void store_fragment_safe(
-    const thread mma_frag_t& src,
-    device bfloat* dst,
-    const int lim_y,
-    const int off_y) {
-  if (off_y < lim_y) {
-    dst[off_y] = static_cast<bfloat>(src[0]);
-  }
-  if ((off_y + 1) < lim_y) {
-    dst[off_y + 1] = static_cast<bfloat>(src[1]);
-  }
-}
-
 METAL_FUNC static void mma_fragment(
     thread mma_frag_t& D,
     thread mma_frag_t& A,
@@ -225,14 +200,18 @@ struct RowTile {
   METAL_FUNC void load(const threadgroup bfloat* src) {
     STEEL_PRAGMA_UNROLL
     for (short j = 0; j < COLS; ++j) {
-      load_fragment(frag_at(j), &src[j * kFragCols]);
+      const short off = j * kFragCols;
+      val_frags[j][0] = static_cast<float>(src[off]);
+      val_frags[j][1] = static_cast<float>(src[off + 1]);
     }
   }
 
   METAL_FUNC void store(device bfloat* dst) const {
     STEEL_PRAGMA_UNROLL
     for (short j = 0; j < COLS; ++j) {
-      store_fragment(val_frags[j], &dst[j * kFragCols]);
+      const short off = j * kFragCols;
+      dst[off] = static_cast<bfloat>(val_frags[j][0]);
+      dst[off + 1] = static_cast<bfloat>(val_frags[j][1]);
     }
   }
 
@@ -240,11 +219,13 @@ struct RowTile {
   store_safe(device bfloat* dst, const short2 dst_tile_dims) const {
     STEEL_PRAGMA_UNROLL
     for (int j = 0; j < COLS; ++j) {
-      store_fragment_safe(
-          val_frags[j],
-          dst,
-          dst_tile_dims.x,
-          j * kFragCols);
+      const short off = j * kFragCols;
+      if (off < dst_tile_dims.x) {
+        dst[off] = static_cast<bfloat>(val_frags[j][0]);
+      }
+      if ((off + 1) < dst_tile_dims.x) {
+        dst[off + 1] = static_cast<bfloat>(val_frags[j][1]);
+      }
     }
   }
 };
