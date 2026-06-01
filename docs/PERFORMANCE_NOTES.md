@@ -1034,6 +1034,16 @@ Split-K-tail follow-up (2026-06-01):
   call, command-buffer overhead can erase the gain.  Treat it as a bounded
   wrapper experiment for kernel attributes and fixed params, not as a generic
   rewrite.
+- Shallow wrapper-adjacent probe: MLX's generator confirms there is no public
+  `mx.fast.metal_kernel` hook for kernel attributes; it always emits
+  `[[kernel]] void custom_kernel_*` and only auto-adds thread-position
+  attributes referenced in the body.  A fixed-stride/fixed-shape-body variant
+  that replaced `Q_shape/K_shape` and `*_strides` ABI loads with scalar
+  `qL/kL` inputs plus hardcoded production transpose strides was exact
+  (`max_abs=0`) but negative on D128: stage1 `1.002x`, stage2 `1.004x`.
+  D64 `1504` won (`0.972x`), but that is not the wall-time path.  Do not port
+  fixed strides through `mx.fast.metal_kernel`; if revisited, it belongs in a
+  real wrapper/extension test with kernel attributes too.
 
 Validation:
 
