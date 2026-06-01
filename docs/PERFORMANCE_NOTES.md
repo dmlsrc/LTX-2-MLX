@@ -857,8 +857,8 @@ Implementation:
 - Added `LTX_2_MLX/kernels/steel_attention.py`.
 - The default path now uses the lean LTX-specific STEEL subset in
   `LTX_2_MLX/kernels/metal/` (no mask, no causal, no sinks, B=1/H=32,
-  D=64/128).  The older compact subset and full vendored MLX snapshot remain
-  available for bisects with `LTX_STEEL_ATTN_IMPL=compact` and `retile`.
+  D=64/128).  The older compact subset and full vendored MLX snapshot have
+  been moved to `archive/steel_attention/` as historical parity references.
 - Apple's MIT license notice is preserved in
   `LTX_2_MLX/kernels/STEEL_ATTENTION_LICENSE.md`; the Metal resources also
   carry SPDX license comments.
@@ -879,11 +879,11 @@ Compact-source follow-up (2026-06-01):
 
 - Removed the runtime local-MLX-reference source splicer from the default
   module path.
-- `steel_attention.py` is now just the shape gate and kernel launcher;
-  `_steel_attention_ltx.py` is a 16-line resource loader; the compact Metal
+- `steel_attention.py` became just the shape gate and kernel launcher;
+  `_steel_attention_ltx.py` was a 16-line resource loader; the compact Metal
   subset is split into a 941-line header and 277-line body fragment.
-- `_steel_attention_vendor.py` is also just a resource loader; the full retile
-  fallback lives in `steel_attention_vendor_header.metal` and
+- `_steel_attention_vendor.py` was also just a resource loader; the full
+  retile fallback lived in `steel_attention_vendor_header.metal` and
   `steel_attention_vendor_body.metal`.
 - Integrated default parity vs the full retile fallback: max_abs=0 for
   `(1,32,1504,64)`, `(1,32,8784,128)`, and `(1,32,35136,128)`.
@@ -897,14 +897,20 @@ Lean-source follow-up (2026-06-01):
 - The default was narrowed again to a BF16-only lean subset: 207-line header
   plus 207-line body.  It keeps only the LTX-2.3 no-mask D64/D128 path and
   routes FP16/unsupported calls back to stock MLX.
-- The Python launcher now lazy-loads Metal resources by selected impl.  A
-  default import no longer reads the older compact source or full vendored
-  fallback, and MLX attribution now lives in `STEEL_ATTENTION_LICENSE.md`
-  rather than runtime Python constants.
+- The Python launcher first stopped eager-loading the older compact source and
+  full vendored fallback.  MLX attribution now lives in
+  `STEEL_ATTENTION_LICENSE.md` rather than runtime Python constants.
 - Lean smoke vs the post-fp64-RoPE retile baseline was bit-exact for all saved
   sidecars: stage-1/stage-2/final video and audio latents plus text
   conditioning (`compared=22 exact=22`).  Wall time was in the same noise band
   as retile/compact: lean 8m55.7s, retile 8m55.6s, compact 8m58.4s.
+
+Live-path simplification follow-up (2026-06-01):
+
+- Removed `LTX_STEEL_ATTN_IMPL` from the runtime dispatcher and archived the
+  compact/vendor resources outside the package.  The live kernel path is now
+  lean-only; use git history or `archive/steel_attention/` for old parity
+  archaeology.
 
 Validation:
 

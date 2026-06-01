@@ -72,10 +72,9 @@ a default-on `mx.fast.metal_kernel` wrapper around the MLX STEEL attention
 helpers, specialized for the LTX-2.3 no-mask D64/D128 hot path and retiled
 to `BQ=64, BK=32`.  Disable it with `LTX_DISABLE_STEEL_ATTN=1` or
 `LTX_STEEL_ATTN=0`; `LTX_STEEL_ATTN_PROBE=1` prints hit/fallback counts.
-The default implementation is the compact LTX subset in
-`LTX_2_MLX/kernels/metal/`; set
-`LTX_STEEL_ATTN_IMPL=retile` to bisect against the full vendored MLX
-snapshot.
+The default implementation is the lean LTX subset in
+`LTX_2_MLX/kernels/metal/`; the older compact and vendored snapshots are
+archived under `archive/steel_attention/`.
 
 Prior negative candidates remain preserved below (full reasoning in
 `PERFORMANCE_NOTES.md` Archive):
@@ -1146,8 +1145,7 @@ there is no software knob to recover the 4× token overhead.
   NOT unlock NAX.
 - A custom Metal kernel via `mx.fast.metal_kernel` can implement larger
   tiles without rebuilding MLX.  The current local wrapper does exactly
-  that with compact MLX-derived Metal resources loaded by the Python
-  kernel launcher.
+  that with lean MLX-derived Metal resources loaded by the Python launcher.
 - Python-level chunked or tiled SDPA does not change the Metal tile width;
   prior experiments showed no runtime win at 1024×576.
 

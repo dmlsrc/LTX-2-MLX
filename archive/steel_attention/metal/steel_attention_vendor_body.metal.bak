@@ -1,5 +1,4 @@
-// Body fragment consumed by mx.fast.metal_kernel; MLX supplies the kernel wrapper.
-// Full vendored MLX STEEL fallback used by LTX_STEEL_ATTN_IMPL=retile.
+// Archived full vendored MLX STEEL body fragment.
 // Copyright (c) 2023-25 Apple Inc.
 // SPDX-License-Identifier: MIT
 

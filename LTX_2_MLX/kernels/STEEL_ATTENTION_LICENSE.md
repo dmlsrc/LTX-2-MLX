@@ -9,10 +9,10 @@ Apple MLX STEEL attention sources.
 - Local derived resources:
   - `metal/steel_attention_ltx_lean_header.metal`
   - `metal/steel_attention_ltx_lean_body.metal`
-  - `metal/steel_attention_ltx_header.metal`
-  - `metal/steel_attention_ltx_body.metal`
-  - `metal/steel_attention_vendor_header.metal`
-  - `metal/steel_attention_vendor_body.metal`
+  - `../../archive/steel_attention/metal/steel_attention_ltx_header.metal.bak`
+  - `../../archive/steel_attention/metal/steel_attention_ltx_body.metal.bak`
+  - `../../archive/steel_attention/metal/steel_attention_vendor_header.metal.bak`
+  - `../../archive/steel_attention/metal/steel_attention_vendor_body.metal.bak`
 
 The derived Metal files also carry SPDX comments inline. This notice keeps the
 license and source attribution out of runtime Python imports.

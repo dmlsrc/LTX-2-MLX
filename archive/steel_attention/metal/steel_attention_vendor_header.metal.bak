@@ -1,5 +1,4 @@
-// LTX MLX STEEL attention wrapper header.
-// Full vendored MLX STEEL fallback used by LTX_STEEL_ATTN_IMPL=retile.
+// Archived full vendored MLX STEEL attention wrapper header.
 // Copyright (c) 2023-25 Apple Inc.
 // SPDX-License-Identifier: MIT
 #define MLX_METAL_JIT 1

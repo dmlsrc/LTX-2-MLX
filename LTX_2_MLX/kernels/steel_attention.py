@@ -2,8 +2,7 @@
 
 The default path uses a lean BF16-only MLX STEEL subset specialized for the
 no-mask LTX-2.3 hot path.  Unsupported shapes and FP16 calls fall back to stock
-MLX SDPA in the caller; ``LTX_STEEL_ATTN_IMPL=compact`` and ``retile`` keep the
-older compact subset and full vendored MLX snapshot available for bisects.
+MLX SDPA in the caller.
 """
 
 from __future__ import annotations
@@ -32,8 +31,7 @@ _PROBE_COUNTS = {
 }
 _PROBE_REASONS: dict[str, int] = {}
 _PROBE_SAMPLES: dict[str, str] = {}
-_KERNEL_CACHE: dict[str, object] = {}
-_VALID_IMPLS = {"lean", "compact", "retile"}
+_KERNEL = None
 
 
 def _shape_sample(
@@ -91,36 +89,20 @@ if _PROBE_ENABLED:
     atexit.register(_print_probe_summary)
 
 
-def _kernel_impl() -> str:
-    impl = os.environ.get("LTX_STEEL_ATTN_IMPL", "lean").strip().lower()
-    if impl not in _VALID_IMPLS:
-        valid = ", ".join(sorted(_VALID_IMPLS))
-        raise ValueError(f"Unsupported LTX_STEEL_ATTN_IMPL={impl!r}; use {valid}.")
-    return impl
-
-
-def _kernel_resources(impl: str) -> tuple[str, str]:
-    if impl == "lean":
+def _kernel():
+    global _KERNEL
+    if _KERNEL is None:
         from ._steel_attention_ltx_lean import HEADER, SOURCE
-    elif impl == "compact":
-        from ._steel_attention_ltx import HEADER, SOURCE
-    else:
-        from ._steel_attention_vendor import HEADER, SOURCE
-    return HEADER, SOURCE
 
-
-def _kernel(impl: str):
-    if impl not in _KERNEL_CACHE:
-        header, source = _kernel_resources(impl)
-        _KERNEL_CACHE[impl] = mx.fast.metal_kernel(
-            name=f"ltx_steel_attention_bq64_bk32_{impl}",
+        _KERNEL = mx.fast.metal_kernel(
+            name="ltx_steel_attention_bq64_bk32",
             input_names=["Q", "K", "V"],
             output_names=["O"],
-            source=source,
-            header=header,
+            source=SOURCE,
+            header=HEADER,
             ensure_row_contiguous=False,
         )
-    return _KERNEL_CACHE[impl]
+    return _KERNEL
 
 
 def _scale_supported(scale: Optional[float], dim: int) -> bool:
@@ -134,15 +116,12 @@ def _select_config(
     v: mx.array,
     scale: Optional[float],
     mask: Optional[mx.array],
-    impl: str,
 ) -> tuple[Optional[int], str]:
     if mask is not None:
         return None, "mask"
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         return None, "ndim"
-    if q.dtype not in (mx.bfloat16, mx.float16):
-        return None, "dtype"
-    if impl == "lean" and q.dtype != mx.bfloat16:
+    if q.dtype != mx.bfloat16:
         return None, "dtype_lean_bf16"
     if k.dtype != q.dtype or v.dtype != q.dtype:
         return None, "dtype_mismatch"
@@ -175,8 +154,7 @@ def maybe_steel_attention(
     mask: Optional[mx.array] = None,
 ) -> Optional[mx.array]:
     """Return custom STEEL attention output when this call matches the gate."""
-    impl = _kernel_impl()
-    bd, reason = _select_config(q, k, v, scale, mask, impl)
+    bd, reason = _select_config(q, k, v, scale, mask)
     if bd is None:
         _probe_fallback(reason, q, k, v, mask)
         return None
@@ -190,19 +168,7 @@ def maybe_steel_attention(
         ("AlignQ", align_q),
         ("AlignK", align_k),
     ]
-    if impl != "lean":
-        template = [
-            ("T", q.dtype),
-            ("BQ", _BQ),
-            ("BK", _BK),
-            ("BD", bd),
-            ("WM", _WM),
-            ("WN", 1),
-            ("AlignQ", align_q),
-            ("AlignK", align_k),
-            ("DoCausal", False),
-        ]
-    out = _kernel(impl)(
+    out = _kernel()(
         inputs=[q, k, v],
         output_shapes=[(batch, seq, heads, dim)],
         output_dtypes=[q.dtype],
