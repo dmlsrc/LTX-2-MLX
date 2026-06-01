@@ -855,13 +855,13 @@ with a larger Q tile.
 Implementation:
 
 - Added `LTX_2_MLX/kernels/steel_attention.py`.
-- The default path now uses the compact LTX-specific STEEL subset in
+- The default path now uses the lean LTX-specific STEEL subset in
   `LTX_2_MLX/kernels/metal/` (no mask, no causal, no sinks, B=1/H=32,
-  D=64/128).  The full vendored MLX snapshot remains available for bisects
-  with `LTX_STEEL_ATTN_IMPL=retile`.
+  D=64/128).  The older compact subset and full vendored MLX snapshot remain
+  available for bisects with `LTX_STEEL_ATTN_IMPL=compact` and `retile`.
 - Apple's MIT license notice is preserved in
-  `LTX_2_MLX/kernels/_steel_attention_vendor.py`; both compact and retile
-  Metal resources also carry SPDX license comments.
+  `LTX_2_MLX/kernels/STEEL_ATTENTION_LICENSE.md`; the Metal resources also
+  carry SPDX license comments.
 - Uses `mx.fast.metal_kernel(..., ensure_row_contiguous=False)` so the
   kernel accepts the real reshape/transpose strides.
 - Emits a row-contiguous physical `(B, L, H, D)` output and returns
@@ -891,6 +891,20 @@ Compact-source follow-up (2026-06-01):
   `(1,32,8784,128)` stock 212.915 ms, compact 198.355 ms, retile 196.568 ms;
   `(1,32,35136,128)` stock 3411.369 ms, compact 3051.386 ms, retile
   3055.026 ms.
+
+Lean-source follow-up (2026-06-01):
+
+- The default was narrowed again to a BF16-only lean subset: 208-line header
+  plus 207-line body.  It keeps only the LTX-2.3 no-mask D64/D128 path and
+  routes FP16/unsupported calls back to stock MLX.
+- The Python launcher now lazy-loads Metal resources by selected impl.  A
+  default import no longer reads the older compact source or full vendored
+  fallback, and MLX attribution now lives in `STEEL_ATTENTION_LICENSE.md`
+  rather than runtime Python constants.
+- Lean smoke vs the post-fp64-RoPE retile baseline was bit-exact for all saved
+  sidecars: stage-1/stage-2/final video and audio latents plus text
+  conditioning (`compared=22 exact=22`).  Wall time was in the same noise band
+  as retile/compact: lean 8m55.7s, retile 8m55.6s, compact 8m58.4s.
 
 Validation:
 

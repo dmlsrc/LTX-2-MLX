@@ -15,19 +15,6 @@ from typing import Optional
 
 import mlx.core as mx
 
-from ._steel_attention_ltx import (
-    HEADER as _LTX_HEADER,
-    SOURCE as _LTX_SOURCE,
-)
-from ._steel_attention_ltx_lean import (
-    HEADER as _LEAN_HEADER,
-    SOURCE as _LEAN_SOURCE,
-)
-from ._steel_attention_vendor import (
-    HEADER as _VENDORED_HEADER,
-    SOURCE as _VENDORED_SOURCE,
-)
-
 
 @dataclass(frozen=True)
 class _TileConfig:
@@ -124,17 +111,19 @@ def _kernel_impl() -> str:
     return impl
 
 
+def _kernel_resources(impl: str) -> tuple[str, str]:
+    if impl == "lean":
+        from ._steel_attention_ltx_lean import HEADER, SOURCE
+    elif impl == "compact":
+        from ._steel_attention_ltx import HEADER, SOURCE
+    else:
+        from ._steel_attention_vendor import HEADER, SOURCE
+    return HEADER, SOURCE
+
+
 def _kernel(impl: str):
     if impl not in _KERNEL_CACHE:
-        if impl == "lean":
-            header = _LEAN_HEADER
-            source = _LEAN_SOURCE
-        elif impl == "compact":
-            header = _LTX_HEADER
-            source = _LTX_SOURCE
-        else:
-            header = _VENDORED_HEADER
-            source = _VENDORED_SOURCE
+        header, source = _kernel_resources(impl)
         _KERNEL_CACHE[impl] = mx.fast.metal_kernel(
             name=f"ltx_steel_attention_bq64_bk32_{impl}",
             input_names=["Q", "K", "V"],

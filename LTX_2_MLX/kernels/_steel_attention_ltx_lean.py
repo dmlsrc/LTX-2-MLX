@@ -2,10 +2,8 @@
 
 from pathlib import Path
 
-from ._steel_attention_vendor import MLX_LICENSE, MLX_SOURCE_COMMIT
-
 _RESOURCE_DIR = Path(__file__).with_name("metal")
-__all__ = ["HEADER", "SOURCE", "MLX_LICENSE", "MLX_SOURCE_COMMIT"]
+__all__ = ["HEADER", "SOURCE"]
 
 
 def _read_metal(name: str) -> str:
