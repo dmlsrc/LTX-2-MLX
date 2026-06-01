@@ -103,25 +103,8 @@
     Stile.clear();
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Stile was just cleared, so the first QK slice can use multiply instead
-    // of multiply-accumulate.  Keep this as a prologue; an in-loop dd==0
-    // branch was slower on the stage-2 D128 shape.
-    simdgroup_barrier(mem_flags::mem_none);
-
-    Qtile.load(&Q_smem[Qs_offset]);
-    Ktile.load(&KV_smem[Ks_offset]);
-
-    simdgroup_barrier(mem_flags::mem_none);
     STEEL_PRAGMA_UNROLL
-    for (short ik = 0; ik < TK; ik++) {
-      mma_fragment_mul(
-          Stile.frag_at(ik),
-          Qtile.frag_at(0),
-          Ktile.frag_at(ik));
-    }
-
-    STEEL_PRAGMA_UNROLL
-    for (short dd = 1; dd < TD; dd++) {
+    for (short dd = 0; dd < TD; dd++) {
       simdgroup_barrier(mem_flags::mem_none);
 
       Qtile.load(&Q_smem[Qs_offset + dd * Qs_tile_stride]);
@@ -200,22 +183,8 @@
     Stile.clear();
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    simdgroup_barrier(mem_flags::mem_none);
-
-    Qtile.load(&Q_smem[Qs_offset]);
-    Ktile.load(&KV_smem[Ks_offset]);
-
-    simdgroup_barrier(mem_flags::mem_none);
     STEEL_PRAGMA_UNROLL
-    for (short ik = 0; ik < TK; ik++) {
-      mma_fragment_mul(
-          Stile.frag_at(ik),
-          Qtile.frag_at(0),
-          Ktile.frag_at(ik));
-    }
-
-    STEEL_PRAGMA_UNROLL
-    for (short dd = 1; dd < TD; dd++) {
+    for (short dd = 0; dd < TD; dd++) {
       simdgroup_barrier(mem_flags::mem_none);
 
       Qtile.load(&Q_smem[Qs_offset + dd * Qs_tile_stride]);

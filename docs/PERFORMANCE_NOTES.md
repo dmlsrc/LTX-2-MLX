@@ -1014,16 +1014,14 @@ Split-K-tail follow-up (2026-06-01):
   (`1.05x`).  The extra kernel launch/concat costs more than removing the
   Q-tail branch, matching the earlier neighbor result that Q-tail was basically
   free.  Do not port a two-call Q split.
-- Surviving QK prologue tweak: because `Stile` is cleared before each QK tile,
-  the first head-dimension slice can use `simdgroup_multiply` instead of
-  `simdgroup_multiply_accumulate`.  The in-loop `dd == 0` branch was mixed
-  (`0.988x` on D128 stage1 but `1.019x` on D128 stage2), so the checked-in form
-  uses an explicit prologue followed by the normal accumulate loop from
-  `dd=1`.  Old-vs-new file-source timing was exact (`max_abs=0`): D128 stage1
-  `278.5 -> 265.5 ms` (`0.953x`), D128 stage2 `833.0 -> 785.2 ms`
-  (`0.943x`).  D64 `1504` stayed exact and effectively flat (`3.930 ->
-  3.939 ms` over a longer 60-pair run), so do not add a bulky D128-only copy of
-  the QK body unless future full-run evidence says D64 regressed.
+- Rejected QK prologue tweak: using `simdgroup_multiply` for the first
+  head-dimension slice after `Stile.clear()` looked like a D128 win, but that
+  result was measured against a source variant already missing the full-loop
+  K/V tile advances.  After restoring the advances and anchoring to the
+  last-known-good split-K source, the prologue was exact but not faster:
+  stage1 D128 split-good `44.9 ms` vs prologue `46.3 ms`, stage2 D128
+  split-good `680.4 ms` vs prologue `683.7 ms`.  The prologue was removed; keep
+  the simpler `dd=0..TD` multiply-accumulate loop.
 - Possible next exact-kernel option: a standalone Metal/MLX extension wrapper,
   not a raw PyObjC dispatch.  The only credible upside is compiler/control-plane
   control that `mx.fast.metal_kernel` does not expose: explicit
