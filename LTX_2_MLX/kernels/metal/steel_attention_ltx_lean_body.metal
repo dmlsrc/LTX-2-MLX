@@ -185,6 +185,9 @@
             Otile.frag_at(id));
       }
     }
+
+    loader_k.next();
+    loader_v.next();
   }
 
   if constexpr (!AlignK) {

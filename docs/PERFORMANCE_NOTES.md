@@ -1044,6 +1044,18 @@ Split-K-tail follow-up (2026-06-01):
   D64 `1504` won (`0.972x`), but that is not the wall-time path.  Do not port
   fixed strides through `mx.fast.metal_kernel`; if revisited, it belongs in a
   real wrapper/extension test with kernel attributes too.
+- Smoke-test correction: a cleanup pass briefly removed the `loader_k.next()`
+  and `loader_v.next()` advances from the branch-free full-K loop, mistaking
+  them for dead epilogue increments.  That was wrong: without those advances
+  every full K/V tile rereads the first block, so the 8+3 smoke diverges from
+  stage 1 onward.  The slow `kitten_smoke_qk_mul_prologue_20260601_003004` run
+  exposed it: text sidecars were exact, but stage-1/final latents were not, and
+  denoise was slower (stage1 `155.8s`, stage2 `303.1s`) than the prior exact
+  split-K smoke (`150.3s`, `283.7s`).  Restoring the advances makes the current
+  source exact again versus the pre-cleanup split-K source for D128 video
+  self-attention and D64 audio/cross-modal shapes; D128 vs stock MLX SDPA is
+  back to tiny BF16-level delta (`max_abs <= 4.9e-4` in the probe).  Do not
+  remove the full-loop advances; only post-epilogue advances are dead.
 
 Validation:
 
