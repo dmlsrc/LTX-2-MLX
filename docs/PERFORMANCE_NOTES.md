@@ -894,7 +894,7 @@ Compact-source follow-up (2026-06-01):
 
 Lean-source follow-up (2026-06-01):
 
-- The default was narrowed again to a BF16-only lean subset: 208-line header
+- The default was narrowed again to a BF16-only lean subset: 207-line header
   plus 207-line body.  It keeps only the LTX-2.3 no-mask D64/D128 path and
   routes FP16/unsupported calls back to stock MLX.
 - The Python launcher now lazy-loads Metal resources by selected impl.  A

@@ -10,29 +10,17 @@ from __future__ import annotations
 
 import atexit
 import os
-from dataclasses import dataclass
 from typing import Optional
 
 import mlx.core as mx
 
 
-@dataclass(frozen=True)
-class _TileConfig:
-    bq: int
-    bk: int
-    bd: int
-    wm: int
-    wn: int = 1
+_BQ = 64
+_BK = 32
+_WM = 8
+_THREADGROUP = (32, _WM, 1)
 
-    @property
-    def threads(self) -> tuple[int, int, int]:
-        return (32, self.wm, self.wn)
-
-
-_CONFIGS = {
-    64: _TileConfig(bq=64, bk=32, bd=64, wm=8),
-    128: _TileConfig(bq=64, bk=32, bd=128, wm=8),
-}
+_SUPPORTED_DIMS = {64, 128}
 _PROBE_ENABLED = bool(os.environ.get("LTX_STEEL_ATTN_PROBE"))
 # D64 no-mask shapes were neutral in isolation but won in full 8+3 AV runs.
 # Keep a local escape hatch for quick bisects without editing code.
@@ -61,9 +49,9 @@ def _shape_sample(
     )
 
 
-def _probe_hit(config: _TileConfig) -> None:
+def _probe_hit(bd: int) -> None:
     if _PROBE_ENABLED:
-        _PROBE_COUNTS[f"hit_d{config.bd}"] += 1
+        _PROBE_COUNTS[f"hit_d{bd}"] += 1
 
 
 def _probe_fallback(
@@ -147,7 +135,7 @@ def _select_config(
     scale: Optional[float],
     mask: Optional[mx.array],
     impl: str,
-) -> tuple[Optional[_TileConfig], str]:
+) -> tuple[Optional[int], str]:
     if mask is not None:
         return None, "mask"
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
@@ -164,10 +152,10 @@ def _select_config(
         return None, "heads"
     if q.shape[-1] != k.shape[-1] or k.shape[-1] != v.shape[-1]:
         return None, "dim_mismatch"
-    config = _CONFIGS.get(q.shape[-1])
-    if config is None:
+    bd = q.shape[-1]
+    if bd not in _SUPPORTED_DIMS:
         return None, "dim"
-    if config.bd == 64 and not _ENABLE_D64:
+    if bd == 64 and not _ENABLE_D64:
         return None, "d64_disabled"
     if k.shape[2] != v.shape[2]:
         return None, "kv_len"
@@ -175,7 +163,7 @@ def _select_config(
         return None, "seq"
     if not _scale_supported(scale, q.shape[-1]):
         return None, "scale"
-    return config, ""
+    return bd, ""
 
 
 def maybe_steel_attention(
@@ -188,37 +176,39 @@ def maybe_steel_attention(
 ) -> Optional[mx.array]:
     """Return custom STEEL attention output when this call matches the gate."""
     impl = _kernel_impl()
-    config, reason = _select_config(q, k, v, scale, mask, impl)
-    if config is None:
+    bd, reason = _select_config(q, k, v, scale, mask, impl)
+    if bd is None:
         _probe_fallback(reason, q, k, v, mask)
         return None
 
     batch, heads, seq, dim = q.shape
-    n_q_tiles = (seq + config.bq - 1) // config.bq
+    n_q_tiles = (seq + _BQ - 1) // _BQ
+    align_q = (seq % _BQ) == 0
+    align_k = (k.shape[2] % _BK) == 0
     template = [
-        ("BD", config.bd),
-        ("AlignQ", (seq % config.bq) == 0),
-        ("AlignK", (k.shape[2] % config.bk) == 0),
+        ("BD", bd),
+        ("AlignQ", align_q),
+        ("AlignK", align_k),
     ]
     if impl != "lean":
         template = [
             ("T", q.dtype),
-            ("BQ", config.bq),
-            ("BK", config.bk),
-            ("BD", config.bd),
-            ("WM", config.wm),
-            ("WN", config.wn),
-            ("AlignQ", (seq % config.bq) == 0),
-            ("AlignK", (k.shape[2] % config.bk) == 0),
+            ("BQ", _BQ),
+            ("BK", _BK),
+            ("BD", bd),
+            ("WM", _WM),
+            ("WN", 1),
+            ("AlignQ", align_q),
+            ("AlignK", align_k),
             ("DoCausal", False),
         ]
     out = _kernel(impl)(
         inputs=[q, k, v],
         output_shapes=[(batch, seq, heads, dim)],
         output_dtypes=[q.dtype],
-        grid=(n_q_tiles * 32, heads * config.wm, batch * config.wn),
-        threadgroup=config.threads,
+        grid=(n_q_tiles * 32, heads * _WM, batch),
+        threadgroup=_THREADGROUP,
         template=template,
     )[0]
-    _probe_hit(config)
+    _probe_hit(bd)
     return out.transpose(0, 2, 1, 3)

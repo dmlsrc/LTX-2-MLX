@@ -20,8 +20,7 @@ template <
     short kRows,
     short kCols,
     short kDstStrRow,
-    short kDstStrCol,
-    bool kReductionDim>
+    short kDstStrCol>
 struct BF16BlockLoader {
   STEEL_CONST short kThreads = 256;
   STEEL_CONST short vec_size = (kRows * kCols) / kThreads;
@@ -43,7 +42,7 @@ struct BF16BlockLoader {
       threadgroup bfloat* dst_,
       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
       ushort simd_lane_id [[thread_index_in_simdgroup]])
-      : tile_stride(kReductionDim ? kCols : kRows * src_ld_),
+      : tile_stride(kRows * src_ld_),
         thread_idx(simd_group_id * 32 + simd_lane_id),
         row(thread_idx / kThreadCols),
         col(vec_size * (thread_idx % kThreadCols)),
