@@ -90,13 +90,16 @@
   float max_score[1] = {neg_inf};
   float sum_score[1] = {0};
 
-  for (int kb = 0; kb < NK; kb++) {
+  // Keep the hot K loop branch-free.  LTX stage grids are often only a few
+  // tokens short of a BK multiple; handling that single partial tile in a
+  // separate epilogue lets the full tiles compile like AlignK=true.
+  //
+  // This intentionally duplicates the tile body instead of hiding it behind a
+  // macro/template.  The full-tile path below has no k-tail checks or masks in
+  // the inner loop; the epilogue below handles the one partial BK tile exactly.
+  for (int kb = 0; kb < NK_aligned; kb++) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (!AlignK && kb == NK_aligned) {
-      loader_k.load_safe(short2(BD, kL_rem));
-    } else {
-      loader_k.load_unsafe();
-    }
+    loader_k.load_unsafe();
 
     Stile.clear();
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -121,26 +124,100 @@
 
     Stile.scale_by(scale);
 
-    if (!AlignK && kb == NK_aligned) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    loader_v.load_unsafe();
+
+    float new_max[1] = {max_score[0]};
+    float factor[1];
+
+    Stile.row_max(new_max);
+    Stile.exp2_sub(new_max);
+
+    factor[0] = fast::exp2(max_score[0] - new_max[0]);
+    max_score[0] = new_max[0];
+
+    float sum_score_tmp[1] = {0};
+    Stile.row_sum(sum_score_tmp);
+
+    sum_score[0] = sum_score[0] * factor[0] + sum_score_tmp[0];
+
+    Otile.mul_by(factor);
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    STEEL_PRAGMA_UNROLL
+    for (short id = 0; id < TD; id++) {
       STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < TK; j++) {
-        short col_pos = sn + (j * kFragSize);
-        STEEL_PRAGMA_UNROLL
-        for (short jj = 0; jj < 2; jj++) {
-          if ((col_pos + jj) >= kL_rem) {
-            Stile.frag_at(j)[jj] = neg_inf;
-          }
+      for (short ik = 0; ik < TK; ik++) {
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
+        }
+
+        const short kk = ik * kFragSize;
+        const short dd = id * kFragSize;
+
+        Vtile.load(&KV_smem[Vs_offset + kk * LDV_tgp + dd]);
+
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
+        }
+
+        mma_fragment(
+            Otile.frag_at(id),
+            Stile.frag_at(ik),
+            Vtile.frag_at(0),
+            Otile.frag_at(id));
+      }
+    }
+
+    loader_k.next();
+    loader_v.next();
+  }
+
+  if constexpr (!AlignK) {
+    // Partial K tile epilogue.  Same online-softmax update as the full-tile
+    // loop, but K/V loads are bounds-checked and invalid score lanes are set
+    // to -inf before the row max/sum update.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    loader_k.load_safe(short2(BD, kL_rem));
+
+    Stile.clear();
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    STEEL_PRAGMA_UNROLL
+    for (short dd = 0; dd < TD; dd++) {
+      simdgroup_barrier(mem_flags::mem_none);
+
+      Qtile.load(&Q_smem[Qs_offset + dd * Qs_tile_stride]);
+      Ktile.load(&KV_smem[Ks_offset + dd * Ks_tile_stride]);
+
+      simdgroup_barrier(mem_flags::mem_none);
+      STEEL_PRAGMA_UNROLL
+      for (short ik = 0; ik < TK; ik++) {
+        mma_fragment(
+            Stile.frag_at(ik),
+            Qtile.frag_at(0),
+            Ktile.frag_at(ik),
+            Stile.frag_at(ik));
+      }
+    }
+
+    Stile.scale_by(scale);
+
+    // Mask score lanes beyond kL.  Only the final BK tile reaches this block.
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < TK; j++) {
+      short col_pos = sn + (j * kFragSize);
+      STEEL_PRAGMA_UNROLL
+      for (short jj = 0; jj < 2; jj++) {
+        if ((col_pos + jj) >= kL_rem) {
+          Stile.frag_at(j)[jj] = neg_inf;
         }
       }
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    if (!AlignK && kb == NK_aligned) {
-      loader_v.load_safe(short2(BD, kL_rem));
-    } else {
-      loader_v.load_unsafe();
-    }
+    loader_v.load_safe(short2(BD, kL_rem));
 
     float new_max[1] = {max_score[0]};
     float factor[1];

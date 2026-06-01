@@ -912,6 +912,103 @@ Live-path simplification follow-up (2026-06-01):
   lean-only; use git history or `archive/steel_attention/` for old parity
   archaeology.
 
+Lean-kernel shave probes (2026-06-01):
+
+- All probes below were in-memory `mx.fast.metal_kernel` variants against the
+  live lean Metal source, with repo files untouched unless a change survived.
+- D128 stage-1 `(1,32,8784,128)`, warmup=4, interleaved iters=16:
+  `no_pre_q`, `no_final_bar`, `no_both_bar`, `skip_first_k_bar`,
+  `fused_exp_sum`, `scalar_state`, and `scalar_fused` were exact vs the live
+  kernel.  The only sub-1% apparent win was `no_both_bar` at `0.9983x`, and it
+  did not survive larger stage-2 checking.  Fused/scalar softmax state variants
+  were slower (`1.011x`-`1.021x`).
+- D128 stage-2 `(1,32,35136,128)`, warmup=1, interleaved iters=3:
+  `no_both_bar` was exact but slower (`1.0047x`); `fused_exp_sum` was exact but
+  slower (`1.0159x`).  Reject both for the real wall-time shape.
+- D64 no-mask shapes were exact for the same variants.  Results were neutral:
+  self `1504` stayed ~`1.000x`; cross-length `1504->8784` and `8784->1504`
+  showed at most ~1% wins/losses depending on direction, not enough to justify
+  added branches in the lean source.
+- BK sweep: `BK=16` was slightly different math (`max_abs=0.000244141`) and
+  slower on D128 stage-1 (`1.0717x`).  `BK=64` exceeded M1 Max threadgroup
+  memory (`35840 > 32768`).  Keep `BK=32`.
+- Vectorized BF16 load variants: `vec2_load` and `vec4_load` were exact.
+  Stage-1 D128 showed a tiny noisy `vec2_load` apparent win (`0.9964x`), but
+  stage-2 D128 rejected it (`vec2_load=1.0044x`, `vec4_load=1.0109x`).
+- Removing simdgroup execution barriers around the QK/PV MMA loops was exact
+  but slower/noisy on D128 stage-1 (`1.004x`-`1.036x`).  Keep the barriers; they
+  are cheap scheduling guardrails even though they are not threadgroup memory
+  barriers.
+- Literalizing the scale expression was exact and neutral (`0.9999x`).
+  Replacing final divide with reciprocal-multiply drifted (`max_abs=0.000244141`)
+  for only ~`0.16%`, so keep the divide.
+- Writing output directly as physical `(B,H,L,D)` was exact, but the full caller
+  path was slower (`1.0124x`) because the current physical `(B,L,H,D)` write plus
+  return transpose matches the caller's immediate transpose/reshape layout trick.
+
+Conclusion for this first shave batch: the lean STEEL kernel is not just "lean
+in the advertising sense".  Simple local rewrites inside the existing loop were
+noise or slower.  The next useful search direction was a structural tail
+specialization rather than another scalar expression tweak.
+
+Follow-up investigation (2026-06-01):
+
+- `mx.compile` around reshape -> STEEL SDPA -> reshape still helps.  On the
+  actual 576x320 stage-2 video self-attention length (`T=16380`, D128),
+  compiled core was exact and measured `716.8 ms` vs inline `728.5 ms`
+  (`0.984x`), so keep the wrapper.
+- Full video self-attention projection-layout retry at `T=16380` was exact but
+  negative: q/k/v pretranspose `1.0027x`, to_out pretranspose `1.0061x`,
+  gate-logits pretranspose `1.0352x`, all attention projections `1.0441x`.
+  Keep attention layout default empty.
+- Forced-eval synthetic self-attention breakdown at `T=16380`:
+  Q/K/V projections ~21%, STEEL SDPA core ~70%, to_out ~7%, RoPE ~2%, qk norm
+  and gate work tiny.  This says remaining self-attention wins must mostly come
+  from SDPA itself, not Python dispatch or pointwise glue.
+- Single wide self-attention QKV GEMM (`4096 -> 12288`) was exact and won the
+  projection-only slice by ~1.9%, but the win collapsed after qk norm, RoPE, and
+  SDPA (`0.9984x` through the core).  Not worth the loader/cache complexity.
+- Stage-2 FF at `T=16380` confirmed the current default: project_out-only
+  pretranspose `563.7 ms`, both project_in+project_out pretranspose `574.5 ms`,
+  no pretranspose `673.5 ms`, compiled FF chain `565.6 ms`.  Keep project_out
+  pretranspose only.
+- Stage-2 FF fused-kernel upper bound: project_in `272.7 ms`, project_out
+  `278.3 ms`, GELU-only hidden pass `22.9 ms`, stock FF `563.7 ms`.  A heroic
+  fused FF kernel that only deletes the hidden GELU pass is bounded around 4%
+  per video FF call, much less at whole-denoise scale.
+
+Split-K-tail follow-up (2026-06-01):
+
+- The real 576x320 stage-2 token count is `T=16380`, which is `4` short of a
+  `64` Q-tile multiple and `28` into the final `BK=32` K tile.  Neighbor timing
+  showed the Q tail is basically free (`L=16352`, AlignK=true, was ~0.4% off
+  aligned per L^2), while the K tail carried a visible tax (`L=16380` was ~3%
+  off aligned per L^2).
+- Patched the lean body so the full K tiles run through a branch-free loop and
+  the one partial K tile is handled by an explicit epilogue.  This keeps exact
+  online-softmax math while avoiding `kb == NK_aligned` checks and tail masks in
+  every full K tile.
+- Old-vs-new Metal body parity was exact (`max_abs=0`) for D128 stage1
+  `8784`, D128 stage2 `16380`, aligned neighbor `16384`, D64 self `1504`, and
+  D64 cross-length `1504->8784`.
+- Targeted old-vs-new timing after patch:
+  D128 stage1 `211.5 -> 208.2 ms` (`0.984x` median),
+  D128 stage2 `695.6 -> 685.9 ms` (`0.986x` median, `0.971x` mean),
+  D64 `1504->8784` neutral (`17.35 -> 17.35 ms` median).
+  Paired stage-2 harness bench-mode on the saved 576x320 kitten latents measured
+  old source `99.982s` vs patched source `99.006s` for stage-2 step 2.
+  This is a real same-math win, but still modest at whole-run scale.
+- Keep caveat: this is shape-dependent.  The K-tail split helps when the
+  attention key length is not a multiple of `BK=32`; for distilled stage-2
+  video self-attention that length is `latent_frames * (width / 32) *
+  (height / 32)`.  At 30s/24fps (`721` frames -> `91` latent frames),
+  576x320 gives `T=16380` (`T % 32 = 28`) and 768x448 gives `T=30576`
+  (`T % 32 = 16`), so both keep a partial K tile.  1024x576 gives
+  `T=52416` (`T % 32 = 0`), so the expensive stage-2 path should be neutral
+  rather than faster.  We keep the split because it is exact, auditable, and
+  exposes the tail/alignment surface for common unaligned shapes; it should not
+  be sold as a universal whole-run win.
+
 Validation:
 
 - Small parity:
