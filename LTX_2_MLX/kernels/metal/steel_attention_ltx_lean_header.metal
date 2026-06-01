@@ -26,10 +26,10 @@ struct BF16BlockLoader {
   STEEL_CONST short kThreads = 256;
   STEEL_CONST short vec_size = (kRows * kCols) / kThreads;
   STEEL_CONST short kThreadCols = kCols / vec_size;
-  STEEL_CONST short kThreadRows = kThreads / kThreadCols;
-  static_assert(kThreadRows == kRows, "Lean loader expects one row stripe.");
+  static_assert(
+      (kThreads / kThreadCols) == kRows,
+      "Lean loader expects one row stripe.");
 
-  const int src_ld;
   const int tile_stride;
   const short thread_idx;
   const short row;
@@ -43,13 +43,12 @@ struct BF16BlockLoader {
       threadgroup bfloat* dst_,
       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
       ushort simd_lane_id [[thread_index_in_simdgroup]])
-      : src_ld(src_ld_),
-        tile_stride(kReductionDim ? kCols : kRows * src_ld),
+      : tile_stride(kReductionDim ? kCols : kRows * src_ld_),
         thread_idx(simd_group_id * 32 + simd_lane_id),
         row(thread_idx / kThreadCols),
         col(vec_size * (thread_idx % kThreadCols)),
         dst(dst_ + row * kDstStrRow + col * kDstStrCol),
-        src(src_ + row * src_ld + col) {}
+        src(src_ + row * src_ld_ + col) {}
 
   METAL_FUNC void load_unsafe() const {
     STEEL_PRAGMA_UNROLL
@@ -108,8 +107,6 @@ struct RowTile {
   STEEL_CONST int kFragCols = 8;
 
   mma_frag_t val_frags[COLS];
-
-  METAL_FUNC RowTile() thread {}
 
   METAL_FUNC constexpr void clear() {
     STEEL_PRAGMA_UNROLL

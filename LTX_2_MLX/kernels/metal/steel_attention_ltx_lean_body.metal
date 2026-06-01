@@ -43,26 +43,9 @@
   threadgroup bfloat Q_smem[BQ * LDQ_tgp];
   threadgroup bfloat KV_smem[BD * LDK_tgp];
 
-  using QBlockLoader = BF16BlockLoader<
-      BQ,
-      BD,
-      LDQ_tgp,
-      1,
-      true>;
-
-  using KBlockLoader = BF16BlockLoader<
-      BK,
-      BD,
-      1,
-      LDK_tgp,
-      false>;
-
-  using VBlockLoader = BF16BlockLoader<
-      BK,
-      BD,
-      LDV_tgp,
-      1,
-      false>;
+  using QBlockLoader = BF16BlockLoader<BQ, BD, LDQ_tgp, 1, true>;
+  using KBlockLoader = BF16BlockLoader<BK, BD, 1, LDK_tgp, false>;
+  using VBlockLoader = BF16BlockLoader<BK, BD, LDV_tgp, 1, false>;
 
   QBlockLoader loader_q(Q, Q_stride_t, Q_smem, simd_group_id, simd_lane_id);
   KBlockLoader loader_k(K, K_stride_t, KV_smem, simd_group_id, simd_lane_id);
