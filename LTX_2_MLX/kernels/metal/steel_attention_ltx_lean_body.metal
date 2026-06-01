@@ -65,9 +65,9 @@
   RowTile<TD> Otile;
   Otile.clear();
 
-  const short2 simd_coord = mma_coord(simd_lane_id);
-  const short sm = simd_coord.y;
-  const short sn = simd_coord.x;
+  const short qid = simd_lane_id / 4;
+  const short sm = (qid & 4) + ((simd_lane_id / 2) % 4);
+  const short sn = (qid & 2) * 2 + (simd_lane_id % 2) * 2;
   const short tm = kFragSize * simd_group_id;
 
   const short Qs_offset = (tm + sm) * LDQ_tgp + sn;

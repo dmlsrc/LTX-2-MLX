@@ -76,14 +76,6 @@ struct BF16BlockLoader {
 typedef metal::vec<float, 2> mma_frag_t;
 typedef metal::simdgroup_matrix<float, 8, 8> mma_mat_t;
 
-METAL_FUNC static constexpr short2 mma_coord(
-    ushort simd_lane_id [[thread_index_in_simdgroup]]) {
-  const short qid = simd_lane_id / 4;
-  const short fm = (qid & 4) + ((simd_lane_id / 2) % 4);
-  const short fn = (qid & 2) * 2 + (simd_lane_id % 2) * 2;
-  return short2{fn, fm};
-}
-
 METAL_FUNC static void mma_fragment(
     thread mma_frag_t& D,
     thread mma_frag_t& A,
