@@ -30,11 +30,8 @@
   uint simd_lane_id = thread_index_in_simdgroup;
   uint simd_group_id = simdgroup_index_in_threadgroup;
   uint3 tid = threadgroup_position_in_grid;
-  uint3 lid = thread_position_in_threadgroup;
 
   using AccumType = float;
-
-  (void)lid;
 
   Q += tid.y * Q_stride_h + tid.x * BQ * Q_stride_t;
   K += tid.y * K_stride_h;
@@ -98,22 +95,21 @@
       BQ >= (kNWarps * kFragSize) && BQ % (kNWarps * kFragSize) == 0,
       "Each simdgroup must host at least 1 simdgroup matrix along Q.");
 
-  constexpr int TQ = BQ / (kNWarps * kFragSize);
   constexpr int TK = BK / kFragSize;
   constexpr int TD = BD / kFragSize;
-  static_assert(TQ == 1, "Lean LTX STEEL attention expects TQ=1.");
+  static_assert(BQ == kNWarps * kFragSize, "Lean LTX STEEL attention expects TQ=1.");
 
-  MMATile<AccumType, TQ, 1, MMAFrag_acc_t> Qtile;
+  MMATile<AccumType, 1, 1, MMAFrag_acc_t> Qtile;
   MMATile<AccumType, 1, TK, MMAFrag_acc_t> Ktile;
-  MMATile<AccumType, TQ, TK, MMAFrag_acc_t> Stile;
+  MMATile<AccumType, 1, TK, MMAFrag_acc_t> Stile;
   MMATile<AccumType, 1, 1, MMAFrag_acc_t> Vtile;
-  MMATile<AccumType, TQ, TD, MMAFrag_acc_t> Otile;
+  MMATile<AccumType, 1, TD, MMAFrag_acc_t> Otile;
   Otile.clear();
 
   const short2 simd_coord = MMAFrag_acc_t::get_coord(simd_lane_id);
   const short sm = simd_coord.y;
   const short sn = simd_coord.x;
-  const short tm = kFragSize * TQ * simd_group_id;
+  const short tm = kFragSize * simd_group_id;
 
   const short Qs_offset = (tm + sm) * LDQ_tgp + sn;
   const short Ks_offset = sm * LDK_tgp + sn;
@@ -155,13 +151,20 @@
     for (short dd = 0; dd < TD; dd++) {
       simdgroup_barrier(mem_flags::mem_none);
 
-      Qtile.template load<bfloat, 1, 1, LDQ_tgp, 1>(
+      Qtile.template load<1, 1, LDQ_tgp, 1>(
           &Qs[Qs_offset + dd * Qs_tile_stride]);
-      Ktile.template load<bfloat, 1, 1, LDK_tgp, 1>(
+      Ktile.template load<1, 1, LDK_tgp, 1>(
           &Ks[Ks_offset + dd * Ks_tile_stride]);
 
       simdgroup_barrier(mem_flags::mem_none);
-      tile_matmad(Stile, Qtile, Ktile, Stile);
+      STEEL_PRAGMA_UNROLL
+      for (short ik = 0; ik < TK; ik++) {
+        MMAFrag_acc_t::mma(
+            Stile.frag_at(0, ik),
+            Qtile.frag_at(0, 0),
+            Ktile.frag_at(0, ik),
+            Stile.frag_at(0, ik));
+      }
     }
 
     STEEL_PRAGMA_UNROLL
@@ -171,8 +174,7 @@
 
     if (!AlignK && kb == NK_aligned) {
       using stile_t = decltype(Stile);
-      using selem_t = typename stile_t::elem_type;
-      constexpr selem_t neg_inf = -3.4028234663852886e+38F;
+      constexpr AccumType neg_inf = -3.4028234663852886e+38F;
 
       STEEL_PRAGMA_UNROLL
       for (short i = 0; i < stile_t::kTileRows; i++) {
@@ -230,31 +232,28 @@
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     STEEL_PRAGMA_UNROLL
-    for (short iq = 0; iq < TQ; iq++) {
+    for (short id = 0; id < TD; id++) {
       STEEL_PRAGMA_UNROLL
-      for (short id = 0; id < TD; id++) {
-        STEEL_PRAGMA_UNROLL
-        for (short ik = 0; ik < TK; ik++) {
-          if constexpr (BD == 128) {
-            simdgroup_barrier(mem_flags::mem_none);
-          }
-
-          const short kk = ik * kFragSize;
-          const short dd = id * kFragSize;
-
-          Vtile.template load<bfloat, 1, 1, LDV_tgp, 1>(
-              &Vs[Vs_offset + kk * LDV_tgp + dd]);
-
-          if constexpr (BD == 128) {
-            simdgroup_barrier(mem_flags::mem_none);
-          }
-
-          MMAFrag_acc_t::mma(
-              Otile.frag_at(iq, id),
-              Stile.frag_at(iq, ik),
-              Vtile.frag_at(0, 0),
-              Otile.frag_at(iq, id));
+      for (short ik = 0; ik < TK; ik++) {
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
         }
+
+        const short kk = ik * kFragSize;
+        const short dd = id * kFragSize;
+
+        Vtile.template load<1, 1, LDV_tgp, 1>(
+            &Vs[Vs_offset + kk * LDV_tgp + dd]);
+
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
+        }
+
+        MMAFrag_acc_t::mma(
+            Otile.frag_at(0, id),
+            Stile.frag_at(0, ik),
+            Vtile.frag_at(0, 0),
+            Otile.frag_at(0, id));
       }
     }
 
@@ -274,7 +273,7 @@
       return;
     }
 
-    Otile.template store_safe<bfloat, 1, 1>(O, O_stride_t, dst_tile_dims);
+    Otile.template store_safe<1, 1>(O, O_stride_t, dst_tile_dims);
   } else {
-    Otile.template store<bfloat, 1, 1>(O, O_stride_t);
+    Otile.template store<1, 1>(O, O_stride_t);
   }

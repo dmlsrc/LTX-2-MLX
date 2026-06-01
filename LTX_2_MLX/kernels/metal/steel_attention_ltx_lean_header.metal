@@ -16,19 +16,6 @@ using namespace metal;
 namespace mlx {
 namespace steel {
 
-template <typename T, T v>
-struct integral_constant {
-  static constexpr constant T value = v;
-  using value_type = T;
-
-  METAL_FUNC constexpr operator value_type() const noexcept {
-    return value;
-  }
-};
-
-template <int val>
-using Int = integral_constant<int, val>;
-
 template <
     short BROWS,
     short BCOLS,
@@ -129,12 +116,6 @@ struct BaseMMAFrag<T, 8, 8> {
   typedef metal::simdgroup_matrix<T, 8, 8> mat_type;
   typedef metal::vec<T, kElemsPerFrag> frag_type;
 
-  template <typename U>
-  using dtype_mat_t = typename metal::simdgroup_matrix<U, 8, 8>;
-
-  template <typename U>
-  using dtype_frag_t = typename metal::vec<U, kElemsPerFrag>;
-
   METAL_FUNC static constexpr short2 get_coord(
       ushort simd_lane_id [[thread_index_in_simdgroup]]) {
     const short qid = simd_lane_id / 4;
@@ -143,9 +124,9 @@ struct BaseMMAFrag<T, 8, 8> {
     return short2{fn, fm};
   }
 
-  template <typename SrcPtrType, typename StrX, typename StrY>
+  template <int str_x, int str_y>
   METAL_FUNC static constexpr void
-  load(thread frag_type& dst, SrcPtrType src, StrX str_x, StrY str_y) {
+  load(thread frag_type& dst, const threadgroup bfloat* src) {
     STEEL_PRAGMA_UNROLL
     for (short i = 0; i < kElemRows; i++) {
       STEEL_PRAGMA_UNROLL
@@ -155,61 +136,50 @@ struct BaseMMAFrag<T, 8, 8> {
     }
   }
 
-  template <typename DstPtrType, typename StrX, typename StrY>
   METAL_FUNC static constexpr void
-  store(const thread frag_type& src, DstPtrType dst, StrX str_x, StrY str_y) {
+  store(const thread frag_type& src, device bfloat* dst, const int ld) {
     STEEL_PRAGMA_UNROLL
     for (short i = 0; i < kElemRows; i++) {
       STEEL_PRAGMA_UNROLL
       for (short j = 0; j < kElemCols; j++) {
-        dst[i * str_x + j * str_y] = static_cast<bfloat>(src[i * kElemCols + j]);
+        dst[i * ld + j] = static_cast<bfloat>(src[i * kElemCols + j]);
       }
     }
   }
 
-  template <
-      typename DstPtrType,
-      typename StrX,
-      typename StrY,
-      typename LimX,
-      typename LimY,
-      typename OffX,
-      typename OffY>
   METAL_FUNC static constexpr void store_safe(
       const thread frag_type& src,
-      DstPtrType dst,
-      StrX str_x,
-      StrY str_y,
-      LimX lim_x,
-      LimY lim_y,
-      OffX off_x = Int<0>{},
-      OffY off_y = Int<0>{}) {
+      device bfloat* dst,
+      const int ld,
+      const int lim_x,
+      const int lim_y,
+      const int off_x,
+      const int off_y) {
     STEEL_PRAGMA_UNROLL
     for (short i = 0; i < kElemRows; i++) {
       STEEL_PRAGMA_UNROLL
       for (short j = 0; j < kElemCols; j++) {
         if ((off_x + i) < lim_x && (off_y + j) < lim_y) {
-          dst[(off_x + i) * str_x + (off_y + j) * str_y] =
+          dst[(off_x + i) * ld + off_y + j] =
               static_cast<bfloat>(src[i * kElemCols + j]);
         }
       }
     }
   }
 
-  template <typename Atype, typename Btype, typename Ctype>
   METAL_FUNC static constexpr void mma(
       thread frag_type& D,
-      thread dtype_frag_t<Atype>& A,
-      thread dtype_frag_t<Btype>& B,
-      thread dtype_frag_t<Ctype>& C) {
+      thread frag_type& A,
+      thread frag_type& B,
+      thread frag_type& C) {
     mat_type D_mat;
-    dtype_mat_t<Atype> A_mat;
-    dtype_mat_t<Btype> B_mat;
-    dtype_mat_t<Ctype> C_mat;
+    mat_type A_mat;
+    mat_type B_mat;
+    mat_type C_mat;
 
-    reinterpret_cast<thread dtype_frag_t<Atype>&>(A_mat.thread_elements()) = A;
-    reinterpret_cast<thread dtype_frag_t<Btype>&>(B_mat.thread_elements()) = B;
-    reinterpret_cast<thread dtype_frag_t<Ctype>&>(C_mat.thread_elements()) = C;
+    reinterpret_cast<thread frag_type&>(A_mat.thread_elements()) = A;
+    reinterpret_cast<thread frag_type&>(B_mat.thread_elements()) = B;
+    reinterpret_cast<thread frag_type&>(C_mat.thread_elements()) = C;
 
     simdgroup_multiply_accumulate(D_mat, A_mat, B_mat, C_mat);
     D = reinterpret_cast<thread frag_type&>(D_mat.thread_elements());
@@ -309,23 +279,21 @@ struct MMATile {
     }
   }
 
-  template <typename U, int w_x, int w_y, int str_x, int str_y>
-  METAL_FUNC void load(const threadgroup U* src) {
+  template <int w_x, int w_y, int str_x, int str_y>
+  METAL_FUNC void load(const threadgroup bfloat* src) {
     STEEL_PRAGMA_UNROLL
     for (short i = 0; i < kTileRows; ++i) {
       STEEL_PRAGMA_UNROLL
       for (short j = 0; j < kTileCols; ++j) {
-        MMAFrag_t::load(
+        MMAFrag_t::template load<str_x, str_y>(
             frag_at(i, j),
-            &(src[(i * kFragRows) * w_x * str_x + (j * kFragCols) * w_y * str_y]),
-            Int<str_x>{},
-            Int<str_y>{});
+            &(src[(i * kFragRows) * w_x * str_x + (j * kFragCols) * w_y * str_y]));
       }
     }
   }
 
-  template <typename U, int w_x, int w_y>
-  METAL_FUNC void store(device U* dst, const int ld) const {
+  template <int w_x, int w_y>
+  METAL_FUNC void store(device bfloat* dst, const int ld) const {
     STEEL_PRAGMA_UNROLL
     for (short i = 0; i < kTileRows; ++i) {
       STEEL_PRAGMA_UNROLL
@@ -333,15 +301,14 @@ struct MMATile {
         MMAFrag_t::store(
             frag_at(i, j),
             &(dst[(i * kFragRows) * w_x * ld + (j * kFragCols) * w_y]),
-            ld,
-            Int<1>{});
+            ld);
       }
     }
   }
 
-  template <typename U, int w_x, int w_y>
+  template <int w_x, int w_y>
   METAL_FUNC void
-  store_safe(device U* dst, const int ld, const short2 dst_tile_dims) const {
+  store_safe(device bfloat* dst, const int ld, const short2 dst_tile_dims) const {
     STEEL_PRAGMA_UNROLL
     for (int i = 0; i < kTileRows; ++i) {
       STEEL_PRAGMA_UNROLL
@@ -350,7 +317,6 @@ struct MMATile {
             frag_at(i, j),
             dst,
             ld,
-            Int<1>{},
             dst_tile_dims.y,
             dst_tile_dims.x,
             (i * kFragRows) * w_x,
@@ -360,41 +326,6 @@ struct MMATile {
   }
 };
 
-template <
-    typename Dtype,
-    typename Atype,
-    typename Btype,
-    typename Ctype,
-    int M,
-    int N,
-    int K,
-    class MMAFragD,
-    class MMAFragA,
-    class MMAFragB,
-    class MMAFragC>
-METAL_FUNC void tile_matmad(
-    thread MMATile<Dtype, M, N, MMAFragD>& D,
-    thread MMATile<Atype, M, K, MMAFragA>& A,
-    thread MMATile<Btype, K, N, MMAFragB>& B,
-    thread MMATile<Ctype, M, N, MMAFragC>& C) {
-  STEEL_PRAGMA_UNROLL
-  for (short m = 0; m < M; ++m) {
-    STEEL_PRAGMA_UNROLL
-    for (short n = 0; n < N; ++n) {
-      short n_serp = (m % 2) ? (N - 1 - n) : n;
-
-      STEEL_PRAGMA_UNROLL
-      for (short k = 0; k < K; ++k) {
-        MMAFragD::mma(
-            D.frag_at(m, n_serp),
-            A.frag_at(m, k),
-            B.frag_at(k, n_serp),
-            C.frag_at(m, n_serp));
-      }
-    }
-  }
-}
-
 } // namespace steel
 } // namespace mlx
 
@@ -403,36 +334,31 @@ METAL_FUNC void tile_matmad(
 using namespace mlx::steel;
 
 struct MaxOp {
-  template <typename T>
-  METAL_FUNC static constexpr T apply(T x, T y) {
+  METAL_FUNC static constexpr float apply(float x, float y) {
     return metal::max(x, y);
   }
 };
 
 struct SumOp {
-  template <typename T>
-  METAL_FUNC static constexpr T apply(T x, T y) {
+  METAL_FUNC static constexpr float apply(float x, float y) {
     return x + y;
   }
 };
 
 struct MulOp {
-  template <typename T>
-  METAL_FUNC static constexpr T apply(T x, T y) {
+  METAL_FUNC static constexpr float apply(float x, float y) {
     return x * y;
   }
 };
 
 struct ExpSubOp {
-  template <typename T>
-  METAL_FUNC static constexpr T apply(T x, T y) {
+  METAL_FUNC static constexpr float apply(float x, float y) {
     return fast::exp2(x - y);
   }
 };
 
 struct DivOp {
-  template <typename T>
-  METAL_FUNC static constexpr T apply(T x, T y) {
+  METAL_FUNC static constexpr float apply(float x, float y) {
     return x / y;
   }
 };
