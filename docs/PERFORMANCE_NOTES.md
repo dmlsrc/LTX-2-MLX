@@ -1014,6 +1014,26 @@ Split-K-tail follow-up (2026-06-01):
   (`1.05x`).  The extra kernel launch/concat costs more than removing the
   Q-tail branch, matching the earlier neighbor result that Q-tail was basically
   free.  Do not port a two-call Q split.
+- Surviving QK prologue tweak: because `Stile` is cleared before each QK tile,
+  the first head-dimension slice can use `simdgroup_multiply` instead of
+  `simdgroup_multiply_accumulate`.  The in-loop `dd == 0` branch was mixed
+  (`0.988x` on D128 stage1 but `1.019x` on D128 stage2), so the checked-in form
+  uses an explicit prologue followed by the normal accumulate loop from
+  `dd=1`.  Old-vs-new file-source timing was exact (`max_abs=0`): D128 stage1
+  `278.5 -> 265.5 ms` (`0.953x`), D128 stage2 `833.0 -> 785.2 ms`
+  (`0.943x`).  D64 `1504` stayed exact and effectively flat (`3.930 ->
+  3.939 ms` over a longer 60-pair run), so do not add a bulky D128-only copy of
+  the QK body unless future full-run evidence says D64 regressed.
+- Possible next exact-kernel option: a standalone Metal/MLX extension wrapper,
+  not a raw PyObjC dispatch.  The only credible upside is compiler/control-plane
+  control that `mx.fast.metal_kernel` does not expose: explicit
+  `max_total_threads_per_threadgroup(256)`, a tiny fixed params surface instead
+  of generated shape/stride ABI loads, and precompiled/specialized entry points
+  for D128 aligned-K, D128 tail-K, and D64.  The risk is equally real: if this
+  leaves MLX's command stream or adds synchronization/buffer-lifetime glue per
+  call, command-buffer overhead can erase the gain.  Treat it as a bounded
+  wrapper experiment for kernel attributes and fixed params, not as a generic
+  rewrite.
 
 Validation:
 

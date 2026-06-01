@@ -93,6 +93,21 @@ METAL_FUNC static void mma_fragment(
   D = reinterpret_cast<thread mma_frag_t&>(D_mat.thread_elements());
 }
 
+METAL_FUNC static void mma_fragment_mul(
+    thread mma_frag_t& D,
+    thread mma_frag_t& A,
+    thread mma_frag_t& B) {
+  mma_mat_t D_mat;
+  mma_mat_t A_mat;
+  mma_mat_t B_mat;
+
+  reinterpret_cast<thread mma_frag_t&>(A_mat.thread_elements()) = A;
+  reinterpret_cast<thread mma_frag_t&>(B_mat.thread_elements()) = B;
+
+  simdgroup_multiply(D_mat, A_mat, B_mat);
+  D = reinterpret_cast<thread mma_frag_t&>(D_mat.thread_elements());
+}
+
 template <int COLS>
 struct RowTile {
   STEEL_CONST int kFragCols = 8;
