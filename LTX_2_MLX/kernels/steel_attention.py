@@ -1,22 +1,24 @@
 """MLX STEEL attention tile override for supported LTX-2.3 shapes.
 
-This emits a custom ``mx.fast.metal_kernel`` wrapper around a vendored
-snapshot of MLX's regular STEEL attention body.  Unsupported shapes fall back
-to stock MLX SDPA in the caller.
+The default path uses a compact MLX STEEL subset specialized for the no-mask
+LTX-2.3 hot path.  Unsupported shapes fall back to stock MLX SDPA in the
+caller; ``LTX_STEEL_ATTN_IMPL=retile`` keeps the full vendored MLX snapshot
+available as a local bisect fallback.
 """
 
 from __future__ import annotations
 
 import atexit
 import os
-import re
-import textwrap
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import mlx.core as mx
 
+from ._steel_attention_ltx import (
+    HEADER as _LTX_HEADER,
+    SOURCE as _LTX_SOURCE,
+)
 from ._steel_attention_vendor import (
     HEADER as _VENDORED_HEADER,
     SOURCE as _VENDORED_SOURCE,
@@ -51,8 +53,8 @@ _PROBE_COUNTS = {
 }
 _PROBE_REASONS: dict[str, int] = {}
 _PROBE_SAMPLES: dict[str, str] = {}
-_HEADER_CACHE: dict[Path, str] = {}
 _KERNEL_CACHE: dict[str, object] = {}
+_VALID_IMPLS = {"compact", "retile"}
 
 
 def _shape_sample(
@@ -110,186 +112,31 @@ if _PROBE_ENABLED:
     atexit.register(_print_probe_summary)
 
 
-def _reference_dir_override() -> Optional[Path]:
-    candidates: list[Path] = []
-    if env_path := os.environ.get("LTX_STEEL_ATTN_MLX_REFERENCE"):
-        candidates.append(Path(env_path))
-    if env_path := os.environ.get("MLX_REFERENCE_DIR"):
-        candidates.append(Path(env_path))
-    if not candidates:
-        return None
-
-    for candidate in candidates:
-        if (
-            candidate
-            / "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h"
-        ).exists():
-            return candidate
-
-    tried = ", ".join(str(path) for path in candidates)
-    raise RuntimeError(
-        "LTX_STEEL_ATTN_MLX_REFERENCE/MLX_REFERENCE_DIR was set, but no "
-        "usable MLX reference checkout was found; tried "
-        f"{tried}."
-    )
+def _kernel_impl() -> str:
+    impl = os.environ.get("LTX_STEEL_ATTN_IMPL", "compact").strip().lower()
+    if impl not in _VALID_IMPLS:
+        valid = ", ".join(sorted(_VALID_IMPLS))
+        raise ValueError(f"Unsupported LTX_STEEL_ATTN_IMPL={impl!r}; use {valid}.")
+    return impl
 
 
-def _find_matching_brace(source: str, open_index: int) -> int:
-    depth = 0
-    for index in range(open_index, len(source)):
-        char = source[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return index
-    raise ValueError("Could not find matching brace.")
-
-
-def _remove_if_block(source: str, condition: str) -> str:
-    start = source.find(condition)
-    while start != -1:
-        open_index = source.find("{", start)
-        if open_index == -1:
-            raise ValueError(f"Could not find opening brace for {condition}.")
-        close_index = _find_matching_brace(source, open_index)
-        source = source[:start] + source[close_index + 1 :]
-        start = source.find(condition)
-    return source
-
-
-def _attention_body(root: Path) -> str:
-    source = (
-        root / "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h"
-    ).read_text()
-    signature_start = source.find("void attention(")
-    if signature_start == -1:
-        raise ValueError("Could not find STEEL attention signature.")
-    body_start = source.find("{", signature_start)
-    if body_start == -1:
-        raise ValueError("Could not find STEEL attention body.")
-    body_end = _find_matching_brace(source, body_start)
-    body = source[body_start + 1 : body_end]
-    body = _remove_if_block(body, "if (has_mask)")
-    body = _remove_if_block(body, "if (has_sinks)")
-    for old, new in {
-        "params->": "params.",
-        "align_Q": "AlignQ",
-        "align_K": "AlignK",
-        "do_causal": "DoCausal",
-    }.items():
-        body = body.replace(old, new)
-    return body
-
-
-def _inline_header(root: Path) -> str:
-    include_re = re.compile(r'^\s*#include\s+"(mlx/[^"]+)"')
-    seen: set[str] = set()
-    seen_angle: set[str] = set()
-
-    def inline(rel: str) -> str:
-        if rel == "mlx/backend/metal/kernels/utils.h":
-            return "\n// skipped custom-kernel auto include utils.h\n"
-        path = root / rel
-        key = str(path)
-        if key in seen:
-            return f"\n// skipped duplicate include {rel}\n"
-        seen.add(key)
-
-        chunks = [f"\n// BEGIN {rel}\n"]
-        for line in path.read_text().splitlines():
-            match = include_re.match(line)
-            if match:
-                chunks.append(inline(match.group(1)))
-                continue
-            if line.strip() == "#pragma once":
-                continue
-            if line.startswith("#include <"):
-                if line not in seen_angle:
-                    seen_angle.add(line)
-                    chunks.append(line + "\n")
-                continue
-            chunks.append(line + "\n")
-        chunks.append(f"// END {rel}\n")
-        return "".join(chunks)
-
-    return (
-        "// LTX MLX STEEL attention wrapper header.\n"
-        "#define MLX_METAL_JIT 1\n"
-        + inline("mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h")
-    )
-
-
-def _source(root: Path) -> str:
-    body = textwrap.indent(_attention_body(root), "  ").lstrip()
-    prefix = r"""
-  const int B = Q_shape[0];
-  const int H = Q_shape[1];
-  const int qL = Q_shape[2];
-  const int D = Q_shape[3];
-  const int kL = K_shape[2];
-
-  AttnParams params;
-  params.B = B;
-  params.H = H;
-  params.D = D;
-  params.qL = qL;
-  params.kL = kL;
-  params.gqa_factor = H / K_shape[1];
-  params.scale = 1.0f / sqrt(float(D));
-  params.NQ = (qL + BQ - 1) / BQ;
-  params.NK = (kL + BK - 1) / BK;
-  params.NQ_aligned = qL / BQ;
-  params.NK_aligned = kL / BK;
-  params.qL_rem = qL - params.NQ_aligned * BQ;
-  params.kL_rem = kL - params.NK_aligned * BK;
-  params.qL_off = 0;
-  params.Q_strides[0] = Q_strides[0];
-  params.Q_strides[1] = Q_strides[1];
-  params.Q_strides[2] = Q_strides[2];
-  params.K_strides[0] = K_strides[0];
-  params.K_strides[1] = K_strides[1];
-  params.K_strides[2] = K_strides[2];
-  params.V_strides[0] = V_strides[0];
-  params.V_strides[1] = V_strides[1];
-  params.V_strides[2] = V_strides[2];
-  params.O_strides[0] = qL * H * D;
-  params.O_strides[1] = D;
-  params.O_strides[2] = H * D;
-
-  uint simd_lane_id = thread_index_in_simdgroup;
-  uint simd_group_id = simdgroup_index_in_threadgroup;
-  uint3 tid = threadgroup_position_in_grid;
-  uint3 lid = thread_position_in_threadgroup;
-
-  using AccumType = float;
-
-"""
-    return prefix + body
-
-
-def _kernel(root: Optional[Path]):
-    key = "vendor" if root is None else f"ref:{root.resolve()}"
-    if key not in _KERNEL_CACHE:
-        if root is None:
+def _kernel(impl: str):
+    if impl not in _KERNEL_CACHE:
+        if impl == "compact":
+            header = _LTX_HEADER
+            source = _LTX_SOURCE
+        else:
             header = _VENDORED_HEADER
             source = _VENDORED_SOURCE
-        else:
-            root = root.resolve()
-            if root not in _HEADER_CACHE:
-                _HEADER_CACHE[root] = _inline_header(root)
-            header = _HEADER_CACHE[root]
-            source = _source(root)
-        _KERNEL_CACHE[key] = mx.fast.metal_kernel(
-            name="ltx_steel_attention_bq64_bk32",
+        _KERNEL_CACHE[impl] = mx.fast.metal_kernel(
+            name=f"ltx_steel_attention_bq64_bk32_{impl}",
             input_names=["Q", "K", "V"],
             output_names=["O"],
             source=source,
             header=header,
             ensure_row_contiguous=False,
         )
-    return _KERNEL_CACHE[key]
+    return _KERNEL_CACHE[impl]
 
 
 def _scale_supported(scale: Optional[float], dim: int) -> bool:
@@ -346,10 +193,10 @@ def maybe_steel_attention(
         _probe_fallback(reason, q, k, v, mask)
         return None
 
-    root = _reference_dir_override()
+    impl = _kernel_impl()
     batch, heads, seq, dim = q.shape
     n_q_tiles = (seq + config.bq - 1) // config.bq
-    out = _kernel(root)(
+    out = _kernel(impl)(
         inputs=[q, k, v],
         output_shapes=[(batch, seq, heads, dim)],
         output_dtypes=[q.dtype],

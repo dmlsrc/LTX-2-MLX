@@ -81,6 +81,9 @@ ltx2-generate = "LTX_2_MLX.scripts.generate:main"
 [tool.hatch.build.targets.wheel]
 packages = ["LTX_2_MLX"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"LTX_2_MLX/kernels/metal" = "LTX_2_MLX/kernels/metal"
+
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-ra -q --strict-markers"

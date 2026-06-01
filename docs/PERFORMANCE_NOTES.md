@@ -855,9 +855,13 @@ with a larger Q tile.
 Implementation:
 
 - Added `LTX_2_MLX/kernels/steel_attention.py`.
-- Uses a vendored snapshot of MLX's own STEEL `steel_attention.h`
-  dependency tree, with Apple's MIT license notice preserved in
-  `LTX_2_MLX/kernels/_steel_attention_vendor.py`.
+- The default path now uses the compact LTX-specific STEEL subset in
+  `LTX_2_MLX/kernels/metal/` (no mask, no causal, no sinks, B=1/H=32,
+  D=64/128).  The full vendored MLX snapshot remains available for bisects
+  with `LTX_STEEL_ATTN_IMPL=retile`.
+- Apple's MIT license notice is preserved in
+  `LTX_2_MLX/kernels/_steel_attention_vendor.py`; both compact and retile
+  Metal resources also carry SPDX license comments.
 - Uses `mx.fast.metal_kernel(..., ensure_row_contiguous=False)` so the
   kernel accepts the real reshape/transpose strides.
 - Emits a row-contiguous physical `(B, L, H, D)` output and returns
@@ -870,6 +874,23 @@ Implementation:
   reasons and sample shapes.
 - D64 is default-on; use `LTX_STEEL_ATTN_DISABLE_D64=1` only for
   bisects.
+
+Compact-source follow-up (2026-06-01):
+
+- Removed the runtime local-MLX-reference source splicer from the default
+  module path.
+- `steel_attention.py` is now just the shape gate and kernel launcher;
+  `_steel_attention_ltx.py` is a 16-line resource loader; the compact Metal
+  subset is split into a 941-line header and 277-line body fragment.
+- `_steel_attention_vendor.py` is also just a resource loader; the full retile
+  fallback lives in `steel_attention_vendor_header.metal` and
+  `steel_attention_vendor_body.metal`.
+- Integrated default parity vs the full retile fallback: max_abs=0 for
+  `(1,32,1504,64)`, `(1,32,8784,128)`, and `(1,32,35136,128)`.
+- Integrated timing on M1 Max:
+  `(1,32,8784,128)` stock 212.915 ms, compact 198.355 ms, retile 196.568 ms;
+  `(1,32,35136,128)` stock 3411.369 ms, compact 3051.386 ms, retile
+  3055.026 ms.
 
 Validation:
 
