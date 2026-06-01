@@ -43,10 +43,6 @@
   threadgroup bfloat Q_smem[BQ * LDQ_tgp];
   threadgroup bfloat KV_smem[BD * LDK_tgp];
 
-  threadgroup bfloat* Qs = Q_smem;
-  threadgroup bfloat* Ks = KV_smem;
-  threadgroup bfloat* Vs = KV_smem;
-
   using QBlockLoader = BF16BlockLoader<
       BQ,
       BD,
@@ -68,9 +64,9 @@
       1,
       false>;
 
-  QBlockLoader loader_q(Q, Q_stride_t, Qs, simd_group_id, simd_lane_id);
-  KBlockLoader loader_k(K, K_stride_t, Ks, simd_group_id, simd_lane_id);
-  VBlockLoader loader_v(V, V_stride_t, Vs, simd_group_id, simd_lane_id);
+  QBlockLoader loader_q(Q, Q_stride_t, Q_smem, simd_group_id, simd_lane_id);
+  KBlockLoader loader_k(K, K_stride_t, KV_smem, simd_group_id, simd_lane_id);
+  VBlockLoader loader_v(V, V_stride_t, KV_smem, simd_group_id, simd_lane_id);
 
   const float scale = (1.0f / sqrt(float(BD))) * M_LOG2E_F;
 
@@ -126,8 +122,8 @@
     for (short dd = 0; dd < TD; dd++) {
       simdgroup_barrier(mem_flags::mem_none);
 
-      Qtile.load(&Qs[Qs_offset + dd * Qs_tile_stride]);
-      Ktile.load(&Ks[Ks_offset + dd * Ks_tile_stride]);
+      Qtile.load(&Q_smem[Qs_offset + dd * Qs_tile_stride]);
+      Ktile.load(&KV_smem[Ks_offset + dd * Ks_tile_stride]);
 
       simdgroup_barrier(mem_flags::mem_none);
       STEEL_PRAGMA_UNROLL
@@ -192,7 +188,7 @@
         const short kk = ik * kFragSize;
         const short dd = id * kFragSize;
 
-        Vtile.load(&Vs[Vs_offset + kk * LDV_tgp + dd]);
+        Vtile.load(&KV_smem[Vs_offset + kk * LDV_tgp + dd]);
 
         if constexpr (BD == 128) {
           simdgroup_barrier(mem_flags::mem_none);
