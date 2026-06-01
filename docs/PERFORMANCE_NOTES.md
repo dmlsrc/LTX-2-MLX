@@ -977,6 +977,33 @@ Follow-up investigation (2026-06-01):
   fused FF kernel that only deletes the hidden GELU pass is bounded around 4%
   per video FF call, much less at whole-denoise scale.
 
+Integrated stage-2 primitive attribution (2026-06-01):
+
+- Command shape: saved 576x320 stage-1 latents, `--bench-mode 2`,
+  `--profile-transformer-steps 2`, representative blocks
+  `0,8,16,24,32,40,47`.  Block 47's `entry sync` is not a real block-47 cost;
+  it flushes deferred work from unprofiled blocks 41-46.  Use the clean blocks
+  `0,8,16,24,32,40` for percentages.
+- Approximate share of the stage-2 transformer/denoise step:
+
+  | Bucket | Share |
+  | --- | ---: |
+  | Video self-attn SDPA | 29.2% |
+  | Video FF GEMMs | 27.9% |
+  | Video self-attn Q/K/V/out projections | 13.4% |
+  | Video text cross-attn | 11.3% |
+  | Audio-video cross-attn | 11.1% |
+  | Video self-attn RoPE | 3.7% |
+  | Video FF GELU | 1.7% |
+  | Audio FF | 1.2% |
+  | Misc / rounding | 0.4% |
+
+- Rolled up: video self-attention is about 46.7%, video feed-forward about
+  29.7%, text plus A/V cross-attention about 22.5%, and everything else about
+  1%.  Remaining same-math wins need to come mostly from video SDPA and
+  GEMM-heavy FF/projection work.  RoPE is measurable but too small to carry a
+  major whole-run win by itself.
+
 Split-K-tail follow-up (2026-06-01):
 
 - The real 576x320 stage-2 token count is `T=16380`, which is `4` short of a
