@@ -17,60 +17,54 @@ namespace mlx {
 namespace steel {
 
 template <
-    short BROWS,
-    short BCOLS,
+    short kRows,
+    short kCols,
     short kDstStrRow,
     short kDstStrCol,
-    short reduction_dim,
-    short tgp_size,
-    short n_reads = (BCOLS * BROWS) / tgp_size,
-    short TCOLS = BCOLS / n_reads,
-    short TROWS = tgp_size / TCOLS>
-struct BF16BlockLoaderT {
-  STEEL_CONST short vec_size = n_reads;
+    bool kReductionDim>
+struct BF16BlockLoader {
+  STEEL_CONST short kThreads = 256;
+  STEEL_CONST short vec_size = (kRows * kCols) / kThreads;
+  STEEL_CONST short kThreadCols = kCols / vec_size;
+  STEEL_CONST short kThreadRows = kThreads / kThreadCols;
+  static_assert(kThreadRows == kRows, "Lean loader expects one row stripe.");
 
   const int src_ld;
   const int tile_stride;
   const short thread_idx;
-  const short bi;
-  const short bj;
+  const short row;
+  const short col;
   threadgroup bfloat* dst;
   const device bfloat* src;
 
-  METAL_FUNC BF16BlockLoaderT(
+  METAL_FUNC BF16BlockLoader(
       const device bfloat* src_,
       const int src_ld_,
       threadgroup bfloat* dst_,
       ushort simd_group_id [[simdgroup_index_in_threadgroup]],
       ushort simd_lane_id [[thread_index_in_simdgroup]])
       : src_ld(src_ld_),
-        tile_stride(reduction_dim ? BCOLS : BROWS * src_ld),
+        tile_stride(kReductionDim ? kCols : kRows * src_ld),
         thread_idx(simd_group_id * 32 + simd_lane_id),
-        bi(thread_idx / TCOLS),
-        bj(vec_size * (thread_idx % TCOLS)),
-        dst(dst_ + bi * kDstStrRow + bj * kDstStrCol),
-        src(src_ + bi * src_ld + bj) {}
+        row(thread_idx / kThreadCols),
+        col(vec_size * (thread_idx % kThreadCols)),
+        dst(dst_ + row * kDstStrRow + col * kDstStrCol),
+        src(src_ + row * src_ld + col) {}
 
   METAL_FUNC void load_unsafe() const {
     STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < BROWS; i += TROWS) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < vec_size; j++) {
-        dst[i * kDstStrRow + j * kDstStrCol] = src[i * src_ld + j];
-      }
+    for (short j = 0; j < vec_size; j++) {
+      dst[j * kDstStrCol] = src[j];
     }
   }
 
   METAL_FUNC void load_safe(short2 src_tile_dim) const {
-    src_tile_dim = src_tile_dim - short2(bj, bi);
+    src_tile_dim = src_tile_dim - short2(col, row);
 
     if (src_tile_dim.x <= 0 || src_tile_dim.y <= 0) {
       STEEL_PRAGMA_UNROLL
-      for (short i = 0; i < BROWS; i += TROWS) {
-        STEEL_PRAGMA_UNROLL
-        for (short j = 0; j < vec_size; j++) {
-          dst[i * kDstStrRow + j * kDstStrCol] = bfloat(0);
-        }
+      for (short j = 0; j < vec_size; j++) {
+        dst[j * kDstStrCol] = bfloat(0);
       }
       return;
     }
@@ -79,21 +73,18 @@ struct BF16BlockLoaderT {
     bfloat tmp_val[vec_size];
 
     STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < BROWS; i += TROWS) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < vec_size; j++) {
-        tmp_idx[j] = (i < src_tile_dim.y) && (j < src_tile_dim.x);
-      }
+    for (short j = 0; j < vec_size; j++) {
+      tmp_idx[j] = j < src_tile_dim.x;
+    }
 
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < vec_size; j++) {
-        tmp_val[j] = src[(tmp_idx[j] ? i * src_ld + j : 0)];
-      }
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < vec_size; j++) {
+      tmp_val[j] = src[(tmp_idx[j] ? j : 0)];
+    }
 
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < vec_size; j++) {
-        dst[i * kDstStrRow + j * kDstStrCol] = tmp_idx[j] ? tmp_val[j] : bfloat(0);
-      }
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < vec_size; j++) {
+      dst[j * kDstStrCol] = tmp_idx[j] ? tmp_val[j] : bfloat(0);
     }
   }
 

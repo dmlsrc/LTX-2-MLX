@@ -19,7 +19,6 @@
   constexpr int BQ = 64;
   constexpr int BK = 32;
   constexpr int WM = 8;
-  constexpr int kThreadgroupSize = WM * 32;
 
   const int NK = (kL + BK - 1) / BK;
   const int NQ_aligned = qL / BQ;
@@ -57,29 +56,26 @@
   threadgroup bfloat* Ks = KV_smem;
   threadgroup bfloat* Vs = KV_smem;
 
-  using QBlockLoader = BF16BlockLoaderT<
+  using QBlockLoader = BF16BlockLoader<
       BQ,
       BD,
       LDQ_tgp,
       1,
-      1,
-      kThreadgroupSize>;
+      true>;
 
-  using KBlockLoader = BF16BlockLoaderT<
+  using KBlockLoader = BF16BlockLoader<
       BK,
       BD,
       1,
       LDK_tgp,
-      0,
-      kThreadgroupSize>;
+      false>;
 
-  using VBlockLoader = BF16BlockLoaderT<
+  using VBlockLoader = BF16BlockLoader<
       BK,
       BD,
       LDV_tgp,
       1,
-      0,
-      kThreadgroupSize>;
+      false>;
 
   QBlockLoader loader_q(Q, Q_stride_t, Qs, simd_group_id, simd_lane_id);
   KBlockLoader loader_k(K, K_stride_t, Ks, simd_group_id, simd_lane_id);
