@@ -60,31 +60,12 @@ struct BF16BlockLoader {
 
   METAL_FUNC void load_safe(short2 src_tile_dim) const {
     src_tile_dim = src_tile_dim - short2(col, row);
-
-    if (src_tile_dim.x <= 0 || src_tile_dim.y <= 0) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < vec_size; j++) {
-        dst[j * kDstStrCol] = bfloat(0);
-      }
-      return;
-    }
-
-    bool tmp_idx[vec_size];
-    bfloat tmp_val[vec_size];
+    const bool row_valid = src_tile_dim.y > 0;
 
     STEEL_PRAGMA_UNROLL
     for (short j = 0; j < vec_size; j++) {
-      tmp_idx[j] = j < src_tile_dim.x;
-    }
-
-    STEEL_PRAGMA_UNROLL
-    for (short j = 0; j < vec_size; j++) {
-      tmp_val[j] = src[(tmp_idx[j] ? j : 0)];
-    }
-
-    STEEL_PRAGMA_UNROLL
-    for (short j = 0; j < vec_size; j++) {
-      dst[j * kDstStrCol] = tmp_idx[j] ? tmp_val[j] : bfloat(0);
+      dst[j * kDstStrCol] =
+          (row_valid && j < src_tile_dim.x) ? src[j] : bfloat(0);
     }
   }
 

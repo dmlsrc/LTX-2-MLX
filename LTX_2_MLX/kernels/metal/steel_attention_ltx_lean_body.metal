@@ -3,9 +3,12 @@
 // Derived from Apple MLX STEEL attention sources.
 // Copyright (c) 2024-25 Apple Inc.
 // SPDX-License-Identifier: MIT
-  const int H = Q_shape[1];
+  constexpr int H = 32;
   const int qL = Q_shape[2];
   const int kL = K_shape[2];
+
+  constexpr int BQ = 64;
+  constexpr int BK = 32;
 
   const int Q_stride_h = Q_strides[1];
   const int Q_stride_t = Q_strides[2];
@@ -13,12 +16,8 @@
   const int K_stride_t = K_strides[2];
   const int V_stride_h = V_strides[1];
   const int V_stride_t = V_strides[2];
-  const int O_stride_h = BD;
-  const int O_stride_t = H * BD;
-
-  constexpr int BQ = 64;
-  constexpr int BK = 32;
-  constexpr int WM = 8;
+  constexpr int O_stride_h = BD;
+  constexpr int O_stride_t = H * BD;
 
   const int NK = (kL + BK - 1) / BK;
   const int NQ_aligned = qL / BQ;
@@ -29,8 +28,6 @@
   uint simd_lane_id = thread_index_in_simdgroup;
   uint simd_group_id = simdgroup_index_in_threadgroup;
   uint3 tid = threadgroup_position_in_grid;
-
-  using AccumType = float;
 
   Q += tid.y * Q_stride_h + tid.x * BQ * Q_stride_t;
   K += tid.y * K_stride_h;
@@ -75,13 +72,12 @@
   KBlockLoader loader_k(K, K_stride_t, Ks, simd_group_id, simd_lane_id);
   VBlockLoader loader_v(V, V_stride_t, Vs, simd_group_id, simd_lane_id);
 
-  const AccumType scale = (1.0f / sqrt(float(BD))) * M_LOG2E_F;
+  const float scale = (1.0f / sqrt(float(BD))) * M_LOG2E_F;
 
   constexpr short kFragSize = 8;
 
   constexpr int TK = BK / kFragSize;
   constexpr int TD = BD / kFragSize;
-  static_assert(BQ == WM * kFragSize, "Lean LTX STEEL attention expects one Q row.");
 
   RowTile<1> Qtile;
   RowTile<TK> Ktile;
@@ -110,10 +106,10 @@
     loader_q.load_unsafe();
   }
 
-  constexpr AccumType neg_inf = -3.4028234663852886e+38F;
+  constexpr float neg_inf = -3.4028234663852886e+38F;
 
-  AccumType max_score[1] = {neg_inf};
-  AccumType sum_score[1] = {0};
+  float max_score[1] = {neg_inf};
+  float sum_score[1] = {0};
 
   for (int kb = 0; kb < NK; kb++) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -172,8 +168,8 @@
       loader_v.load_unsafe();
     }
 
-    AccumType new_max[1] = {max_score[0]};
-    AccumType factor[1];
+    float new_max[1] = {max_score[0]};
+    float factor[1];
 
     Stile.row_max(new_max);
     Stile.exp2_sub(new_max);
@@ -181,7 +177,7 @@
     factor[0] = fast::exp2(max_score[0] - new_max[0]);
     max_score[0] = new_max[0];
 
-    AccumType sum_score_tmp[1] = {0};
+    float sum_score_tmp[1] = {0};
     Stile.row_sum(sum_score_tmp);
 
     sum_score[0] = sum_score[0] * factor[0] + sum_score_tmp[0];
