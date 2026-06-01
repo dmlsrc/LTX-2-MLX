@@ -1063,6 +1063,36 @@ Split-K-tail follow-up (2026-06-01):
   production switch needs an extension-only win, such as direct downstream
   layout writeback, a smaller fixed parameter ABI, or precompiled specialized
   D128/D64 entry points, followed by NPZ parity and full smoke timing.
+- Layout follow-up: physically head-major contiguous q/k/v improves attention,
+  but not enough by itself to justify production K/V packing.  Quiet-machine
+  medians were `L=8784` stock MLX SDPA `212.277 ms`, precompiled extension
+  `190.489 ms`, generated-signature extension `190.487 ms`, current wrapper
+  `190.546 ms`; `L=16380` stock MLX SDPA `773.399 ms`, precompiled extension
+  `658.330 ms`, generated-signature extension `659.797 ms`, current wrapper
+  `659.868 ms`.  Compared with the token-major-view run, stock MLX improves
+  around 9%, but STEEL improves only around 2%.  Before trying production K/V
+  packing, benchmark `pack K/V + attention` including pack cost.  Higher-priority
+  same-math experiments are extension-only tile variants (`BQ=72/BK=32/WM=9`,
+  `BQ=80/BK=32/WM=10`), then a flat LTX attention API returning `(B,T,H*D)`,
+  then gate-fused writeback.  Masked text cross-attention should wait until the
+  exact fallback shapes are profiled.
+- Tile-variant implementation constraint: do not change only the tile constants.
+  The current `BQ=64/WM=8` path has 256 threads and its block loader implicitly
+  assumes that count.  Wider Q tiles such as `BQ=72/WM=9` or `BQ=80/WM=10`
+  should load Q with all `WM*32` threads, but K/V should still be staged only by
+  the first 256 threads.  Extra simdgroups must no-op their K/V loader work
+  behind an active-thread guard while still reaching all barriers.  Keep this as
+  an isolated extension-bench sweep before changing the production wrapper.
+- Tile-sweep result: `BQ=80/BK=32/WM=10` is now the candidate to production-probe.
+  Quiet-machine medians on token-major q/k/v: `L=8784` current wrapper
+  `194.168 ms`, BQ80 extension `188.190 ms`; `L=16380` current wrapper
+  `673.040 ms`, BQ80 extension `653.035 ms`.  Parity stayed at BF16-level delta
+  (`max_abs=0.000244`, `cos=1.0000000000`).  BQ72 was useful for loader
+  validation but did not beat the current wrapper.  Weighted over 8 stage-1 and
+  3 stage-2 video self-attention calls per transformer block, BQ80 saves about
+  108 ms per block, or roughly 5.2 seconds across 48 video blocks at the
+  measured 576x320/30s shape.  Next gate is an env-gated production probe plus
+  stage-harness/full-smoke parity and timing.
 - Shallow wrapper-adjacent probe: MLX's generator confirms there is no public
   `mx.fast.metal_kernel` hook for kernel attributes; it always emits
   `[[kernel]] void custom_kernel_*` and only auto-adds thread-position
