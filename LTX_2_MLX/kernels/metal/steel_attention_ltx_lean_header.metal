@@ -102,226 +102,146 @@ struct BF16BlockLoaderT {
   }
 };
 
-template <typename T, int kFragRows, int kFragCols>
-struct BaseMMAFrag;
+typedef metal::vec<float, 2> mma_frag_t;
+typedef metal::simdgroup_matrix<float, 8, 8> mma_mat_t;
 
-template <typename T>
-struct BaseMMAFrag<T, 8, 8> {
+METAL_FUNC static constexpr short2 mma_coord(
+    ushort simd_lane_id [[thread_index_in_simdgroup]]) {
+  const short qid = simd_lane_id / 4;
+  const short fm = (qid & 4) + ((simd_lane_id / 2) % 4);
+  const short fn = (qid & 2) * 2 + (simd_lane_id % 2) * 2;
+  return short2{fn, fm};
+}
+
+METAL_FUNC static constexpr void
+load_fragment(thread mma_frag_t& dst, const threadgroup bfloat* src) {
+  dst[0] = static_cast<float>(src[0]);
+  dst[1] = static_cast<float>(src[1]);
+}
+
+METAL_FUNC static constexpr void
+store_fragment(const thread mma_frag_t& src, device bfloat* dst) {
+  dst[0] = static_cast<bfloat>(src[0]);
+  dst[1] = static_cast<bfloat>(src[1]);
+}
+
+METAL_FUNC static constexpr void store_fragment_safe(
+    const thread mma_frag_t& src,
+    device bfloat* dst,
+    const int lim_y,
+    const int off_y) {
+  if (off_y < lim_y) {
+    dst[off_y] = static_cast<bfloat>(src[0]);
+  }
+  if ((off_y + 1) < lim_y) {
+    dst[off_y + 1] = static_cast<bfloat>(src[1]);
+  }
+}
+
+METAL_FUNC static void mma_fragment(
+    thread mma_frag_t& D,
+    thread mma_frag_t& A,
+    thread mma_frag_t& B,
+    thread mma_frag_t& C) {
+  mma_mat_t D_mat;
+  mma_mat_t A_mat;
+  mma_mat_t B_mat;
+  mma_mat_t C_mat;
+
+  reinterpret_cast<thread mma_frag_t&>(A_mat.thread_elements()) = A;
+  reinterpret_cast<thread mma_frag_t&>(B_mat.thread_elements()) = B;
+  reinterpret_cast<thread mma_frag_t&>(C_mat.thread_elements()) = C;
+
+  simdgroup_multiply_accumulate(D_mat, A_mat, B_mat, C_mat);
+  D = reinterpret_cast<thread mma_frag_t&>(D_mat.thread_elements());
+}
+
+template <typename Op>
+METAL_FUNC static constexpr void row_reduce_fragment(
+    thread const mma_frag_t& inp_vals,
+    thread float* reduced_vals) {
+  float thr_reduce = Op::apply(inp_vals.x, inp_vals.y);
+  float qgr_reduce = simd_shuffle_xor(thr_reduce, ushort(1));
+  qgr_reduce = Op::apply(thr_reduce, qgr_reduce);
+  float sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
+  sgr_reduce = Op::apply(qgr_reduce, sgr_reduce);
+  reduced_vals[0] = Op::apply(reduced_vals[0], sgr_reduce);
+}
+
+template <typename Op>
+METAL_FUNC static constexpr void
+row_bin_op_fragment(thread mma_frag_t& inp_vals, thread float* row_vals) {
+  inp_vals[0] = Op::apply(inp_vals[0], row_vals[0]);
+  inp_vals[1] = Op::apply(inp_vals[1], row_vals[0]);
+}
+
+template <int COLS>
+struct RowTile {
   STEEL_CONST int kFragRows = 8;
   STEEL_CONST int kFragCols = 8;
-  STEEL_CONST int kElemsPerFrag = 2;
-  STEEL_CONST int kElemRows = 1;
   STEEL_CONST int kElemCols = 2;
+  STEEL_CONST int kTileCols = COLS;
+  STEEL_CONST int kElemsPerTile = COLS * kElemCols;
+  STEEL_CONST int kRowsPerThread = 1;
 
-  typedef metal::simdgroup_matrix<T, 8, 8> mat_type;
-  typedef metal::vec<T, kElemsPerFrag> frag_type;
+  mma_frag_t val_frags[COLS];
 
-  METAL_FUNC static constexpr short2 get_coord(
-      ushort simd_lane_id [[thread_index_in_simdgroup]]) {
-    const short qid = simd_lane_id / 4;
-    const short fm = (qid & 4) + ((simd_lane_id / 2) % 4);
-    const short fn = (qid & 2) * 2 + (simd_lane_id % 2) * 2;
-    return short2{fn, fm};
-  }
-
-  template <int str_x, int str_y>
-  METAL_FUNC static constexpr void
-  load(thread frag_type& dst, const threadgroup bfloat* src) {
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kElemRows; i++) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kElemCols; j++) {
-        dst[i * kElemCols + j] = static_cast<T>(src[i * str_x + j * str_y]);
-      }
-    }
-  }
-
-  METAL_FUNC static constexpr void
-  store(const thread frag_type& src, device bfloat* dst, const int ld) {
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kElemRows; i++) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kElemCols; j++) {
-        dst[i * ld + j] = static_cast<bfloat>(src[i * kElemCols + j]);
-      }
-    }
-  }
-
-  METAL_FUNC static constexpr void store_safe(
-      const thread frag_type& src,
-      device bfloat* dst,
-      const int ld,
-      const int lim_x,
-      const int lim_y,
-      const int off_x,
-      const int off_y) {
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kElemRows; i++) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kElemCols; j++) {
-        if ((off_x + i) < lim_x && (off_y + j) < lim_y) {
-          dst[(off_x + i) * ld + off_y + j] =
-              static_cast<bfloat>(src[i * kElemCols + j]);
-        }
-      }
-    }
-  }
-
-  METAL_FUNC static constexpr void mma(
-      thread frag_type& D,
-      thread frag_type& A,
-      thread frag_type& B,
-      thread frag_type& C) {
-    mat_type D_mat;
-    mat_type A_mat;
-    mat_type B_mat;
-    mat_type C_mat;
-
-    reinterpret_cast<thread frag_type&>(A_mat.thread_elements()) = A;
-    reinterpret_cast<thread frag_type&>(B_mat.thread_elements()) = B;
-    reinterpret_cast<thread frag_type&>(C_mat.thread_elements()) = C;
-
-    simdgroup_multiply_accumulate(D_mat, A_mat, B_mat, C_mat);
-    D = reinterpret_cast<thread frag_type&>(D_mat.thread_elements());
-  }
-
-  template <typename Op>
-  METAL_FUNC static constexpr void row_reduce(
-      thread const frag_type& inp_vals,
-      thread T* reduced_vals) {
-    T thr_reduce = Op::apply(inp_vals.x, inp_vals.y);
-    T qgr_reduce = simd_shuffle_xor(thr_reduce, ushort(1));
-    qgr_reduce = Op::apply(thr_reduce, qgr_reduce);
-    T sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
-    sgr_reduce = Op::apply(qgr_reduce, sgr_reduce);
-    reduced_vals[0] = Op::apply(reduced_vals[0], sgr_reduce);
-  }
-
-  template <typename Op>
-  METAL_FUNC static constexpr void row_bin_op(
-      thread frag_type& inp_vals,
-      thread T* row_vals) {
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kElemRows; i++) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kElemCols; j++) {
-        inp_vals[i * kElemCols + j] =
-            Op::apply(inp_vals[i * kElemCols + j], row_vals[i]);
-      }
-    }
-  }
-};
-
-template <
-    typename T,
-    int kTileRows_,
-    int kTileCols_,
-    class MMAFrag_ = BaseMMAFrag<T, 8, 8>>
-struct MMATile {
-  using MMAFrag_t = MMAFrag_;
-  using elem_type = T;
-  STEEL_CONST int kFragRows = MMAFrag_t::kFragRows;
-  STEEL_CONST int kFragCols = MMAFrag_t::kFragCols;
-  STEEL_CONST int kElemsPerFrag = MMAFrag_t::kElemsPerFrag;
-  STEEL_CONST int kTileRows = kTileRows_;
-  STEEL_CONST int kTileCols = kTileCols_;
-  STEEL_CONST int kNumFrags = kTileRows * kTileCols;
-  STEEL_CONST int kElemsPerTile = kNumFrags * kElemsPerFrag;
-  STEEL_CONST int kRowsPerThread = kTileRows * MMAFrag_t::kElemRows;
-
-  typedef typename MMAFrag_t::frag_type frag_type;
-  frag_type val_frags[kNumFrags];
-
-  METAL_FUNC MMATile() thread {}
+  METAL_FUNC RowTile() thread {}
 
   METAL_FUNC constexpr void clear() {
     STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kNumFrags; ++i) {
-      val_frags[i] = frag_type(0);
+    for (short j = 0; j < COLS; ++j) {
+      val_frags[j] = mma_frag_t(0);
     }
   }
 
-  METAL_FUNC constexpr thread frag_type& frag_at(const short i, const short j) {
-    return val_frags[i * kTileCols + j];
+  METAL_FUNC constexpr thread mma_frag_t& frag_at(const short j) {
+    return val_frags[j];
   }
 
-  METAL_FUNC constexpr const thread frag_type& frag_at(
-      const short i,
-      const short j) const {
-    return val_frags[i * kTileCols + j];
-  }
-
-  METAL_FUNC thread elem_type* elems() {
-    return reinterpret_cast<thread elem_type*>(val_frags);
+  METAL_FUNC thread float* elems() {
+    return reinterpret_cast<thread float*>(val_frags);
   }
 
   template <typename Op>
-  METAL_FUNC void row_reduce(thread T vals[kRowsPerThread]) const {
+  METAL_FUNC void row_reduce(thread float vals[kRowsPerThread]) const {
     STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kTileRows; ++i) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kTileCols; ++j) {
-        MMAFrag_t::template row_reduce<Op>(
-            frag_at(i, j), &vals[i * MMAFrag_t::kElemRows]);
-      }
+    for (short j = 0; j < COLS; ++j) {
+      row_reduce_fragment<Op>(val_frags[j], vals);
     }
   }
 
   template <typename Op>
-  METAL_FUNC void row_bin_op(thread T vals[kRowsPerThread]) {
+  METAL_FUNC void row_bin_op(thread float vals[kRowsPerThread]) {
     STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kTileRows; ++i) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kTileCols; ++j) {
-        MMAFrag_t::template row_bin_op<Op>(
-            frag_at(i, j), &vals[i * MMAFrag_t::kElemRows]);
-      }
+    for (short j = 0; j < COLS; ++j) {
+      row_bin_op_fragment<Op>(val_frags[j], vals);
     }
   }
 
-  template <int w_x, int w_y, int str_x, int str_y>
   METAL_FUNC void load(const threadgroup bfloat* src) {
     STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kTileRows; ++i) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kTileCols; ++j) {
-        MMAFrag_t::template load<str_x, str_y>(
-            frag_at(i, j),
-            &(src[(i * kFragRows) * w_x * str_x + (j * kFragCols) * w_y * str_y]));
-      }
+    for (short j = 0; j < COLS; ++j) {
+      load_fragment(frag_at(j), &src[j * kFragCols]);
     }
   }
 
-  template <int w_x, int w_y>
-  METAL_FUNC void store(device bfloat* dst, const int ld) const {
+  METAL_FUNC void store(device bfloat* dst) const {
     STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < kTileRows; ++i) {
-      STEEL_PRAGMA_UNROLL
-      for (short j = 0; j < kTileCols; ++j) {
-        MMAFrag_t::store(
-            frag_at(i, j),
-            &(dst[(i * kFragRows) * w_x * ld + (j * kFragCols) * w_y]),
-            ld);
-      }
+    for (short j = 0; j < COLS; ++j) {
+      store_fragment(val_frags[j], &dst[j * kFragCols]);
     }
   }
 
-  template <int w_x, int w_y>
   METAL_FUNC void
-  store_safe(device bfloat* dst, const int ld, const short2 dst_tile_dims) const {
+  store_safe(device bfloat* dst, const short2 dst_tile_dims) const {
     STEEL_PRAGMA_UNROLL
-    for (int i = 0; i < kTileRows; ++i) {
-      STEEL_PRAGMA_UNROLL
-      for (int j = 0; j < kTileCols; ++j) {
-        MMAFrag_t::store_safe(
-            frag_at(i, j),
-            dst,
-            ld,
-            dst_tile_dims.y,
-            dst_tile_dims.x,
-            (i * kFragRows) * w_x,
-            (j * kFragCols) * w_y);
-      }
+    for (int j = 0; j < COLS; ++j) {
+      store_fragment_safe(
+          val_frags[j],
+          dst,
+          dst_tile_dims.x,
+          j * kFragCols);
     }
   }
 };

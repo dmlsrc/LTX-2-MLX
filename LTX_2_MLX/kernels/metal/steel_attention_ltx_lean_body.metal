@@ -88,25 +88,19 @@
   const AccumType scale = (1.0f / sqrt(float(BD))) * M_LOG2E_F;
 
   constexpr short kFragSize = 8;
-  using MMAFrag_acc_t = BaseMMAFrag<AccumType, kFragSize, kFragSize>;
-
-  constexpr int kNWarps = WM;
-  static_assert(
-      BQ >= (kNWarps * kFragSize) && BQ % (kNWarps * kFragSize) == 0,
-      "Each simdgroup must host at least 1 simdgroup matrix along Q.");
 
   constexpr int TK = BK / kFragSize;
   constexpr int TD = BD / kFragSize;
-  static_assert(BQ == kNWarps * kFragSize, "Lean LTX STEEL attention expects TQ=1.");
+  static_assert(BQ == WM * kFragSize, "Lean LTX STEEL attention expects one Q row.");
 
-  MMATile<AccumType, 1, 1, MMAFrag_acc_t> Qtile;
-  MMATile<AccumType, 1, TK, MMAFrag_acc_t> Ktile;
-  MMATile<AccumType, 1, TK, MMAFrag_acc_t> Stile;
-  MMATile<AccumType, 1, 1, MMAFrag_acc_t> Vtile;
-  MMATile<AccumType, 1, TD, MMAFrag_acc_t> Otile;
+  RowTile<1> Qtile;
+  RowTile<TK> Ktile;
+  RowTile<TK> Stile;
+  RowTile<1> Vtile;
+  RowTile<TD> Otile;
   Otile.clear();
 
-  const short2 simd_coord = MMAFrag_acc_t::get_coord(simd_lane_id);
+  const short2 simd_coord = mma_coord(simd_lane_id);
   const short sm = simd_coord.y;
   const short sn = simd_coord.x;
   const short tm = kFragSize * simd_group_id;
@@ -151,19 +145,17 @@
     for (short dd = 0; dd < TD; dd++) {
       simdgroup_barrier(mem_flags::mem_none);
 
-      Qtile.template load<1, 1, LDQ_tgp, 1>(
-          &Qs[Qs_offset + dd * Qs_tile_stride]);
-      Ktile.template load<1, 1, LDK_tgp, 1>(
-          &Ks[Ks_offset + dd * Ks_tile_stride]);
+      Qtile.load(&Qs[Qs_offset + dd * Qs_tile_stride]);
+      Ktile.load(&Ks[Ks_offset + dd * Ks_tile_stride]);
 
       simdgroup_barrier(mem_flags::mem_none);
       STEEL_PRAGMA_UNROLL
       for (short ik = 0; ik < TK; ik++) {
-        MMAFrag_acc_t::mma(
-            Stile.frag_at(0, ik),
-            Qtile.frag_at(0, 0),
-            Ktile.frag_at(0, ik),
-            Stile.frag_at(0, ik));
+        mma_fragment(
+            Stile.frag_at(ik),
+            Qtile.frag_at(0),
+            Ktile.frag_at(ik),
+            Stile.frag_at(ik));
       }
     }
 
@@ -177,15 +169,12 @@
       constexpr AccumType neg_inf = -3.4028234663852886e+38F;
 
       STEEL_PRAGMA_UNROLL
-      for (short i = 0; i < stile_t::kTileRows; i++) {
+      for (short j = 0; j < stile_t::kTileCols; j++) {
+        short col_pos = sn + (j * stile_t::kFragCols);
         STEEL_PRAGMA_UNROLL
-        for (short j = 0; j < stile_t::kTileCols; j++) {
-          short col_pos = sn + (j * stile_t::kFragCols);
-          STEEL_PRAGMA_UNROLL
-          for (short jj = 0; jj < stile_t::MMAFrag_t::kElemCols; jj++) {
-            if ((col_pos + jj) >= kL_rem) {
-              Stile.frag_at(i, j)[jj] = neg_inf;
-            }
+        for (short jj = 0; jj < stile_t::kElemCols; jj++) {
+          if ((col_pos + jj) >= kL_rem) {
+            Stile.frag_at(j)[jj] = neg_inf;
           }
         }
       }
@@ -242,18 +231,17 @@
         const short kk = ik * kFragSize;
         const short dd = id * kFragSize;
 
-        Vtile.template load<1, 1, LDV_tgp, 1>(
-            &Vs[Vs_offset + kk * LDV_tgp + dd]);
+        Vtile.load(&Vs[Vs_offset + kk * LDV_tgp + dd]);
 
         if constexpr (BD == 128) {
           simdgroup_barrier(mem_flags::mem_none);
         }
 
-        MMAFrag_acc_t::mma(
-            Otile.frag_at(0, id),
-            Stile.frag_at(0, ik),
-            Vtile.frag_at(0, 0),
-            Otile.frag_at(0, id));
+        mma_fragment(
+            Otile.frag_at(id),
+            Stile.frag_at(ik),
+            Vtile.frag_at(0),
+            Otile.frag_at(id));
       }
     }
 
@@ -273,7 +261,7 @@
       return;
     }
 
-    Otile.template store_safe<1, 1>(O, O_stride_t, dst_tile_dims);
+    Otile.store_safe(O, dst_tile_dims);
   } else {
-    Otile.template store<1, 1>(O, O_stride_t);
+    Otile.store(O);
   }
