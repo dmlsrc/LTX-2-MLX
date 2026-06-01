@@ -37,20 +37,14 @@
   V += tid.y * V_stride_h;
   O += tid.y * O_stride_h + tid.x * BQ * O_stride_t;
 
-  constexpr short padQ = 16 / sizeof(bfloat);
-  constexpr short padK = 16 / sizeof(bfloat);
-  constexpr short padV = 16 / sizeof(bfloat);
+  constexpr short pad = 16 / sizeof(bfloat);
 
-  constexpr short LDQ_tgp = BD + padQ;
-  constexpr short LDK_tgp = BK + padK;
-  constexpr short LDV_tgp = BD + padV;
+  constexpr short LDQ_tgp = BD + pad;
+  constexpr short LDK_tgp = BK + pad;
+  constexpr short LDV_tgp = BD + pad;
 
-  constexpr short tgp_mem_0 = (BK + padK) * BD;
-  constexpr short tgp_mem_1 = BK * (BD + padV);
-  constexpr short tgp_mem_s = tgp_mem_0 > tgp_mem_1 ? tgp_mem_0 : tgp_mem_1;
-
-  threadgroup bfloat Q_smem[BQ * (BD + padQ)];
-  threadgroup bfloat KV_smem[tgp_mem_s];
+  threadgroup bfloat Q_smem[BQ * LDQ_tgp];
+  threadgroup bfloat KV_smem[BD * LDK_tgp];
 
   threadgroup bfloat* Qs = Q_smem;
   threadgroup bfloat* Ks = KV_smem;
