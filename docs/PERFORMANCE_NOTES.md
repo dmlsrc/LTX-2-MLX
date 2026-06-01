@@ -1008,6 +1008,12 @@ Split-K-tail follow-up (2026-06-01):
   rather than faster.  We keep the split because it is exact, auditable, and
   exposes the tail/alignment surface for common unaligned shapes; it should not
   be sold as a universal whole-run win.
+- Rejected Q-tail follow-up: splitting `T=16380` into a `16320` aligned-Q prefix
+  plus a `60`-query tail was exact (`max_abs=0`) but slower.  Direct Metal body
+  timing measured baseline `667.8 ms` median vs Q-split `701.2 ms` median
+  (`1.05x`).  The extra kernel launch/concat costs more than removing the
+  Q-tail branch, matching the earlier neighbor result that Q-tail was basically
+  free.  Do not port a two-call Q split.
 
 Validation:
 

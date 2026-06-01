@@ -19,7 +19,6 @@
   constexpr int O_stride_h = BD;
   constexpr int O_stride_t = H * BD;
 
-  const int NK = (kL + BK - 1) / BK;
   const int NQ_aligned = qL / BQ;
   const int NK_aligned = kL / BK;
   const int qL_rem = qL - NQ_aligned * BQ;
@@ -169,9 +168,6 @@
             Otile.frag_at(id));
       }
     }
-
-    loader_k.next();
-    loader_v.next();
   }
 
   if constexpr (!AlignK) {
