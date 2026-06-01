@@ -1049,16 +1049,20 @@ Split-K-tail follow-up (2026-06-01):
   stage1 D128 split-good `44.9 ms` vs prologue `46.3 ms`, stage2 D128
   split-good `680.4 ms` vs prologue `683.7 ms`.  The prologue was removed; keep
   the simpler `dd=0..TD` multiply-accumulate loop.
-- Possible next exact-kernel option: a standalone Metal/MLX extension wrapper,
-  not a raw PyObjC dispatch.  The only credible upside is compiler/control-plane
-  control that `mx.fast.metal_kernel` does not expose: explicit
-  `max_total_threads_per_threadgroup(256)`, a tiny fixed params surface instead
-  of generated shape/stride ABI loads, and precompiled/specialized entry points
-  for D128 aligned-K, D128 tail-K, and D64.  The risk is equally real: if this
-  leaves MLX's command stream or adds synchronization/buffer-lifetime glue per
-  call, command-buffer overhead can erase the gain.  Treat it as a bounded
-  wrapper experiment for kernel attributes and fixed params, not as a generic
-  rewrite.
+- Standalone Metal/MLX extension follow-up: the KinoMLX bench-only extension
+  now matches the current `mx.fast.metal_kernel` wrapper on the real D128 LTX
+  shapes without leaving MLX's command stream.  Quiet-machine medians:
+  `L=8784` stock MLX SDPA `233.408 ms`, precompiled extension `194.138 ms`,
+  runtime-source extension `194.393 ms`, generated-signature extension
+  `193.859 ms`, current wrapper `194.155 ms`; `L=16380` stock MLX SDPA
+  `846.366 ms`, precompiled extension `673.451 ms`, runtime-source extension
+  `673.448 ms`, generated-signature extension `672.505 ms`, current wrapper
+  `673.030 ms`.  All variants matched stock SDPA at BF16-level delta
+  (`max_abs=0.000244`, `cos=1.0000000000`).  This clears the extension ABI as a
+  valid testbed, but does not justify replacing the production wrapper yet.  A
+  production switch needs an extension-only win, such as direct downstream
+  layout writeback, a smaller fixed parameter ABI, or precompiled specialized
+  D128/D64 entry points, followed by NPZ parity and full smoke timing.
 - Shallow wrapper-adjacent probe: MLX's generator confirms there is no public
   `mx.fast.metal_kernel` hook for kernel attributes; it always emits
   `[[kernel]] void custom_kernel_*` and only auto-adds thread-position
