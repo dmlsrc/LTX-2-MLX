@@ -1,9 +1,9 @@
 """MLX STEEL attention tile override for supported LTX-2.3 shapes.
 
-The default path uses a compact MLX STEEL subset specialized for the no-mask
-LTX-2.3 hot path.  Unsupported shapes fall back to stock MLX SDPA in the
-caller; ``LTX_STEEL_ATTN_IMPL=retile`` keeps the full vendored MLX snapshot
-available as a local bisect fallback.
+The default path uses a lean BF16-only MLX STEEL subset specialized for the
+no-mask LTX-2.3 hot path.  Unsupported shapes and FP16 calls fall back to stock
+MLX SDPA in the caller; ``LTX_STEEL_ATTN_IMPL=compact`` and ``retile`` keep the
+older compact subset and full vendored MLX snapshot available for bisects.
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ import mlx.core as mx
 from ._steel_attention_ltx import (
     HEADER as _LTX_HEADER,
     SOURCE as _LTX_SOURCE,
+)
+from ._steel_attention_ltx_lean import (
+    HEADER as _LEAN_HEADER,
+    SOURCE as _LEAN_SOURCE,
 )
 from ._steel_attention_vendor import (
     HEADER as _VENDORED_HEADER,
@@ -54,7 +58,7 @@ _PROBE_COUNTS = {
 _PROBE_REASONS: dict[str, int] = {}
 _PROBE_SAMPLES: dict[str, str] = {}
 _KERNEL_CACHE: dict[str, object] = {}
-_VALID_IMPLS = {"compact", "retile"}
+_VALID_IMPLS = {"lean", "compact", "retile"}
 
 
 def _shape_sample(
@@ -113,7 +117,7 @@ if _PROBE_ENABLED:
 
 
 def _kernel_impl() -> str:
-    impl = os.environ.get("LTX_STEEL_ATTN_IMPL", "compact").strip().lower()
+    impl = os.environ.get("LTX_STEEL_ATTN_IMPL", "lean").strip().lower()
     if impl not in _VALID_IMPLS:
         valid = ", ".join(sorted(_VALID_IMPLS))
         raise ValueError(f"Unsupported LTX_STEEL_ATTN_IMPL={impl!r}; use {valid}.")
@@ -122,7 +126,10 @@ def _kernel_impl() -> str:
 
 def _kernel(impl: str):
     if impl not in _KERNEL_CACHE:
-        if impl == "compact":
+        if impl == "lean":
+            header = _LEAN_HEADER
+            source = _LEAN_SOURCE
+        elif impl == "compact":
             header = _LTX_HEADER
             source = _LTX_SOURCE
         else:
@@ -150,6 +157,7 @@ def _select_config(
     v: mx.array,
     scale: Optional[float],
     mask: Optional[mx.array],
+    impl: str,
 ) -> tuple[Optional[_TileConfig], str]:
     if mask is not None:
         return None, "mask"
@@ -157,6 +165,8 @@ def _select_config(
         return None, "ndim"
     if q.dtype not in (mx.bfloat16, mx.float16):
         return None, "dtype"
+    if impl == "lean" and q.dtype != mx.bfloat16:
+        return None, "dtype_lean_bf16"
     if k.dtype != q.dtype or v.dtype != q.dtype:
         return None, "dtype_mismatch"
     if q.shape[0] != 1:
@@ -188,21 +198,21 @@ def maybe_steel_attention(
     mask: Optional[mx.array] = None,
 ) -> Optional[mx.array]:
     """Return custom STEEL attention output when this call matches the gate."""
-    config, reason = _select_config(q, k, v, scale, mask)
+    impl = _kernel_impl()
+    config, reason = _select_config(q, k, v, scale, mask, impl)
     if config is None:
         _probe_fallback(reason, q, k, v, mask)
         return None
 
-    impl = _kernel_impl()
     batch, heads, seq, dim = q.shape
     n_q_tiles = (seq + config.bq - 1) // config.bq
-    out = _kernel(impl)(
-        inputs=[q, k, v],
-        output_shapes=[(batch, seq, heads, dim)],
-        output_dtypes=[q.dtype],
-        grid=(n_q_tiles * 32, heads * config.wm, batch * config.wn),
-        threadgroup=config.threads,
-        template=[
+    template = [
+        ("BD", config.bd),
+        ("AlignQ", (seq % config.bq) == 0),
+        ("AlignK", (k.shape[2] % config.bk) == 0),
+    ]
+    if impl != "lean":
+        template = [
             ("T", q.dtype),
             ("BQ", config.bq),
             ("BK", config.bk),
@@ -212,7 +222,14 @@ def maybe_steel_attention(
             ("AlignQ", (seq % config.bq) == 0),
             ("AlignK", (k.shape[2] % config.bk) == 0),
             ("DoCausal", False),
-        ],
+        ]
+    out = _kernel(impl)(
+        inputs=[q, k, v],
+        output_shapes=[(batch, seq, heads, dim)],
+        output_dtypes=[q.dtype],
+        grid=(n_q_tiles * 32, heads * config.wm, batch * config.wn),
+        threadgroup=config.threads,
+        template=template,
     )[0]
     _probe_hit(config)
     return out.transpose(0, 2, 1, 3)
