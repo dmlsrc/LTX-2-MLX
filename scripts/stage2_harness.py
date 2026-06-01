@@ -444,6 +444,37 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--profile-transformer",
+        action="store_true",
+        help=(
+            "Diagnostic shorthand: profile stage-2 step 1 unless "
+            "--profile-transformer-steps is supplied.  Each profiled step "
+            "inserts forced eval checkpoints and perturbs timing."
+        ),
+    )
+    parser.add_argument(
+        "--profile-transformer-steps",
+        type=gen.parse_profile_transformer_steps,
+        default=(),
+        metavar="STEPS",
+        help=(
+            "Diagnostic: comma-separated 1-based stage-2 denoise steps to "
+            "profile, e.g. '2'.  Each profiled step inserts forced eval "
+            "checkpoints and perturbs timing."
+        ),
+    )
+    parser.add_argument(
+        "--profile-transformer-blocks",
+        type=gen.parse_profile_transformer_blocks,
+        default=(),
+        metavar="BLOCKS",
+        help=(
+            "Diagnostic: comma-separated 0-based transformer blocks to profile "
+            "in detail within selected --profile-transformer-steps, e.g. "
+            "'0,40,47'."
+        ),
+    )
+    parser.add_argument(
         "--stage2-video-attn-kv-pool",
         type=parse_spatial_pool,
         default=None,
@@ -819,6 +850,9 @@ def main() -> None:
 
     del model
 
+    profile_transformer_steps = tuple(args.profile_transformer_steps or ())
+    profile_transformer_once = bool(args.profile_transformer and not profile_transformer_steps)
+
     config = gen.AVCFGConfig(
         height=height,
         width=width,
@@ -835,6 +869,9 @@ def main() -> None:
         auto_tiling=False,
         audio_enabled=generate_audio,
         use_internal_audio_branch=args.use_internal_audio_branch,
+        profile_transformer_once=profile_transformer_once,
+        profile_transformer_steps=profile_transformer_steps,
+        profile_transformer_blocks=tuple(args.profile_transformer_blocks or ()),
     )
     timings.mark("pipeline object setup")
 

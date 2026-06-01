@@ -1717,6 +1717,11 @@ class AVPipeline:
             if callback:
                 callback(step, total_steps)
 
+        profile_steps = set(config.profile_transformer_steps or ())
+        if config.profile_transformer_once:
+            profile_steps.add(1)
+        profile_blocks = tuple(sorted(set(config.profile_transformer_blocks or ())))
+
         stage_2_start = time.perf_counter()
         video_state_2, audio_state_2 = self._denoise_loop_simple_av(
             video_state=video_state_2,
@@ -1726,6 +1731,8 @@ class AVPipeline:
             audio_context=positive_audio_encoding,
             stepper=stepper,
             callback=stage_2_callback,
+            profile_steps=tuple(sorted(profile_steps)),
+            profile_blocks=profile_blocks,
         )
         stage_2_elapsed = time.perf_counter() - stage_2_start
         post_denoise_start = time.perf_counter()
