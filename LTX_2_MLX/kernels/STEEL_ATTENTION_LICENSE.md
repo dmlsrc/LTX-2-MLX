@@ -7,10 +7,8 @@ Apple MLX STEEL attention sources.
 - Source commit used for the local snapshot:
   `2165dc08d7b33258260aa849d39f087d50e62962`
 - Local derived resources:
-  - `metal/steel_attention_ltx_lean_header.metal`
-  - `metal/steel_attention_ltx_lean_body.metal`
-  - `metal/steel_attention_ltx_q8k2_header.metal`
-  - `metal/steel_attention_ltx_q8k2_body.metal`
+  - `metal/steel_attention_ltx_header.metal`
+  - `metal/steel_attention_ltx_body.metal`
   - `../../archive/steel_attention/metal/steel_attention_ltx_header.metal.bak`
   - `../../archive/steel_attention/metal/steel_attention_ltx_body.metal.bak`
   - `../../archive/steel_attention/metal/steel_attention_vendor_header.metal.bak`

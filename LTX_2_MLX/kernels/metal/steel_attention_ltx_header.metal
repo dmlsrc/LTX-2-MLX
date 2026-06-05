@@ -1,12 +1,11 @@
-// BF16 D128 MLX STEEL subset for the LTX-2.3 no-mask attention path.
+// BF16-only MLX STEEL subset for the LTX-2.3 no-mask attention path.
 // Derived from Apple MLX STEEL attention sources.
 // Copyright (c) 2024-25 Apple Inc.
 // SPDX-License-Identifier: MIT
-
+#define MLX_METAL_JIT 1
 #include <metal_stdlib>
 #include <metal_simdgroup>
 #include <metal_simdgroup_matrix>
-
 using namespace metal;
 
 #define STEEL_CONST static constant constexpr const
@@ -14,27 +13,28 @@ using namespace metal;
 
 #pragma METAL internals : enable
 
-namespace ltx_steel {
+namespace mlx {
+namespace steel {
 
 template <
-    int kRows,
-    int kCols,
-    int kDstStrRow,
-    int kDstStrCol,
-    int kActiveThreads,
+    short kRows,
+    short kCols,
+    short kDstStrRow,
+    short kDstStrCol,
+    short kActiveThreads,
     bool kAllActive = false>
 struct BF16BlockLoader {
   STEEL_CONST short vec_size = (kRows * kCols) / kActiveThreads;
   STEEL_CONST short kThreadCols = kCols / vec_size;
   static_assert(
       (kRows * kCols) == (kActiveThreads * vec_size),
-      "Lean loader expects exact work partition.");
+      "STEEL loader expects exact work partition.");
   static_assert(
       (kThreadCols * vec_size) == kCols,
-      "Lean loader expects row-aligned contiguous chunks.");
+      "STEEL loader expects row-aligned contiguous chunks.");
   static_assert(
       (kActiveThreads / kThreadCols) == kRows,
-      "Lean loader expects one row stripe.");
+      "STEEL loader expects one row stripe.");
 
   const int tile_stride;
   const short thread_idx;
@@ -48,10 +48,10 @@ struct BF16BlockLoader {
       const device bfloat* src_,
       const int src_ld_,
       threadgroup bfloat* dst_,
-      uint simd_group_id,
-      uint simd_lane_id)
+      ushort simd_group_id [[simdgroup_index_in_threadgroup]],
+      ushort simd_lane_id [[thread_index_in_simdgroup]])
       : tile_stride(kRows * src_ld_),
-        thread_idx(short(simd_group_id * 32 + simd_lane_id)),
+        thread_idx(simd_group_id * 32 + simd_lane_id),
         active(kAllActive || thread_idx < kActiveThreads),
         row(kAllActive ? short(thread_idx / kThreadCols)
                        : (active ? short(thread_idx / kThreadCols) : short(0))),
@@ -221,6 +221,9 @@ struct RowTile {
   }
 };
 
-} // namespace ltx_steel
+} // namespace steel
+} // namespace mlx
+
 #pragma METAL internals : disable
-using namespace ltx_steel;
+
+using namespace mlx::steel;

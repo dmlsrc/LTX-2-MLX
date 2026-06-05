@@ -1,43 +1,26 @@
-
-// BF16 D128 body fragment consumed by mx.fast.metal_kernel.
+// BF16-only body fragment consumed by mx.fast.metal_kernel.
+// MLX supplies the kernel wrapper and input/output pointer declarations.
+// Derived from Apple MLX STEEL attention sources.
+// Copyright (c) 2024-25 Apple Inc.
+// SPDX-License-Identifier: MIT
 
   uint simd_lane_id = thread_index_in_simdgroup;
   uint simd_group_id = simdgroup_index_in_threadgroup;
   uint3 tid = threadgroup_position_in_grid;
 
-  constexpr int BD = 128;
-  constexpr int BQ = 80;
-  constexpr int BK = 40;
-  constexpr int WM = 10;
-  constexpr int Q_PAD = 8;
-  constexpr int K_PAD = 2;
-  constexpr int V_PAD = 8;
-  constexpr int Q_ACTIVE_THREADS = 320;
-  constexpr int K_ACTIVE_THREADS = 320;
-  constexpr int V_ACTIVE_THREADS = 320;
-  constexpr bool AllActiveLoaders = true;
-  constexpr int Q_FULL_TILES_CONST = -1;
-  constexpr int K_FULL_TILES_CONST = -1;
-  constexpr int Q_REM_CONST = -1;
-  constexpr int K_REM_CONST = -1;
-  constexpr bool SkipUnitFactor = false;
-
   constexpr int H = 32;
-  static_assert(BD == 128, "This kernel currently supports D=128.");
   static_assert(BK % 8 == 0, "BK must match the 8x8 fragment tiling.");
   static_assert(BQ == WM * 8, "This kernel maps one 8-row Q stripe per simdgroup.");
   static_assert(Q_ACTIVE_THREADS == WM * 32, "Q loading uses every thread.");
   static_assert(
-      !AllActiveLoaders ||
-          (Q_ACTIVE_THREADS == WM * 32 && K_ACTIVE_THREADS == WM * 32 &&
-           V_ACTIVE_THREADS == WM * 32),
-      "All-active loader variant requires every thread to participate.");
+      !Q_LOADS_ALL_ACTIVE || Q_ACTIVE_THREADS == WM * 32,
+      "All-active Q loader variant requires every thread to participate.");
   static_assert(
-      (Q_FULL_TILES_CONST >= 0) == (Q_REM_CONST >= 0),
-      "Exact Q specialization needs both full-tile count and remainder.");
+      !K_LOADS_ALL_ACTIVE || K_ACTIVE_THREADS == WM * 32,
+      "All-active K loader variant requires every thread to participate.");
   static_assert(
-      (K_FULL_TILES_CONST >= 0) == (K_REM_CONST >= 0),
-      "Exact K specialization needs both full-tile count and remainder.");
+      !V_LOADS_ALL_ACTIVE || V_ACTIVE_THREADS == WM * 32,
+      "All-active V loader variant requires every thread to participate.");
 
   const int qL = Q_shape[2];
   const int kL = K_shape[2];
@@ -50,8 +33,8 @@
   constexpr int O_stride_h = BD;
   constexpr int O_stride_t = H * BD;
 
-  constexpr bool exact_q = Q_FULL_TILES_CONST >= 0;
-  constexpr bool exact_k = K_FULL_TILES_CONST >= 0;
+  constexpr bool exact_q = Q_EXACT_TILES;
+  constexpr bool exact_k = K_EXACT_TILES;
   const int NQ_aligned = exact_q ? Q_FULL_TILES_CONST : qL / BQ;
   const int NK_aligned = exact_k ? K_FULL_TILES_CONST : kL / BK;
   const int qL_rem = exact_q ? Q_REM_CONST : qL - NQ_aligned * BQ;
@@ -77,11 +60,11 @@
   threadgroup bfloat KV_smem[KV_smem_elems];
 
   using QBlockLoader =
-      BF16BlockLoader<BQ, BD, LDQ_tgp, 1, Q_ACTIVE_THREADS, AllActiveLoaders>;
+      BF16BlockLoader<BQ, BD, LDQ_tgp, 1, Q_ACTIVE_THREADS, Q_LOADS_ALL_ACTIVE>;
   using KBlockLoader =
-      BF16BlockLoader<BK, BD, 1, LDK_tgp, K_ACTIVE_THREADS, AllActiveLoaders>;
+      BF16BlockLoader<BK, BD, 1, LDK_tgp, K_ACTIVE_THREADS, K_LOADS_ALL_ACTIVE>;
   using VBlockLoader =
-      BF16BlockLoader<BK, BD, LDV_tgp, 1, V_ACTIVE_THREADS, AllActiveLoaders>;
+      BF16BlockLoader<BK, BD, LDV_tgp, 1, V_ACTIVE_THREADS, V_LOADS_ALL_ACTIVE>;
 
   QBlockLoader loader_q(Q, Q_stride_t, Q_smem, simd_group_id, simd_lane_id);
   KBlockLoader loader_k(K, K_stride_t, KV_smem, simd_group_id, simd_lane_id);
@@ -185,14 +168,18 @@
     for (short id = 0; id < TD; id++) {
       STEEL_PRAGMA_UNROLL
       for (short ik = 0; ik < TK; ik++) {
-        simdgroup_barrier(mem_flags::mem_none);
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
+        }
 
         const short kk = ik * kFragSize;
         const short dd = id * kFragSize;
 
         Vtile.load(&KV_smem[Vs_offset + kk * LDV_tgp + dd]);
 
-        simdgroup_barrier(mem_flags::mem_none);
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
+        }
 
         mma_fragment(
             Otile.frag_at(id),
@@ -275,14 +262,18 @@
     for (short id = 0; id < TD; id++) {
       STEEL_PRAGMA_UNROLL
       for (short ik = 0; ik < TK; ik++) {
-        simdgroup_barrier(mem_flags::mem_none);
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
+        }
 
         const short kk = ik * kFragSize;
         const short dd = id * kFragSize;
 
         Vtile.load(&KV_smem[Vs_offset + kk * LDV_tgp + dd]);
 
-        simdgroup_barrier(mem_flags::mem_none);
+        if constexpr (BD == 128) {
+          simdgroup_barrier(mem_flags::mem_none);
+        }
 
         mma_fragment(
             Otile.frag_at(id),

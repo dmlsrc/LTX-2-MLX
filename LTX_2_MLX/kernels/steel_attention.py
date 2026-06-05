@@ -14,9 +14,14 @@ from typing import Optional
 import mlx.core as mx
 
 
-_D64_BQ = 64
-_D64_BK = 32
-_D64_WM = 8
+_D64_CONFIGS = {
+    "bk32": (64, 32, 8, 8, 256, "ltx_steel_attention_bq64_bk32"),
+    "bk32_q8k4": (64, 32, 8, 4, 256, "ltx_steel_attention_bq64_bk32_q8k4v8"),
+    "bk24": (64, 24, 8, 8, 192, "ltx_steel_attention_bq64_bk24"),
+    "bk24_q8k2": (64, 24, 8, 2, 192, "ltx_steel_attention_bq64_bk24_q8k2v8"),
+}
+_D64_ADAPTIVE = bool(os.environ.get("LTX_STEEL_ATTN_D64_ADAPTIVE"))
+_D64_FORCE_Q8K4 = bool(os.environ.get("LTX_STEEL_ATTN_D64_Q8K4"))
 _D128_BQ = 80
 _D128_BK = 40
 _D128_WM = 10
@@ -31,6 +36,7 @@ _PROBE_COUNTS = {
     "hit_d128": 0,
     "fallback": 0,
 }
+_PROBE_D64_CONFIGS: dict[str, int] = {}
 _PROBE_REASONS: dict[str, int] = {}
 _PROBE_SAMPLES: dict[str, str] = {}
 _KERNELS = {}
@@ -49,9 +55,13 @@ def _shape_sample(
     )
 
 
-def _probe_hit(bd: int) -> None:
+def _probe_hit(bd: int, d64_config: str = "") -> None:
     if _PROBE_ENABLED:
         _PROBE_COUNTS[f"hit_d{bd}"] += 1
+        if bd == 64:
+            _PROBE_D64_CONFIGS[d64_config] = (
+                _PROBE_D64_CONFIGS.get(d64_config, 0) + 1
+            )
 
 
 def _probe_fallback(
@@ -79,6 +89,10 @@ def _print_probe_summary() -> None:
         n = _PROBE_COUNTS[name]
         pct = (100.0 * n / total) if total else 0.0
         print(f"  {name:<10} {n:>8}  ({pct:5.1f}%)")
+    if _PROBE_D64_CONFIGS:
+        print("  D64 configs:")
+        for name, count in sorted(_PROBE_D64_CONFIGS.items()):
+            print(f"    {name:<14} {count:>8}")
     if _PROBE_REASONS:
         print("  fallback reasons:")
         for reason, count in sorted(
@@ -91,18 +105,36 @@ if _PROBE_ENABLED:
     atexit.register(_print_probe_summary)
 
 
-def _kernel(dim: int):
-    if dim not in _KERNELS:
-        if dim == 128:
-            from ._steel_attention_ltx_q8k2 import HEADER, SOURCE
+def _d64_config(q_len: int, k_len: int) -> str:
+    if not _D64_ADAPTIVE:
+        return "bk32_q8k4" if _D64_FORCE_Q8K4 else "bk32"
 
+    if q_len == k_len:
+        if q_len >= 12288:
+            return "bk24_q8k2"
+        if q_len >= 8192:
+            return "bk24"
+
+    if q_len <= 2048:
+        if k_len == 16380:
+            return "bk24_q8k2"
+        if k_len == 8784:
+            return "bk24"
+
+    return "bk32_q8k4"
+
+
+def _kernel(dim: int, d64_config: str = ""):
+    key = (dim, d64_config) if dim == 64 else (dim, "")
+    if key not in _KERNELS:
+        from ._steel_attention_ltx import HEADER, SOURCE
+
+        if dim == 128:
             name = "ltx_steel_attention_bq80_bk40_q8k2v8_allactive"
         else:
-            from ._steel_attention_ltx_lean import HEADER, SOURCE
+            name = _D64_CONFIGS[d64_config][5]
 
-            name = "ltx_steel_attention_bq64_bk32"
-
-        _KERNELS[dim] = mx.fast.metal_kernel(
+        _KERNELS[key] = mx.fast.metal_kernel(
             name=name,
             input_names=["Q", "K", "V"],
             output_names=["O"],
@@ -110,23 +142,69 @@ def _kernel(dim: int):
             header=HEADER,
             ensure_row_contiguous=False,
         )
-    return _KERNELS[dim]
+    return _KERNELS[key]
 
 
-def _tile_config(dim: int) -> tuple[int, int, int]:
+def _tile_config(dim: int, d64_config: str = "") -> tuple[int, int, int]:
     if dim == 128:
         return _D128_BQ, _D128_BK, _D128_WM
-    return _D64_BQ, _D64_BK, _D64_WM
+    return _D64_CONFIGS[d64_config][:3]
 
 
-def _template(dim: int, align_q: bool, align_k: bool) -> list[tuple[str, object]]:
+def _template(
+    dim: int,
+    align_q: bool,
+    align_k: bool,
+    d64_config: str = "",
+) -> list[tuple[str, object]]:
     if dim == 128:
         return [
+            ("BD", dim),
+            ("BQ", _D128_BQ),
+            ("BK", _D128_BK),
+            ("WM", _D128_WM),
+            ("Q_PAD", 8),
+            ("K_PAD", 2),
+            ("V_PAD", 8),
+            ("Q_ACTIVE_THREADS", _D128_WM * 32),
+            ("K_ACTIVE_THREADS", _D128_WM * 32),
+            ("V_ACTIVE_THREADS", _D128_WM * 32),
+            ("Q_LOADS_ALL_ACTIVE", True),
+            ("K_LOADS_ALL_ACTIVE", True),
+            ("V_LOADS_ALL_ACTIVE", True),
+            ("Q_EXACT_TILES", False),
+            ("K_EXACT_TILES", False),
+            ("Q_FULL_TILES_CONST", 0),
+            ("K_FULL_TILES_CONST", 0),
+            ("Q_REM_CONST", 0),
+            ("K_REM_CONST", 0),
+            ("SkipUnitFactor", False),
             ("AlignQ", align_q),
             ("AlignK", align_k),
         ]
+    bq, bk, wm, k_pad, kv_threads, _ = _D64_CONFIGS[d64_config]
+    kv_all_active = kv_threads == wm * 32
     return [
         ("BD", dim),
+        ("BQ", bq),
+        ("BK", bk),
+        ("WM", wm),
+        ("Q_PAD", 8),
+        ("K_PAD", k_pad),
+        ("V_PAD", 8),
+        ("Q_ACTIVE_THREADS", wm * 32),
+        ("K_ACTIVE_THREADS", kv_threads),
+        ("V_ACTIVE_THREADS", kv_threads),
+        ("Q_LOADS_ALL_ACTIVE", True),
+        ("K_LOADS_ALL_ACTIVE", kv_all_active),
+        ("V_LOADS_ALL_ACTIVE", kv_all_active),
+        ("Q_EXACT_TILES", False),
+        ("K_EXACT_TILES", False),
+        ("Q_FULL_TILES_CONST", 0),
+        ("K_FULL_TILES_CONST", 0),
+        ("Q_REM_CONST", 0),
+        ("K_REM_CONST", 0),
+        ("SkipUnitFactor", False),
         ("AlignQ", align_q),
         ("AlignK", align_k),
     ]
@@ -149,7 +227,7 @@ def _select_config(
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         return None, "ndim"
     if q.dtype != mx.bfloat16:
-        return None, "dtype_lean_bf16"
+        return None, "dtype_bf16"
     if k.dtype != q.dtype or v.dtype != q.dtype:
         return None, "dtype_mismatch"
     if q.shape[0] != 1:
@@ -187,17 +265,18 @@ def maybe_steel_attention(
         return None
 
     batch, heads, seq, dim = q.shape
-    bq, bk, wm = _tile_config(bd)
+    d64_config = _d64_config(seq, k.shape[2]) if bd == 64 else ""
+    bq, bk, wm = _tile_config(bd, d64_config)
     n_q_tiles = (seq + bq - 1) // bq
     align_q = (seq % bq) == 0
     align_k = (k.shape[2] % bk) == 0
-    out = _kernel(bd)(
+    out = _kernel(bd, d64_config)(
         inputs=[q, k, v],
         output_shapes=[(batch, seq, heads, dim)],
         output_dtypes=[q.dtype],
         grid=(n_q_tiles * 32, heads * wm, batch),
         threadgroup=(32, wm, 1),
-        template=_template(bd, align_q, align_k),
+        template=_template(bd, align_q, align_k, d64_config),
     )[0]
-    _probe_hit(bd)
+    _probe_hit(bd, d64_config)
     return out.transpose(0, 2, 1, 3)
