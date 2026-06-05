@@ -845,7 +845,7 @@ sdpa_d_sweep` -- the bench that closed this hypothesis is in the
 repo and re-runnable if anyone wants to verify on different M1 Max
 units or after MLX upstream changes.
 
-### 2026-05-28: MLX STEEL attention wrapper retile -- BQ64/BK32 wins on M1 Max `[DEFAULT]`
+### 2026-05-28: MLX STEEL attention wrapper retile -- local STEEL wins on M1 Max `[DEFAULT]`
 
 Follow-up to the abandoned SDPA tile hypothesis.  The D-sweep was too
 indirect: it tested MLX's built-in `bk` selection through different head
@@ -855,7 +855,7 @@ with a larger Q tile.
 Implementation:
 
 - Added `LTX_2_MLX/kernels/steel_attention.py`.
-- The default path now uses the lean LTX-specific STEEL subset in
+- The default path now uses LTX-specific STEEL subsets in
   `LTX_2_MLX/kernels/metal/` (no mask, no causal, no sinks, B=1/H=32,
   D=64/128).  The older compact subset and full vendored MLX snapshot have
   been moved to `archive/steel_attention/` as historical parity references.
@@ -867,13 +867,51 @@ Implementation:
 - Emits a row-contiguous physical `(B, L, H, D)` output and returns
   `.transpose(0, 2, 1, 3)`, matching MLX full-attention's physical output
   layout trick.
-- Specializes no-mask `BQ=64, BK=32` for `D=128` and `D=64`.
+- Specializes no-mask D64 with `BQ=64, BK=32`.
+- Specializes no-mask D128 with source-packaged `BQ=80, BK=40, q8k2v8`.
 - Default-on for supported no-mask D128/D64 shapes.  Disable with
   `LTX_DISABLE_STEEL_ATTN=1` or `LTX_STEEL_ATTN=0`.
   `LTX_STEEL_ATTN_PROBE=1` prints `hit_d128`, `hit_d64`, fallback
   reasons and sample shapes.
 - D64 is default-on; use `LTX_STEEL_ATTN_DISABLE_D64=1` only for
   bisects.
+
+D128 q8k2 source-packaging follow-up (2026-06-05):
+
+- KinoMLX showed that the current best D128 kernel can be shipped through
+  `mx.fast.metal_kernel` source strings with extension parity:
+  `(1,32,8784,128)` extension `178.693 ms`, packaged `178.729 ms`;
+  `(1,32,16380,128)` extension `620.065 ms`, packaged `620.301 ms`.
+  Both were `7.07-7.09 TF/s` and matched stock within the usual BF16
+  attention tolerance (`max_abs <= 0.000488`, cosine 1.0 at the tested
+  shapes).
+- LTX integration keeps D64 on the lean path and switches only D128 to the
+  `BQ=80, BK=40, q8k2v8` source-packaged path.  The Python dispatcher caches
+  per-dimension kernels so unsupported shapes still fall back cleanly.
+- Real stage-2 harness gate used the saved 576x320x721 kitten smoke sidecar
+  and text conditioning, BF16, audio on, seed 42.  Bench mode (`N=2`) ran
+  cleanly with `hit_d128=2`, `hit_d64=4`, `fallback=0`; measured step 2 was
+  `95.583s`.
+- Full q8k2 replay produced a valid output and saved latents.  Stage-2
+  denoise was `288.091s`; probe summary again reported `hit_d128=2`,
+  `hit_d64=4`, `fallback=0`.
+- A clean `HEAD` snapshot replay of the same stage-2 harness reproduced the
+  saved reference latents exactly for `stage_2_video_latent`,
+  `final_video_latent`, `stage_2_audio_latent`, and `final_audio_latent`.
+  The q8k2 replay did not: `stage_2_video_latent` had
+  `max_abs=1.103515625`, `rms=0.0399478553002`, cosine `0.999251593761`;
+  `stage_2_audio_latent` had `max_abs=1.279296875`,
+  `rms=0.0200427505595`, cosine `0.999856546051`.
+- MP4-level comparison is visually clean.  Frame-by-frame decoded-video
+  metrics against the saved reference: FFmpeg PSNR `47.635668 dB`, SSIM
+  `0.994486`, decoded RGB8 mean absolute delta `1.314/255` on average
+  (`2.713/255` worst frame).  Worst frames cluster in the final half-second
+  during near-camera edge motion; amplified diff is mostly edge/texture noise.
+- Decision: ship q8k2 as default for D128.  It is not a bit-exact latent
+  replacement, but the drift is the expected online-softmax / tile-order BF16
+  accumulation drift already seen in the smaller stock-vs-lean STEEL path and
+  inlined transformer comparisons.  Use visual/audio regression checks, not latent
+  exactness, as the acceptance gate for this default.
 
 Compact-source follow-up (2026-06-01):
 
@@ -1083,7 +1121,9 @@ Split-K-tail follow-up (2026-06-01):
   the first 256 threads.  Extra simdgroups must no-op their K/V loader work
   behind an active-thread guard while still reaching all barriers.  Keep this as
   an isolated extension-bench sweep before changing the production wrapper.
-- Tile-sweep result: `BQ=80/BK=32/WM=10` is now the candidate to production-probe.
+- Tile-sweep result: `BQ=80/BK=32/WM=10` became the first production-probe
+  candidate and led to the later `BQ=80/BK=40/q8k2v8` source-packaged D128
+  path documented above.
   Quiet-machine medians on token-major q/k/v: `L=8784` current wrapper
   `194.168 ms`, BQ80 extension `188.190 ms`; `L=16380` current wrapper
   `673.040 ms`, BQ80 extension `653.035 ms`.  Parity stayed at BF16-level delta
@@ -1091,8 +1131,9 @@ Split-K-tail follow-up (2026-06-01):
   validation but did not beat the current wrapper.  Weighted over 8 stage-1 and
   3 stage-2 video self-attention calls per transformer block, BQ80 saves about
   108 ms per block, or roughly 5.2 seconds across 48 video blocks at the
-  measured 576x320/30s shape.  Next gate is an env-gated production probe plus
-  stage-harness/full-smoke parity and timing.
+  measured 576x320/30s shape.  The completed production gate kept the speed
+  signal, accepted non-bitexact latent drift, and used decoded-video metrics as
+  the quality gate.
 - Shallow wrapper-adjacent probe: MLX's generator confirms there is no public
   `mx.fast.metal_kernel` hook for kernel attributes; it always emits
   `[[kernel]] void custom_kernel_*` and only auto-adds thread-position

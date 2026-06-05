@@ -67,14 +67,15 @@ The following ship enabled by default:
 
 ### Active brutal-efficiency targets
 
-**Update 2026-06-01:** one actionable target survived deeper testing:
-a default-on `mx.fast.metal_kernel` wrapper around the MLX STEEL attention
-helpers, specialized for the LTX-2.3 no-mask D64/D128 hot path and retiled
-to `BQ=64, BK=32`.  Disable it with `LTX_DISABLE_STEEL_ATTN=1` or
-`LTX_STEEL_ATTN=0`; `LTX_STEEL_ATTN_PROBE=1` prints hit/fallback counts.
-The default implementation is the lean LTX subset in
-`LTX_2_MLX/kernels/metal/`; the older compact and vendored snapshots are
-archived under `archive/steel_attention/`.
+**Update 2026-06-05:** one actionable target survived deeper testing:
+a default-on `mx.fast.metal_kernel` wrapper around MLX STEEL attention
+helpers, specialized for the LTX-2.3 no-mask hot path.  D64 still uses the
+lean `BQ=64, BK=32` path; D128 now uses the source-packaged
+`BQ=80, BK=40, q8k2v8` path.  Disable all local STEEL attention with
+`LTX_DISABLE_STEEL_ATTN=1` or `LTX_STEEL_ATTN=0`;
+`LTX_STEEL_ATTN_PROBE=1` prints hit/fallback counts.  The implementation
+lives in `LTX_2_MLX/kernels/metal/`; the older compact and vendored snapshots
+are archived under `archive/steel_attention/`.
 
 Prior negative candidates remain preserved below (full reasoning in
 `PERFORMANCE_NOTES.md` Archive):
@@ -83,7 +84,7 @@ Prior negative candidates remain preserved below (full reasoning in
 |---|---|---|
 | **mxfp8 quant on `project_*`** | **DEAD** — +10-45 % SLOWER post-AdaLN-fix | `bench_ff_microbench.py quant_matmul`: `mx.quantized_matmul` is structurally a BF16 matmul with on-the-fly dequant (`fp_quantized.h:139`, `:663`).  Hits 4.7 TFlops/s vs steel_gemm's 7.95.  Will always lose on M1; flips on M3+/M5 hardware.  Empirically verified 2026-05-23 via `scripts/bench_int8_alu.py`: **no INT8 hardware path exists on Apple7**.  Metal has no `dot(char4,char4)` intrinsic, `simdgroup_matrix` accepts only `half/bfloat/float`, and `mpp::tensor_ops::matmul2d` (Metal 4 cooperative-tensor with INT8 inputs) is M5+ only.  Microbench: INT8 4-way unrolled "dot" achieves 0.80 TOps/s vs FP16 scalar fma 0.76 TOps/s — per-MAC tied, no advantage.  The "21 TFlops/s theoretical INT8 peak" claim in prior PERFORMANCE_NOTES was wishful. |
 | **Q+K+V fusion into one matmul** | **DEAD** — −1.2 % regression | `bench_ff_microbench.py qkv`: 3 separate (111.75 ms) is faster than 1 packed (113.10 ms).  Bandwidth saving on input dominated by larger output's tile-alignment + post-split overhead. |
-| **Custom STEEL SDPA tile wrapper** | **DEFAULT WIN** — opt out with `LTX_DISABLE_STEEL_ATTN=1` | Supersedes the earlier D-sweep conclusion.  A literal wrapper around MLX's own STEEL body, with `BQ=64, BK=32`, hits D=128 video self-attn and D=64 no-mask audio/cross-modal attention.  Fresh 576×320×721 distilled AV smoke (`8+3`, seed 42, BF16, audio on): no-patch denoise 465.4s, D128-only 444.6s, D64-default 438.4s.  Stage 2 moved 310.2s → 286.9s.  Remaining fallbacks are masked text cross-attn. |
+| **Custom STEEL SDPA tile wrapper** | **DEFAULT WIN** — opt out with `LTX_DISABLE_STEEL_ATTN=1` | Supersedes the earlier D-sweep conclusion.  A literal wrapper around MLX's own STEEL body hits D=128 video self-attn and D=64 no-mask audio/cross-modal attention.  D64 uses `BQ=64, BK=32`; D128 uses `BQ=80, BK=40, q8k2v8`.  Fresh 576×320×721 distilled AV smoke (`8+3`, seed 42, BF16, audio on): lean D64/D128 stage-2 denoise 294.9s; q8k2 D128 + lean D64 stage-2 denoise 288.1s.  Saved-reference MP4 comparison: PSNR 47.64 dB, SSIM 0.99449, decoded RGB8 mean abs 1.31/255.  Latents are not bit-exact (`stage_2_video_latent` cos 0.99925), and the older stock-vs-lean path already had small BF16/tile-order drift; visual parity is the rollout gate. |
 | **Custom fused / streamed BF16 FFN kernel** | **ABANDONED** — feasibility bench shows 3.8-7.5 % per-call ceiling | `bench_ff_microbench.py fused`: stock FF runs at 91-95 % of `steel_gemm` ceiling.  Conservative recoverable wall (vs both-matmuls-chained-no-GELU floor) = +12 ms = +3.8 % per call.  Optimistic recoverable wall (vs a perfect tiled fused kernel that elides hidden HBM round-trip AND retains GEMM efficiency) = +24 ms = +7.5 %.  Per-step ceiling: +1.3-2.6 % of 45.5 s.  Streamed-FFN sketch (per-chunk inner-dim streaming on top of MLX) additionally pays an output-accumulation tax and many-small-GEMMs efficiency loss; would not clear the bar.  See `PERFORMANCE_NOTES.md` Archive "Custom fused / streamed BF16 FFN kernel". |
 | **Custom AdaLN+residual Metal kernel** | **NOT WORTH IT** — ~0.10 % step headroom | `bench_ff_microbench.py adaln`: production compiled chain runs at 285 GB/s = 84 % of `pointwise_bw` 340 GB/s peak.  Inline-vs-compiled gap is 5.5× (`mx.compile` is already doing the heavy lifting).  A custom Metal kernel can at most recover the 16 % gap from 285→340 GB/s × 0.64 % of step the chain costs = ~0.10 % of step.  Keep `@mx.compile` on `_adaln_inline` / `_residual_gate_inline` — defends the current production default with a number. |
 | **RoPE BF16 cos/sin (Lever A)** | **DEAD** — tested 2026-05-18, visible output drift | `bench_ff_microbench.py rope` predicted -0.55 % step (-252 ms) if BF16 cos/sin (cast inside `apply_split_rotary_emb`) preserved quality.  Empirical one-stage A/B (288x512x721, seed 42): speed delta within single-sample noise once layout-default change is controlled for; visible same-seed output drift.  RoPE precision change cascades into the render via AdaLN-conditioned attention.  Patch reverted, env var removed.  See `PERFORMANCE_NOTES.md` Archive "Consolidated quiet-machine microbench sweep" → Lever A. |
@@ -91,7 +92,7 @@ Prior negative candidates remain preserved below (full reasoning in
 | **VAE Conv3d (upstream `mx.conv_general` int-overflow fix)** | **BLOCKED upstream** — 2.4-3.5 % end-to-end ceiling | `bench_ff_microbench.py vae`: `nn.Conv3d` achieves 56-72 % of `steel_gemm` ceiling across three decoder shapes; dominates resnet-block time at ~80-95 %.  If upstream fix lifts Conv3d to GEMM ceiling: ~1.5-2x on Conv3d × ~7 % VAE share of total wall = ~2.4-3.5 % end-to-end ceiling.  Re-run `vae_ops` after fix lands to confirm.  Pointwise norm/silu inside the block are negligible. |
 
 **Achievement summary:** stock MLX BF16 remains hard to beat on M1 Max,
-but the 2026-05-28 STEEL retile found one narrow default software win.
+but the STEEL wrapper found one narrow default software win.
 Further substantial wins still require:
 - (a) **Silicon upgrade to M3+ (INT8 GEMM beats BF16) or M5+ (NAX
   cooperative-tensor matmul)** — the same `--video-ff-quantize` and
@@ -1056,6 +1057,15 @@ showed that `BQ=64, BK=32` is faster at the actual LTX shapes on M1
 Max.  The production branch keeps this as the default local path for
 supported shapes; unsupported shapes fall back to stock MLX SDPA:
 
+**2026-06-05 update:** D64 still uses the `BQ=64, BK=32` local path,
+but D128 moved to the faster source-packaged `BQ=80, BK=40, q8k2v8`
+path.  The newer D128 path is not latent-bit-exact against the older
+lean path, but visual MP4 comparison on the saved 576x320x721 kitten
+stage-2 run was clean (PSNR 47.64 dB, SSIM 0.99449).  Stock-vs-lean
+already showed small BF16/tile-order drift, so treat local STEEL as a
+visually equivalent performance path, not a latent-exact replacement for
+stock MLX SDPA.
+
 ```bash
 LTX_STEEL_ATTN_PROBE=1 \
 PYTHONDONTWRITEBYTECODE=1 \
@@ -1134,9 +1144,10 @@ there is no software knob to recover the 4× token overhead.
 **Implications:**
 
 - On M1 Max, stock `sdpa_full` is a strong baseline but not the final
-  tile floor for these LTX shapes; the local `BQ=64, BK=32` STEEL
-  wrapper beat the packaged `BQ=32, BK=16` kernel in full 8+3 smoke
-  tests.
+  tile floor for these LTX shapes; local STEEL wrappers beat the
+  packaged `BQ=32, BK=16` kernel in full 8+3 smoke tests.  Current
+  defaults are `BQ=64, BK=32` for D64 and `BQ=80, BK=40, q8k2v8`
+  for D128.
 - Upgrading to **M5+** (the actual NAX-capable family, NOT M3) would
   unlock the `mpp::tensor_ops::matmul2d` hardware path entirely —
   dedicated tensor-multiply units replacing the SIMD-group matrix

@@ -1,8 +1,8 @@
 """MLX STEEL attention tile override for supported LTX-2.3 shapes.
 
-The default path uses a lean BF16-only MLX STEEL subset specialized for the
-no-mask LTX-2.3 hot path.  Unsupported shapes and FP16 calls fall back to stock
-MLX SDPA in the caller.
+The default path uses BF16-only MLX STEEL subsets specialized for the no-mask
+LTX-2.3 hot path.  Unsupported shapes and FP16 calls fall back to stock MLX
+SDPA in the caller.
 """
 
 from __future__ import annotations
@@ -14,10 +14,12 @@ from typing import Optional
 import mlx.core as mx
 
 
-_BQ = 64
-_BK = 32
-_WM = 8
-_THREADGROUP = (32, _WM, 1)
+_D64_BQ = 64
+_D64_BK = 32
+_D64_WM = 8
+_D128_BQ = 80
+_D128_BK = 40
+_D128_WM = 10
 
 _SUPPORTED_DIMS = {64, 128}
 _PROBE_ENABLED = bool(os.environ.get("LTX_STEEL_ATTN_PROBE"))
@@ -31,7 +33,7 @@ _PROBE_COUNTS = {
 }
 _PROBE_REASONS: dict[str, int] = {}
 _PROBE_SAMPLES: dict[str, str] = {}
-_KERNEL = None
+_KERNELS = {}
 
 
 def _shape_sample(
@@ -89,20 +91,45 @@ if _PROBE_ENABLED:
     atexit.register(_print_probe_summary)
 
 
-def _kernel():
-    global _KERNEL
-    if _KERNEL is None:
-        from ._steel_attention_ltx_lean import HEADER, SOURCE
+def _kernel(dim: int):
+    if dim not in _KERNELS:
+        if dim == 128:
+            from ._steel_attention_ltx_q8k2 import HEADER, SOURCE
 
-        _KERNEL = mx.fast.metal_kernel(
-            name="ltx_steel_attention_bq64_bk32",
+            name = "ltx_steel_attention_bq80_bk40_q8k2v8_allactive"
+        else:
+            from ._steel_attention_ltx_lean import HEADER, SOURCE
+
+            name = "ltx_steel_attention_bq64_bk32"
+
+        _KERNELS[dim] = mx.fast.metal_kernel(
+            name=name,
             input_names=["Q", "K", "V"],
             output_names=["O"],
             source=SOURCE,
             header=HEADER,
             ensure_row_contiguous=False,
         )
-    return _KERNEL
+    return _KERNELS[dim]
+
+
+def _tile_config(dim: int) -> tuple[int, int, int]:
+    if dim == 128:
+        return _D128_BQ, _D128_BK, _D128_WM
+    return _D64_BQ, _D64_BK, _D64_WM
+
+
+def _template(dim: int, align_q: bool, align_k: bool) -> list[tuple[str, object]]:
+    if dim == 128:
+        return [
+            ("AlignQ", align_q),
+            ("AlignK", align_k),
+        ]
+    return [
+        ("BD", dim),
+        ("AlignQ", align_q),
+        ("AlignK", align_k),
+    ]
 
 
 def _scale_supported(scale: Optional[float], dim: int) -> bool:
@@ -160,21 +187,17 @@ def maybe_steel_attention(
         return None
 
     batch, heads, seq, dim = q.shape
-    n_q_tiles = (seq + _BQ - 1) // _BQ
-    align_q = (seq % _BQ) == 0
-    align_k = (k.shape[2] % _BK) == 0
-    template = [
-        ("BD", bd),
-        ("AlignQ", align_q),
-        ("AlignK", align_k),
-    ]
-    out = _kernel()(
+    bq, bk, wm = _tile_config(bd)
+    n_q_tiles = (seq + bq - 1) // bq
+    align_q = (seq % bq) == 0
+    align_k = (k.shape[2] % bk) == 0
+    out = _kernel(bd)(
         inputs=[q, k, v],
         output_shapes=[(batch, seq, heads, dim)],
         output_dtypes=[q.dtype],
-        grid=(n_q_tiles * 32, heads * _WM, batch),
-        threadgroup=_THREADGROUP,
-        template=template,
+        grid=(n_q_tiles * 32, heads * wm, batch),
+        threadgroup=(32, wm, 1),
+        template=_template(bd, align_q, align_k),
     )[0]
     _probe_hit(bd)
     return out.transpose(0, 2, 1, 3)
