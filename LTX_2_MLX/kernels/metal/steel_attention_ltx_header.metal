@@ -144,6 +144,20 @@ struct RowTile {
     }
   }
 
+  METAL_FUNC void row_max_allcols(thread float* vals) const {
+    mma_frag_t vec_reduce = val_frags[0];
+    STEEL_PRAGMA_UNROLL
+    for (short j = 1; j < COLS; ++j) {
+      vec_reduce = metal::max(vec_reduce, val_frags[j]);
+    }
+    float thr_reduce = metal::max(vec_reduce.x, vec_reduce.y);
+    float qgr_reduce = simd_shuffle_xor(thr_reduce, ushort(1));
+    qgr_reduce = metal::max(thr_reduce, qgr_reduce);
+    float sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
+    sgr_reduce = metal::max(qgr_reduce, sgr_reduce);
+    vals[0] = metal::max(vals[0], sgr_reduce);
+  }
+
   METAL_FUNC void row_sum(thread float* vals) const {
     STEEL_PRAGMA_UNROLL
     for (short j = 0; j < COLS; ++j) {
@@ -154,6 +168,19 @@ struct RowTile {
       sgr_reduce = qgr_reduce + sgr_reduce;
       vals[0] += sgr_reduce;
     }
+  }
+
+  METAL_FUNC void row_sum_allcols(thread float* vals) const {
+    mma_frag_t vec_reduce = val_frags[0];
+    STEEL_PRAGMA_UNROLL
+    for (short j = 1; j < COLS; ++j) {
+      vec_reduce += val_frags[j];
+    }
+    float thr_reduce = vec_reduce.x + vec_reduce.y;
+    float qgr_reduce = simd_shuffle_xor(thr_reduce, ushort(1));
+    qgr_reduce = thr_reduce + qgr_reduce;
+    float sgr_reduce = simd_shuffle_xor(qgr_reduce, ushort(8));
+    vals[0] += qgr_reduce + sgr_reduce;
   }
 
   METAL_FUNC void scale_by(float scale) {
@@ -169,6 +196,14 @@ struct RowTile {
     for (short j = 0; j < COLS; ++j) {
       val_frags[j][0] = fast::exp2(val_frags[j][0] - vals[0]);
       val_frags[j][1] = fast::exp2(val_frags[j][1] - vals[0]);
+    }
+  }
+
+  METAL_FUNC void exp2_scaled_sub(float scale, thread float* vals) {
+    STEEL_PRAGMA_UNROLL
+    for (short j = 0; j < COLS; ++j) {
+      val_frags[j][0] = fast::exp2(metal::fma(val_frags[j][0], scale, -vals[0]));
+      val_frags[j][1] = fast::exp2(metal::fma(val_frags[j][1], scale, -vals[0]));
     }
   }
 
@@ -220,6 +255,59 @@ struct RowTile {
     }
   }
 };
+
+template <
+    int SCORE_COLS,
+    int OUT_COLS,
+    bool ReduceAllCols,
+    bool ScaleInExp,
+    bool SkipUnitFactor>
+METAL_FUNC static void apply_online_softmax_rescale(
+    thread RowTile<SCORE_COLS>& scores,
+    thread RowTile<OUT_COLS>& output,
+    const float scale,
+    const float neg_inf,
+    thread float* max_score,
+    thread float* sum_score) {
+  float new_max[1] = {max_score[0]};
+
+  if constexpr (ScaleInExp) {
+    float tile_max[1] = {neg_inf};
+    if constexpr (ReduceAllCols) {
+      scores.row_max_allcols(tile_max);
+    } else {
+      scores.row_max(tile_max);
+    }
+    new_max[0] = metal::max(new_max[0], tile_max[0] * scale);
+    scores.exp2_scaled_sub(scale, new_max);
+  } else {
+    if constexpr (ReduceAllCols) {
+      scores.row_max_allcols(new_max);
+    } else {
+      scores.row_max(new_max);
+    }
+    scores.exp2_sub(new_max);
+  }
+
+  float factor[1];
+  if constexpr (SkipUnitFactor) {
+    factor[0] =
+        (new_max[0] == max_score[0]) ? 1.0f : fast::exp2(max_score[0] - new_max[0]);
+  } else {
+    factor[0] = fast::exp2(max_score[0] - new_max[0]);
+  }
+  max_score[0] = new_max[0];
+
+  float sum_score_tmp[1] = {0};
+  if constexpr (ReduceAllCols) {
+    scores.row_sum_allcols(sum_score_tmp);
+  } else {
+    scores.row_sum(sum_score_tmp);
+  }
+
+  sum_score[0] = sum_score[0] * factor[0] + sum_score_tmp[0];
+  output.mul_by(factor);
+}
 
 } // namespace steel
 } // namespace mlx

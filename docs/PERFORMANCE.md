@@ -67,15 +67,19 @@ The following ship enabled by default:
 
 ### Active brutal-efficiency targets
 
-**Update 2026-06-05:** one actionable target survived deeper testing:
+**Update 2026-06-06:** one actionable target survived deeper testing:
 a default-on `mx.fast.metal_kernel` wrapper around MLX STEEL attention
-helpers, specialized for the LTX-2.3 no-mask hot path.  D64 still uses the
-lean `BQ=64, BK=32` path; D128 now uses the source-packaged
-`BQ=80, BK=40, q8k2v8` path.  Disable all local STEEL attention with
-`LTX_DISABLE_STEEL_ATTN=1` or `LTX_STEEL_ATTN=0`;
-`LTX_STEEL_ATTN_PROBE=1` prints hit/fallback counts.  The implementation
-lives in `LTX_2_MLX/kernels/metal/`; the older compact and vendored snapshots
-are archived under `archive/steel_attention/`.
+helpers, specialized for the LTX-2.3 no-mask hot path.  D128 uses the
+source-packaged `BQ=80, BK=40, q8k2v8` reducer+scalefold path.  D64 uses an
+adaptive path: self-attention keeps `BQ=64, BK=32`, audio-to-video uses
+`BQ=64, BK=24, q8k2` reducer+scalefold, and video-to-audio uses
+`BQ=64, BK=32, q8k4`.  Disable all local STEEL attention with
+`LTX_DISABLE_STEEL_ATTN=1` or `LTX_STEEL_ATTN=0`; `LTX_STEEL_ATTN_PROBE=1`
+prints hit/fallback counts.  D64 escape hatches are
+`LTX_STEEL_ATTN_DISABLE_D64=1`, `LTX_STEEL_ATTN_D64_BK32=1`, and
+`LTX_STEEL_ATTN_D64_Q8K4=1`.  The implementation lives in
+`LTX_2_MLX/kernels/metal/`; the older compact and vendored snapshots are
+archived under `archive/steel_attention/`.
 
 Prior negative candidates remain preserved below (full reasoning in
 `PERFORMANCE_NOTES.md` Archive):
@@ -84,7 +88,7 @@ Prior negative candidates remain preserved below (full reasoning in
 |---|---|---|
 | **mxfp8 quant on `project_*`** | **DEAD** — +10-45 % SLOWER post-AdaLN-fix | `bench_ff_microbench.py quant_matmul`: `mx.quantized_matmul` is structurally a BF16 matmul with on-the-fly dequant (`fp_quantized.h:139`, `:663`).  Hits 4.7 TFlops/s vs steel_gemm's 7.95.  Will always lose on M1; flips on M3+/M5 hardware.  Empirically verified 2026-05-23 via `scripts/bench_int8_alu.py`: **no INT8 hardware path exists on Apple7**.  Metal has no `dot(char4,char4)` intrinsic, `simdgroup_matrix` accepts only `half/bfloat/float`, and `mpp::tensor_ops::matmul2d` (Metal 4 cooperative-tensor with INT8 inputs) is M5+ only.  Microbench: INT8 4-way unrolled "dot" achieves 0.80 TOps/s vs FP16 scalar fma 0.76 TOps/s — per-MAC tied, no advantage.  The "21 TFlops/s theoretical INT8 peak" claim in prior PERFORMANCE_NOTES was wishful. |
 | **Q+K+V fusion into one matmul** | **DEAD** — −1.2 % regression | `bench_ff_microbench.py qkv`: 3 separate (111.75 ms) is faster than 1 packed (113.10 ms).  Bandwidth saving on input dominated by larger output's tile-alignment + post-split overhead. |
-| **Custom STEEL SDPA tile wrapper** | **DEFAULT WIN** — opt out with `LTX_DISABLE_STEEL_ATTN=1` | Supersedes the earlier D-sweep conclusion.  A literal wrapper around MLX's own STEEL body hits D=128 video self-attn and D=64 no-mask audio/cross-modal attention.  D64 uses `BQ=64, BK=32`; D128 uses `BQ=80, BK=40, q8k2v8`.  Fresh 576×320×721 distilled AV smoke (`8+3`, seed 42, BF16, audio on): lean D64/D128 stage-2 denoise 294.9s; q8k2 D128 + lean D64 stage-2 denoise 288.1s.  Saved-reference MP4 comparison: PSNR 47.64 dB, SSIM 0.99449, decoded RGB8 mean abs 1.31/255.  Latents are not bit-exact (`stage_2_video_latent` cos 0.99925), and the older stock-vs-lean path already had small BF16/tile-order drift; visual parity is the rollout gate. |
+| **Custom STEEL SDPA tile wrapper** | **DEFAULT WIN** — opt out with `LTX_DISABLE_STEEL_ATTN=1` | Supersedes the earlier D-sweep conclusion.  A literal wrapper around MLX's own STEEL body hits D=128 video self-attn and D=64 no-mask audio/cross-modal attention.  D128 uses `BQ=80, BK=40, q8k2v8` reducer+scalefold.  D64 selects by direction: self `BK=32`, audio-to-video `BK=24, q8k2` reducer+scalefold, video-to-audio `BK=32, q8k4`.  Fresh 576×320×721 distilled AV smoke (`8+3`, seed 42, BF16, audio on): lean D64/D128 stage-2 denoise 294.9s; q8k2 D128 + lean D64 stage-2 denoise 288.1s.  Saved-reference MP4 comparison: PSNR 47.64 dB, SSIM 0.99449, decoded RGB8 mean abs 1.31/255.  Latents are not bit-exact (`stage_2_video_latent` cos 0.99925), and the older stock-vs-lean path already had small BF16/tile-order drift; visual parity is the rollout gate. |
 | **Custom fused / streamed BF16 FFN kernel** | **ABANDONED** — feasibility bench shows 3.8-7.5 % per-call ceiling | `bench_ff_microbench.py fused`: stock FF runs at 91-95 % of `steel_gemm` ceiling.  Conservative recoverable wall (vs both-matmuls-chained-no-GELU floor) = +12 ms = +3.8 % per call.  Optimistic recoverable wall (vs a perfect tiled fused kernel that elides hidden HBM round-trip AND retains GEMM efficiency) = +24 ms = +7.5 %.  Per-step ceiling: +1.3-2.6 % of 45.5 s.  Streamed-FFN sketch (per-chunk inner-dim streaming on top of MLX) additionally pays an output-accumulation tax and many-small-GEMMs efficiency loss; would not clear the bar.  See `PERFORMANCE_NOTES.md` Archive "Custom fused / streamed BF16 FFN kernel". |
 | **Custom AdaLN+residual Metal kernel** | **NOT WORTH IT** — ~0.10 % step headroom | `bench_ff_microbench.py adaln`: production compiled chain runs at 285 GB/s = 84 % of `pointwise_bw` 340 GB/s peak.  Inline-vs-compiled gap is 5.5× (`mx.compile` is already doing the heavy lifting).  A custom Metal kernel can at most recover the 16 % gap from 285→340 GB/s × 0.64 % of step the chain costs = ~0.10 % of step.  Keep `@mx.compile` on `_adaln_inline` / `_residual_gate_inline` — defends the current production default with a number. |
 | **RoPE BF16 cos/sin (Lever A)** | **DEAD** — tested 2026-05-18, visible output drift | `bench_ff_microbench.py rope` predicted -0.55 % step (-252 ms) if BF16 cos/sin (cast inside `apply_split_rotary_emb`) preserved quality.  Empirical one-stage A/B (288x512x721, seed 42): speed delta within single-sample noise once layout-default change is controlled for; visible same-seed output drift.  RoPE precision change cascades into the render via AdaLN-conditioned attention.  Patch reverted, env var removed.  See `PERFORMANCE_NOTES.md` Archive "Consolidated quiet-machine microbench sweep" → Lever A. |
@@ -1054,17 +1058,21 @@ copies.
 **2026-05-28 correction:** the earlier D-sweep was a useful warning
 but not a final answer.  Directly retile-testing the stock STEEL body
 showed that `BQ=64, BK=32` is faster at the actual LTX shapes on M1
-Max.  The production branch keeps this as the default local path for
-supported shapes; unsupported shapes fall back to stock MLX SDPA:
+Max.  The first production branch used this as the fixed local path for
+supported D64 shapes; unsupported shapes fall back to stock MLX SDPA.  Later
+updates below keep `BK=32` for D64 self-attention but adapt cross-modal D64 by
+direction:
 
-**2026-06-05 update:** D64 still uses the `BQ=64, BK=32` local path,
-but D128 moved to the faster source-packaged `BQ=80, BK=40, q8k2v8`
-path.  The newer D128 path is not latent-bit-exact against the older
-lean path, but visual MP4 comparison on the saved 576x320x721 kitten
-stage-2 run was clean (PSNR 47.64 dB, SSIM 0.99449).  Stock-vs-lean
-already showed small BF16/tile-order drift, so treat local STEEL as a
-visually equivalent performance path, not a latent-exact replacement for
-stock MLX SDPA.
+**2026-06-06 update:** D128 moved to the faster source-packaged
+`BQ=80, BK=40, q8k2v8` reducer+scalefold path.  D64 now uses the quiet
+KinoMLX adaptive winner set: self-attention keeps `BQ=64, BK=32`,
+audio-to-video uses `BQ=64, BK=24, q8k2` reducer+scalefold, and
+video-to-audio uses `BQ=64, BK=32, q8k4`.  The newer D128 path is not
+latent-bit-exact against the older lean path, but visual MP4 comparison on
+the saved 576x320x721 kitten stage-2 run was clean (PSNR 47.64 dB, SSIM
+0.99449).  Stock-vs-lean already showed small BF16/tile-order drift, so
+treat local STEEL as a visually equivalent performance path, not a
+latent-exact replacement for stock MLX SDPA.
 
 ```bash
 LTX_STEEL_ATTN_PROBE=1 \
@@ -1083,9 +1091,11 @@ Measured on the standard smoke prompt:
 | STEEL retile D128 only | 546.5s | 152.7s | 292.0s | 444.6s | `hit_d128=2`, fallback=10 before probe split |
 | STEEL retile D64 default | 535.7s | 151.5s | 286.9s | 438.4s | `hit_d128=4`, `hit_d64=6`, fallback=2 masked text |
 
-D64 self/cross-modal shapes were neutral in isolation, but won in the
-full integrated run.  D64 is therefore default-on with the STEEL retile;
-use `LTX_STEEL_ATTN_DISABLE_D64=1` only for quick bisects.  Masked text
+D64 self/cross-modal shapes were neutral in the first isolation pass, but
+won in the full integrated run and then improved in the D64 variant sweep.
+D64 is therefore default-on with adaptive selection; use
+`LTX_STEEL_ATTN_DISABLE_D64=1`, `LTX_STEEL_ATTN_D64_BK32=1`, or
+`LTX_STEEL_ATTN_D64_Q8K4=1` only for quick bisects.  Masked text
 cross-attention remains on stock MLX.
 
 `mx.fast.scaled_dot_product_attention` dispatches to one of two Metal
@@ -1145,9 +1155,10 @@ there is no software knob to recover the 4× token overhead.
 
 - On M1 Max, stock `sdpa_full` is a strong baseline but not the final
   tile floor for these LTX shapes; local STEEL wrappers beat the
-  packaged `BQ=32, BK=16` kernel in full 8+3 smoke tests.  Current
-  defaults are `BQ=64, BK=32` for D64 and `BQ=80, BK=40, q8k2v8`
-  for D128.
+  packaged `BQ=32, BK=16` kernel in full 8+3 smoke tests.  Current D64
+  defaults adapt between `BK=32`, `BK=24/q8k2` reducer+scalefold, and
+  `BK=32/q8k4`; D128 defaults to `BQ=80, BK=40, q8k2v8`
+  reducer+scalefold.
 - Upgrading to **M5+** (the actual NAX-capable family, NOT M3) would
   unlock the `mpp::tensor_ops::matmul2d` hardware path entirely —
   dedicated tensor-multiply units replacing the SIMD-group matrix

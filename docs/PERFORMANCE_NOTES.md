@@ -867,8 +867,10 @@ Implementation:
 - Emits a row-contiguous physical `(B, L, H, D)` output and returns
   `.transpose(0, 2, 1, 3)`, matching MLX full-attention's physical output
   layout trick.
-- Specializes no-mask D64 with `BQ=64, BK=32`.
-- Specializes no-mask D128 with source-packaged `BQ=80, BK=40, q8k2v8`.
+- Specializes no-mask D64 with adaptive `BK=32`, `BK=32/q8k4`, or
+  `BK=24/q8k2` reducer+scalefold depending on attention direction.
+- Specializes no-mask D128 with source-packaged `BQ=80, BK=40, q8k2v8`
+  reducer+scalefold.
 - Default-on for supported no-mask D128/D64 shapes.  Disable with
   `LTX_DISABLE_STEEL_ATTN=1` or `LTX_STEEL_ATTN=0`.
   `LTX_STEEL_ATTN_PROBE=1` prints `hit_d128`, `hit_d64`, fallback
@@ -885,9 +887,12 @@ D128 q8k2 source-packaging follow-up (2026-06-05):
   Both were `7.07-7.09 TF/s` and matched stock within the usual BF16
   attention tolerance (`max_abs <= 0.000488`, cosine 1.0 at the tested
   shapes).
-- LTX integration keeps D64 on the lean path and switches only D128 to the
-  `BQ=80, BK=40, q8k2v8` source-packaged path.  The Python dispatcher caches
-  per-dimension kernels so unsupported shapes still fall back cleanly.
+- The first LTX integration kept D64 on the lean path and switched only D128 to
+  the `BQ=80, BK=40, q8k2v8` source-packaged path.  The later 2026-06-06
+  follow-up below keeps the same source-packaged body but enables the
+  reducer+scalefold controls for D128 and the D64 audio-to-video path.
+  The Python dispatcher caches per-config kernels so unsupported shapes still
+  fall back cleanly.
 - Real stage-2 harness gate used the saved 576x320x721 kitten smoke sidecar
   and text conditioning, BF16, audio on, seed 42.  Bench mode (`N=2`) ran
   cleanly with `hit_d128=2`, `hit_d64=4`, `fallback=0`; measured step 2 was
@@ -912,6 +917,30 @@ D128 q8k2 source-packaging follow-up (2026-06-05):
   accumulation drift already seen in the smaller stock-vs-lean STEEL path and
   inlined transformer comparisons.  Use visual/audio regression checks, not latent
   exactness, as the acceptance gate for this default.
+
+D128/D64 reducer+scalefold follow-up (2026-06-06):
+
+- KinoMLX found one real D128 shader-body improvement after the q8k2 packaging
+  port: reduce all score columns first, then do one row-level reduction, and fold
+  the QK scale into the `exp2` normalization path.  Quiet extension timing:
+  `(1,32,8784,128)` `178.89 -> 176.36 ms`; `(1,32,16380,128)`
+  `619.56 -> 612.91 ms`.  A later source-packaged parity bench matched the
+  extension path: `176.28 ms` extension vs `176.07 ms` packaged at `8784`, and
+  `611.44 ms` extension vs `611.83 ms` packaged at `16380`.
+- The LTX Metal subset now keeps the reducer/scalefold transform DRY in the
+  shared body.  `steel_attention.py` selects a config object that controls tile
+  size, loader activity, kernel name, `ReduceAllCols`, and `ScaleInExp`; D64 and
+  D128 no longer maintain separate body logic for the softmax rescale.
+- D64 uses the quiet KinoMLX adaptive rule instead of one fixed tile:
+  self-attention keeps `BQ=64, BK=32`, audio-to-video uses
+  `BQ=64, BK=24, q8k2` reducer+scalefold, and video-to-audio uses
+  `BQ=64, BK=32, q8k4`.  In the common-resolution sweep this adaptive rule was
+  effectively tied with the best per-case picks while avoiding the worst
+  cross-direction misses; `bk24_q8k2_reduceallcols_scalefold` alone averaged
+  only about 0.26% behind per-case best and won both audio-to-video cases.
+- Bisect escapes remain intentionally narrow:
+  `LTX_STEEL_ATTN_DISABLE_D64=1`, `LTX_STEEL_ATTN_D64_BK32=1`, and
+  `LTX_STEEL_ATTN_D64_Q8K4=1`.
 
 Compact-source follow-up (2026-06-01):
 

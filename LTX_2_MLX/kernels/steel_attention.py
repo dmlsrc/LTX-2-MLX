@@ -9,22 +9,50 @@ from __future__ import annotations
 
 import atexit
 import os
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import mlx.core as mx
 
 
+class _SteelConfig(NamedTuple):
+    bq: int
+    bk: int
+    wm: int
+    k_pad: int
+    kv_threads: int
+    name: str
+    reduce_all_cols: bool = False
+    scale_in_exp: bool = False
+
+
+_D128_CONFIG = _SteelConfig(
+    80,
+    40,
+    10,
+    2,
+    320,
+    "ltx_steel_attention_bq80_bk40_q8k2v8_allactive_reduceallcols_scalefold",
+    True,
+    True,
+)
 _D64_CONFIGS = {
-    "bk32": (64, 32, 8, 8, 256, "ltx_steel_attention_bq64_bk32"),
-    "bk32_q8k4": (64, 32, 8, 4, 256, "ltx_steel_attention_bq64_bk32_q8k4v8"),
-    "bk24": (64, 24, 8, 8, 192, "ltx_steel_attention_bq64_bk24"),
-    "bk24_q8k2": (64, 24, 8, 2, 192, "ltx_steel_attention_bq64_bk24_q8k2v8"),
+    "bk32": _SteelConfig(64, 32, 8, 8, 256, "ltx_steel_attention_bq64_bk32"),
+    "bk32_q8k4": _SteelConfig(
+        64, 32, 8, 4, 256, "ltx_steel_attention_bq64_bk32_q8k4v8"
+    ),
+    "bk24_q8k2_scalefold": _SteelConfig(
+        64,
+        24,
+        8,
+        2,
+        192,
+        "ltx_steel_attention_bq64_bk24_q8k2v8_reduceallcols_scalefold",
+        True,
+        True,
+    ),
 }
-_D64_ADAPTIVE = bool(os.environ.get("LTX_STEEL_ATTN_D64_ADAPTIVE"))
+_D64_FORCE_BK32 = bool(os.environ.get("LTX_STEEL_ATTN_D64_BK32"))
 _D64_FORCE_Q8K4 = bool(os.environ.get("LTX_STEEL_ATTN_D64_Q8K4"))
-_D128_BQ = 80
-_D128_BK = 40
-_D128_WM = 10
 
 _SUPPORTED_DIMS = {64, 128}
 _PROBE_ENABLED = bool(os.environ.get("LTX_STEEL_ATTN_PROBE"))
@@ -106,22 +134,21 @@ if _PROBE_ENABLED:
 
 
 def _d64_config(q_len: int, k_len: int) -> str:
-    if not _D64_ADAPTIVE:
-        return "bk32_q8k4" if _D64_FORCE_Q8K4 else "bk32"
-
+    if _D64_FORCE_BK32:
+        return "bk32"
+    if _D64_FORCE_Q8K4:
+        return "bk32_q8k4"
     if q_len == k_len:
-        if q_len >= 12288:
-            return "bk24_q8k2"
-        if q_len >= 8192:
-            return "bk24"
-
-    if q_len <= 2048:
-        if k_len == 16380:
-            return "bk24_q8k2"
-        if k_len == 8784:
-            return "bk24"
-
+        return "bk32"
+    if q_len < k_len:
+        return "bk24_q8k2_scalefold"
     return "bk32_q8k4"
+
+
+def _config(dim: int, d64_config: str = "") -> _SteelConfig:
+    if dim == 128:
+        return _D128_CONFIG
+    return _D64_CONFIGS[d64_config]
 
 
 def _kernel(dim: int, d64_config: str = ""):
@@ -129,13 +156,8 @@ def _kernel(dim: int, d64_config: str = ""):
     if key not in _KERNELS:
         from ._steel_attention_ltx import HEADER, SOURCE
 
-        if dim == 128:
-            name = "ltx_steel_attention_bq80_bk40_q8k2v8_allactive"
-        else:
-            name = _D64_CONFIGS[d64_config][5]
-
         _KERNELS[key] = mx.fast.metal_kernel(
-            name=name,
+            name=_config(dim, d64_config).name,
             input_names=["Q", "K", "V"],
             output_names=["O"],
             source=SOURCE,
@@ -146,9 +168,8 @@ def _kernel(dim: int, d64_config: str = ""):
 
 
 def _tile_config(dim: int, d64_config: str = "") -> tuple[int, int, int]:
-    if dim == 128:
-        return _D128_BQ, _D128_BK, _D128_WM
-    return _D64_CONFIGS[d64_config][:3]
+    cfg = _config(dim, d64_config)
+    return cfg.bq, cfg.bk, cfg.wm
 
 
 def _template(
@@ -157,44 +178,19 @@ def _template(
     align_k: bool,
     d64_config: str = "",
 ) -> list[tuple[str, object]]:
-    if dim == 128:
-        return [
-            ("BD", dim),
-            ("BQ", _D128_BQ),
-            ("BK", _D128_BK),
-            ("WM", _D128_WM),
-            ("Q_PAD", 8),
-            ("K_PAD", 2),
-            ("V_PAD", 8),
-            ("Q_ACTIVE_THREADS", _D128_WM * 32),
-            ("K_ACTIVE_THREADS", _D128_WM * 32),
-            ("V_ACTIVE_THREADS", _D128_WM * 32),
-            ("Q_LOADS_ALL_ACTIVE", True),
-            ("K_LOADS_ALL_ACTIVE", True),
-            ("V_LOADS_ALL_ACTIVE", True),
-            ("Q_EXACT_TILES", False),
-            ("K_EXACT_TILES", False),
-            ("Q_FULL_TILES_CONST", 0),
-            ("K_FULL_TILES_CONST", 0),
-            ("Q_REM_CONST", 0),
-            ("K_REM_CONST", 0),
-            ("SkipUnitFactor", False),
-            ("AlignQ", align_q),
-            ("AlignK", align_k),
-        ]
-    bq, bk, wm, k_pad, kv_threads, _ = _D64_CONFIGS[d64_config]
-    kv_all_active = kv_threads == wm * 32
+    cfg = _config(dim, d64_config)
+    kv_all_active = cfg.kv_threads == cfg.wm * 32
     return [
         ("BD", dim),
-        ("BQ", bq),
-        ("BK", bk),
-        ("WM", wm),
+        ("BQ", cfg.bq),
+        ("BK", cfg.bk),
+        ("WM", cfg.wm),
         ("Q_PAD", 8),
-        ("K_PAD", k_pad),
+        ("K_PAD", cfg.k_pad),
         ("V_PAD", 8),
-        ("Q_ACTIVE_THREADS", wm * 32),
-        ("K_ACTIVE_THREADS", kv_threads),
-        ("V_ACTIVE_THREADS", kv_threads),
+        ("Q_ACTIVE_THREADS", cfg.wm * 32),
+        ("K_ACTIVE_THREADS", cfg.kv_threads),
+        ("V_ACTIVE_THREADS", cfg.kv_threads),
         ("Q_LOADS_ALL_ACTIVE", True),
         ("K_LOADS_ALL_ACTIVE", kv_all_active),
         ("V_LOADS_ALL_ACTIVE", kv_all_active),
@@ -205,6 +201,8 @@ def _template(
         ("Q_REM_CONST", 0),
         ("K_REM_CONST", 0),
         ("SkipUnitFactor", False),
+        ("ReduceAllCols", cfg.reduce_all_cols),
+        ("ScaleInExp", cfg.scale_in_exp),
         ("AlignQ", align_q),
         ("AlignK", align_k),
     ]

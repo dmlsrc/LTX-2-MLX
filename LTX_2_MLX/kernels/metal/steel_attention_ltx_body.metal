@@ -135,32 +135,15 @@
       }
     }
 
-    Stile.scale_by(scale);
+    if constexpr (!ScaleInExp) {
+      Stile.scale_by(scale);
+    }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
     loader_v.load_unsafe();
 
-    float new_max[1] = {max_score[0]};
-    float factor[1];
-
-    Stile.row_max(new_max);
-    Stile.exp2_sub(new_max);
-
-    if constexpr (SkipUnitFactor) {
-      factor[0] = (new_max[0] == max_score[0])
-          ? 1.0f
-          : fast::exp2(max_score[0] - new_max[0]);
-    } else {
-      factor[0] = fast::exp2(max_score[0] - new_max[0]);
-    }
-    max_score[0] = new_max[0];
-
-    float sum_score_tmp[1] = {0};
-    Stile.row_sum(sum_score_tmp);
-
-    sum_score[0] = sum_score[0] * factor[0] + sum_score_tmp[0];
-
-    Otile.mul_by(factor);
+    apply_online_softmax_rescale<TK, TD, ReduceAllCols, ScaleInExp, SkipUnitFactor>(
+        Stile, Otile, scale, neg_inf, max_score, sum_score);
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -218,7 +201,9 @@
       }
     }
 
-    Stile.scale_by(scale);
+    if constexpr (!ScaleInExp) {
+      Stile.scale_by(scale);
+    }
 
     STEEL_PRAGMA_UNROLL
     for (short j = 0; j < TK; j++) {
@@ -234,27 +219,8 @@
     threadgroup_barrier(mem_flags::mem_threadgroup);
     loader_v.load_safe(short2(BD, kL_rem));
 
-    float new_max[1] = {max_score[0]};
-    float factor[1];
-
-    Stile.row_max(new_max);
-    Stile.exp2_sub(new_max);
-
-    if constexpr (SkipUnitFactor) {
-      factor[0] = (new_max[0] == max_score[0])
-          ? 1.0f
-          : fast::exp2(max_score[0] - new_max[0]);
-    } else {
-      factor[0] = fast::exp2(max_score[0] - new_max[0]);
-    }
-    max_score[0] = new_max[0];
-
-    float sum_score_tmp[1] = {0};
-    Stile.row_sum(sum_score_tmp);
-
-    sum_score[0] = sum_score[0] * factor[0] + sum_score_tmp[0];
-
-    Otile.mul_by(factor);
+    apply_online_softmax_rescale<TK, TD, ReduceAllCols, ScaleInExp, SkipUnitFactor>(
+        Stile, Otile, scale, neg_inf, max_score, sum_score);
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
