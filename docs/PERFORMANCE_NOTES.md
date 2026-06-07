@@ -941,6 +941,15 @@ D128/D64 reducer+scalefold follow-up (2026-06-06):
 - Bisect escapes remain intentionally narrow:
   `LTX_STEEL_ATTN_DISABLE_D64=1`, `LTX_STEEL_ATTN_D64_BK32=1`, and
   `LTX_STEEL_ATTN_D64_Q8K4=1`.
+- Full kitten smoke on the shipped default confirmed the new route mix:
+  `kitten_scalefold_default_20260606_201320` completed in `8m42.1s`
+  total, with stage-1 denoise `2m28.9s`, stage-2 denoise `4m35.8s`, and
+  denoise total `424.7s`.  Probe: `hit_d128=4`, `hit_d64=6`,
+  `fallback=2` masked text; D64 configs were
+  `bk24_q8k2_scalefold=3`, `bk32=1`, `bk32_q8k4=2`.
+- Attention should now be treated as a shipped default and not the active
+  next optimization lane unless a regression appears.  The remaining obvious
+  wall-time buckets are outside no-mask STEEL SDPA.
 
 Compact-source follow-up (2026-06-01):
 

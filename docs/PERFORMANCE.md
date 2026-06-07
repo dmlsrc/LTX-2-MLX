@@ -1090,6 +1090,7 @@ Measured on the standard smoke prompt:
 | stock MLX same patch | 562.6s | 155.1s | 310.2s | 465.4s | n/a |
 | STEEL retile D128 only | 546.5s | 152.7s | 292.0s | 444.6s | `hit_d128=2`, fallback=10 before probe split |
 | STEEL retile D64 default | 535.7s | 151.5s | 286.9s | 438.4s | `hit_d128=4`, `hit_d64=6`, fallback=2 masked text |
+| STEEL reducer+scalefold default | 522.1s | 148.9s | 275.8s | 424.7s | `hit_d128=4`, `hit_d64=6`, fallback=2 masked text; D64 configs `bk24_q8k2_scalefold=3`, `bk32=1`, `bk32_q8k4=2` |
 
 D64 self/cross-modal shapes were neutral in the first isolation pass, but
 won in the full integrated run and then improved in the D64 variant sweep.
