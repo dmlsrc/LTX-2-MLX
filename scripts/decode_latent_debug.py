@@ -202,32 +202,166 @@ def load_latents(
     return latent, audio_latent
 
 
-def make_decoder(weights_path: str, compute_dtype: Any):
+def make_decoder(
+    weights_path: str,
+    compute_dtype: Any,
+    spatial_padding_mode: str = "conv",
+    config_weights_path: str | None = None,
+):
     from scripts.generate import get_vae_config
     from LTX_2_MLX.model.video_vae.native_decoder import (
         NativeConv3dVideoDecoder,
         load_native_vae_decoder_weights,
     )
 
-    vae_cfg = get_vae_config(weights_path)
+    config_candidates = [config_weights_path, weights_path]
+    vae_cfg = {}
+    config_source = None
+    for candidate in config_candidates:
+        if not candidate:
+            continue
+        candidate_cfg = get_vae_config(candidate)
+        if candidate_cfg.get("decoder_blocks"):
+            vae_cfg = candidate_cfg
+            config_source = candidate
+            break
+        if not vae_cfg:
+            vae_cfg = candidate_cfg
+            config_source = candidate
+
     decoder_blocks = vae_cfg.get("decoder_blocks")
-    base_channels = vae_cfg.get("base_channels", 128)
+    base_channels = vae_cfg.get("decoder_base_channels", vae_cfg.get("base_channels", 128))
     timestep_conditioning = vae_cfg.get("timestep_conditioning", False)
 
     print(
         f"VAE config: blocks={len(decoder_blocks) if decoder_blocks else 'default'}, "
         f"base_ch={base_channels}, timestep={timestep_conditioning}"
     )
+    if config_source:
+        print(f"VAE config source: {config_source}")
 
     decoder = NativeConv3dVideoDecoder(
         decoder_blocks=decoder_blocks,
         base_channels=base_channels,
         timestep_conditioning=timestep_conditioning,
         compute_dtype=compute_dtype,
+        spatial_padding_mode=spatial_padding_mode,
     )
     load_native_vae_decoder_weights(decoder, weights_path)
     gc.collect()
     return decoder
+
+
+def compare_tensors(label: str, lhs: Any, rhs: Any, mx_mod: Any) -> tuple[float, float, float, float]:
+    lhs = lhs.astype(mx_mod.float32)
+    rhs = rhs.astype(mx_mod.float32)
+    diff = lhs - rhs
+    abs_diff = mx_mod.abs(diff)
+    dot = mx_mod.sum(lhs * rhs)
+    denom = mx_mod.sqrt(mx_mod.sum(lhs * lhs) * mx_mod.sum(rhs * rhs))
+    max_abs = mx_mod.max(abs_diff)
+    mean_abs = mx_mod.mean(abs_diff)
+    rms = mx_mod.sqrt(mx_mod.mean(diff * diff))
+    cos = dot / denom
+    mx_mod.eval(max_abs, mean_abs, rms, cos)
+    result = (
+        float(np.array(max_abs)),
+        float(np.array(mean_abs)),
+        float(np.array(rms)),
+        float(np.array(cos)),
+    )
+    print(
+        f"  {label:<24} max_abs={result[0]:.8f} mean_abs={result[1]:.8f} "
+        f"rms={result[2]:.8f} cos={result[3]:.10f}"
+    )
+    return result
+
+
+def compare_spatial_padding_modes(
+    *,
+    mode: str,
+    latent: Any,
+    manual_decoder: Any,
+    conv_decoder: Any,
+    mx_mod: Any,
+    full_decode_chunk_size: int,
+    timings: RunTimings,
+) -> None:
+    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
+    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
+
+    print("\n" + "=" * 80)
+    print(f"Spatial padding parity mode: {mode}")
+
+    cfg = tiling_config_for_mode(mode, latent)
+    worst_max = 0.0
+    worst_mean = 0.0
+    worst_rms = 0.0
+    worst_cos = 1.0
+    chunks = 0
+    started = time.perf_counter()
+
+    if cfg is None:
+        lhs = decode_latent(
+            latent,
+            manual_decoder,
+            temporal_chunk_size=full_decode_chunk_size,
+        )
+        rhs = decode_latent(
+            latent,
+            conv_decoder,
+            temporal_chunk_size=full_decode_chunk_size,
+        )
+        mx_mod.eval(lhs, rhs)
+        max_abs, mean_abs, rms, cos = compare_tensors("full", lhs, rhs, mx_mod)
+        worst_max = max(worst_max, max_abs)
+        worst_mean = max(worst_mean, mean_abs)
+        worst_rms = max(worst_rms, rms)
+        worst_cos = min(worst_cos, cos)
+        chunks = 1
+        del lhs, rhs
+    else:
+        lhs_iter = iter(decode_tiled(latent, manual_decoder, cfg, show_progress=False))
+        rhs_iter = iter(decode_tiled(latent, conv_decoder, cfg, show_progress=False))
+        while True:
+            try:
+                lhs = next(lhs_iter)
+            except StopIteration:
+                try:
+                    next(rhs_iter)
+                except StopIteration:
+                    break
+                raise RuntimeError("Conv-padding decode yielded more chunks than manual-padding decode")
+
+            try:
+                rhs = next(rhs_iter)
+            except StopIteration as exc:
+                raise RuntimeError("Manual-padding decode yielded more chunks than conv-padding decode") from exc
+
+            mx_mod.eval(lhs, rhs)
+            max_abs, mean_abs, rms, cos = compare_tensors(
+                f"chunk {chunks}",
+                lhs,
+                rhs,
+                mx_mod,
+            )
+            worst_max = max(worst_max, max_abs)
+            worst_mean = max(worst_mean, mean_abs)
+            worst_rms = max(worst_rms, rms)
+            worst_cos = min(worst_cos, cos)
+            chunks += 1
+            del lhs, rhs
+            gc.collect()
+            try:
+                mx_mod.clear_cache()
+            except Exception:
+                pass
+
+    timings.add(f"{mode} spatial padding compare", time.perf_counter() - started)
+    print(
+        f"worst over {chunks} chunk(s): max_abs={worst_max:.8f} "
+        f"mean_abs={worst_mean:.8f} rms={worst_rms:.8f} cos={worst_cos:.10f}"
+    )
 
 
 def make_audio_decoder_and_vocoder(weights_path: str, compute_dtype: Any):
@@ -295,6 +429,7 @@ def tiling_config_for_mode(mode: str, latent: Any | None = None):
             height=latent_height * 32,
             width=latent_width * 32,
             num_frames=1 + (latent_frames - 1) * 8,
+            decoder_backend="native",
         )
     if mode == "default":
         return TilingConfig.default()
@@ -403,6 +538,14 @@ def write_frames(frames: np.ndarray, frames_dir: Path, start: int = 0) -> int:
     return start + len(frames)
 
 
+def decoded_frame_count(video: Any) -> int:
+    if len(video.shape) == 5:
+        return int(video.shape[2])  # B,C,T,H,W
+    if len(video.shape) == 4:
+        return int(video.shape[0])  # T,H,W,C
+    raise ValueError(f"Unexpected decoded video shape: {video.shape}")
+
+
 def decode_mode(
     *,
     mode: str,
@@ -415,7 +558,11 @@ def decode_mode(
     full_decode_chunk_size: int,
     show_memory: bool,
     timings: RunTimings,
+    video_output_mode: str,
+    output_backend: str,
+    encode_tier: str,
     audio_wav_path: Path | None = None,
+    audio_waveform: Any | None = None,
     audio_sample_rate: int | None = None,
 ) -> None:
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
@@ -427,17 +574,109 @@ def decode_mode(
         print("before decode:", mlx_mem_summary(mx_mod))
 
     output_path = output_dir / f"decode_{mode}.mp4"
-    frame_root = output_dir / f"frames_{mode}"
-    if frame_root.exists():
-        import shutil
-
-        shutil.rmtree(frame_root)
-    frame_root.mkdir(parents=True, exist_ok=True)
-
     cfg = tiling_config_for_mode(mode, latent)
+
+    if video_output_mode == "production":
+        from scripts.generate import encode_video_dispatch
+        from LTX_2_MLX.pipelines.streaming import (
+            iter_decoded_chunks,
+            latent_dims,
+            plan_vae_tiling,
+        )
+        from LTX_2_MLX.progress import StackedPhaseBars
+
+        n_source_frames, height, width = latent_dims(latent)
+        n_chunks, tiling_desc = plan_vae_tiling(latent, cfg)
+        print(
+            "Production output: "
+            f"{n_source_frames} frames, {width}x{height}, "
+            f"{n_chunks} chunk(s), tiling={tiling_desc}"
+        )
+
+        chunk_count = 0
+        frame_count = 0
+        decode_convert_seconds = 0.0
+        first_chunk_seconds = 0.0
+
+        production_started = time.perf_counter()
+        with StackedPhaseBars() as stream_bars:
+            vae_pbar = stream_bars.add(
+                total=n_chunks,
+                desc="VAE chunks",
+                unit="chunk",
+            )
+
+            def frame_iter():
+                nonlocal chunk_count, frame_count, decode_convert_seconds, first_chunk_seconds
+                chunk_iter = iter(
+                    iter_decoded_chunks(
+                        latent,
+                        decoder,
+                        tiling=cfg,
+                        output_format="fp16_rgba",
+                    )
+                )
+                while True:
+                    started = time.perf_counter()
+                    try:
+                        chunk_frames = next(chunk_iter)
+                    except StopIteration:
+                        break
+                    chunk_seconds = time.perf_counter() - started
+                    decode_convert_seconds += chunk_seconds
+                    if chunk_count == 0:
+                        first_chunk_seconds = chunk_seconds
+                    chunk_count += 1
+                    frame_count += len(chunk_frames)
+                    vae_pbar.update(1)
+                    while chunk_frames:
+                        yield chunk_frames.pop(0)
+
+            saved_path = encode_video_dispatch(
+                frame_iter(),
+                output_path,
+                tier=encode_tier,
+                fps=fps,
+                audio_waveform=audio_waveform,
+                audio_sample_rate=audio_sample_rate,
+                output_backend=output_backend,
+                n_source_frames=n_source_frames,
+                progress_stack=stream_bars,
+            )
+        production_seconds = time.perf_counter() - production_started
+        encoder_wall_seconds = max(0.0, production_seconds - first_chunk_seconds)
+        output_tail_seconds = max(0.0, production_seconds - decode_convert_seconds)
+        timings.add(f"{mode} vae decode+convert", decode_convert_seconds)
+        timings.add(f"{mode} non-vae output tail", output_tail_seconds)
+        print("\nStreaming timing split:")
+        print(f"  first chunk ready       {format_duration(first_chunk_seconds)}")
+        print(f"  vae decode+convert      {format_duration(decode_convert_seconds)}")
+        print(f"  encoder wall after c1   {format_duration(encoder_wall_seconds)}")
+        print(f"  non-vae output tail     {format_duration(output_tail_seconds)}")
+        print(f"Encoded {frame_count} frames from {chunk_count} chunk(s)")
+        print(f"Saved: {saved_path}")
+
+        with Timer(timings, f"{mode} cleanup"):
+            gc.collect()
+            try:
+                mx_mod.clear_cache()
+            except Exception:
+                pass
+        if show_memory:
+            print("after mode cleanup:", mlx_mem_summary(mx_mod))
+        return
+
     frame_index = 0
     decode_seconds = 0.0
     write_seconds = 0.0
+
+    frame_root = output_dir / f"frames_{mode}"
+    if video_output_mode == "frames":
+        if frame_root.exists():
+            import shutil
+
+            shutil.rmtree(frame_root)
+        frame_root.mkdir(parents=True, exist_ok=True)
 
     if cfg is None:
         started = time.perf_counter()
@@ -449,11 +688,15 @@ def decode_mode(
         mx_mod.eval(video)
         decode_seconds += time.perf_counter() - started
 
-        started = time.perf_counter()
-        frames = frames_from_video_tensor(video, mx_mod)
-        frame_index = write_frames(frames, frame_root, 0)
-        write_seconds += time.perf_counter() - started
-        del video, frames
+        if video_output_mode == "none":
+            frame_index = decoded_frame_count(video)
+            del video
+        else:
+            started = time.perf_counter()
+            frames = frames_from_video_tensor(video, mx_mod)
+            frame_index = write_frames(frames, frame_root, 0)
+            write_seconds += time.perf_counter() - started
+            del video, frames
     else:
         chunk_index = 0
         chunk_iter = iter(decode_tiled(latent, decoder, cfg, show_progress=True))
@@ -468,30 +711,37 @@ def decode_mode(
 
             if show_memory:
                 print(f"chunk {chunk_index}:", mlx_mem_summary(mx_mod))
-            started = time.perf_counter()
-            frames = frames_from_video_tensor(chunk, mx_mod)
-            frame_index = write_frames(frames, frame_root, frame_index)
-            write_seconds += time.perf_counter() - started
-            del chunk, frames
+            if video_output_mode == "none":
+                frame_index += decoded_frame_count(chunk)
+                del chunk
+            else:
+                started = time.perf_counter()
+                frames = frames_from_video_tensor(chunk, mx_mod)
+                frame_index = write_frames(frames, frame_root, frame_index)
+                write_seconds += time.perf_counter() - started
+                del chunk, frames
             gc.collect()
             try:
                 mx_mod.clear_cache()
             except Exception:
                 pass
-            if show_memory:
+            if show_memory and video_output_mode == "frames":
                 print(f"after writing chunk {chunk_index}:", mlx_mem_summary(mx_mod))
             chunk_index += 1
 
     timings.add(f"{mode} decode", decode_seconds)
-    timings.add(f"{mode} write frames", write_seconds)
+    if video_output_mode == "frames":
+        timings.add(f"{mode} write frames", write_seconds)
 
-    print(f"Wrote {frame_index} frames to {frame_root}")
-    with Timer(timings, f"{mode} ffmpeg encode"):
-        encode_frames_dir(frame_root, output_path, fps, audio_wav_path, audio_sample_rate)
-    print(f"Saved: {output_path}")
+        print(f"Wrote {frame_index} frames to {frame_root}")
+        with Timer(timings, f"{mode} ffmpeg encode"):
+            encode_frames_dir(frame_root, output_path, fps, audio_wav_path, audio_sample_rate)
+        print(f"Saved: {output_path}")
+    else:
+        print(f"Decoded {frame_index} frames; no video artifact requested.")
 
     with Timer(timings, f"{mode} cleanup"):
-        if not keep_frames:
+        if video_output_mode == "frames" and not keep_frames:
             import shutil
 
             shutil.rmtree(frame_root, ignore_errors=True)
@@ -513,6 +763,22 @@ def main(argv: list[str] | None = None) -> None:
         help="NPZ sidecar produced by scripts/generate.py --save-latents.",
     )
     parser.add_argument("--weights", required=True)
+    parser.add_argument(
+        "--config-weights",
+        default=None,
+        help=(
+            "Checkpoint containing VAE architecture metadata. Defaults to --weights; "
+            "use the main model safetensors when --weights is a split video_vae cache."
+        ),
+    )
+    parser.add_argument(
+        "--audio-weights",
+        default=None,
+        help=(
+            "Checkpoint containing audio VAE/vocoder weights. Defaults to "
+            "--config-weights when set, otherwise --weights."
+        ),
+    )
     parser.add_argument("--output-dir", default="outputs/decode_tests")
     parser.add_argument("--fps", type=float, default=24.0)
     parser.add_argument(
@@ -536,9 +802,49 @@ def main(argv: list[str] | None = None) -> None:
             "both64_24, both384_24, both256_24, both128_24, both128_32, test_small_both"
         ),
     )
+    parser.add_argument(
+        "--spatial-padding-mode",
+        choices=["manual", "conv"],
+        default="conv",
+        help="VAE Conv3d spatial padding implementation for decode output.",
+    )
+    parser.add_argument(
+        "--compare-spatial-padding",
+        action="store_true",
+        help=(
+            "Decode each mode once with manual spatial mx.pad and once with "
+            "Conv3d spatial padding, then compare float outputs and exit."
+        ),
+    )
+    parser.add_argument(
+        "--video-output-mode",
+        choices=["frames", "production", "none"],
+        default="frames",
+        help=(
+            "frames: write PNG frames and ffmpeg/libx264 MP4; "
+            "production: stream decoded chunks through generate.py's "
+            "VideoToolbox/ffmpeg dispatch; none: decode/eval only."
+        ),
+    )
+    parser.add_argument(
+        "--decode-only",
+        action="store_true",
+        help="Alias for --video-output-mode none.",
+    )
+    parser.add_argument(
+        "--output-backend",
+        choices=["auto", "ffmpeg", "videotoolbox"],
+        default="auto",
+        help="Production output backend used with --video-output-mode production.",
+    )
+    parser.add_argument(
+        "--encode-tier",
+        default="default",
+        help="Production encode tier used with --video-output-mode production.",
+    )
     parser.add_argument("--keep-frames", action="store_true")
     parser.add_argument("--show-memory", action="store_true", help="Print RSS/MLX memory summaries around decode chunks.")
-    parser.add_argument("--decode-audio", action="store_true", help="Decode final_audio_latent, write a WAV sidecar, and mux it into decoded MP4s.")
+    parser.add_argument("--decode-audio", action="store_true", help="Decode final_audio_latent and mux it into decoded MP4s.")
     parser.add_argument(
         "--full-decode-chunk-size",
         type=int,
@@ -546,6 +852,8 @@ def main(argv: list[str] | None = None) -> None:
         help="Temporal chunk size for mode=none. 9999 means true full decode for typical tests.",
     )
     args = parser.parse_args(argv)
+    if args.decode_only:
+        args.video_output_mode = "none"
 
     import mlx.core as mx
 
@@ -555,25 +863,63 @@ def main(argv: list[str] | None = None) -> None:
         latent, audio_latent = load_latents(args.latent, mx, args.latent_dtype)
     compute_dtype = parse_dtype(mx, args.vae_dtype)
     print(f"VAE compute dtype: {args.vae_dtype}")
+
+    if args.compare_spatial_padding:
+        with Timer(timings, "load manual-pad vae decoder"):
+            manual_decoder = make_decoder(
+                args.weights,
+                compute_dtype,
+                spatial_padding_mode="manual",
+                config_weights_path=args.config_weights,
+            )
+        with Timer(timings, "load conv-pad vae decoder"):
+            conv_decoder = make_decoder(
+                args.weights,
+                compute_dtype,
+                spatial_padding_mode="conv",
+                config_weights_path=args.config_weights,
+            )
+        for mode in args.modes:
+            compare_spatial_padding_modes(
+                mode=mode,
+                latent=latent,
+                manual_decoder=manual_decoder,
+                conv_decoder=conv_decoder,
+                mx_mod=mx,
+                full_decode_chunk_size=args.full_decode_chunk_size,
+                timings=timings,
+            )
+        timings.print_summary()
+        return
+
+    print(f"VAE spatial padding mode: {args.spatial_padding_mode}")
     with Timer(timings, "load vae decoder"):
-        decoder = make_decoder(args.weights, compute_dtype)
+        decoder = make_decoder(
+            args.weights,
+            compute_dtype,
+            spatial_padding_mode=args.spatial_padding_mode,
+            config_weights_path=args.config_weights,
+        )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    audio_waveform = None
     audio_wav_path = None
     audio_sample_rate = None
     if args.decode_audio:
         if audio_latent is None:
             raise ValueError("--decode-audio was requested, but this NPZ does not contain final_audio_latent")
+        audio_weights = args.audio_weights or args.config_weights or args.weights
         with Timer(timings, "load audio decoder"):
-            audio_decoder, vocoder, audio_sample_rate = make_audio_decoder_and_vocoder(args.weights, compute_dtype)
+            audio_decoder, vocoder, audio_sample_rate = make_audio_decoder_and_vocoder(audio_weights, compute_dtype)
         with Timer(timings, "audio decode"):
             audio_waveform = decode_audio_latent(audio_latent, audio_decoder, vocoder, mx)
-        audio_wav_path = output_dir / "decode_audio.wav"
-        with Timer(timings, "audio wav write"):
-            write_wav(audio_waveform, audio_wav_path, audio_sample_rate)
-        del audio_waveform, audio_decoder, vocoder
+        if args.video_output_mode == "frames":
+            audio_wav_path = output_dir / "decode_audio.wav"
+            with Timer(timings, "audio wav write"):
+                write_wav(audio_waveform, audio_wav_path, audio_sample_rate)
+        del audio_decoder, vocoder
         gc.collect()
         try:
             mx.clear_cache()
@@ -592,7 +938,11 @@ def main(argv: list[str] | None = None) -> None:
             full_decode_chunk_size=args.full_decode_chunk_size,
             show_memory=args.show_memory,
             timings=timings,
+            video_output_mode=args.video_output_mode,
+            output_backend=args.output_backend,
+            encode_tier=args.encode_tier,
             audio_wav_path=audio_wav_path,
+            audio_waveform=audio_waveform,
             audio_sample_rate=audio_sample_rate,
         )
 

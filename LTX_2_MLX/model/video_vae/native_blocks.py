@@ -54,18 +54,26 @@ class NativeConv3dBlock(nn.Module):
         kernel_size: int = 3,
         padding: int = 1,
         causal: bool = False,
+        spatial_padding_mode: str = "manual",
     ):
         super().__init__()
+        if spatial_padding_mode not in {"manual", "conv"}:
+            raise ValueError(
+                "spatial_padding_mode must be 'manual' or 'conv', "
+                f"got {spatial_padding_mode!r}"
+            )
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
         self.padding = padding
         self.causal = causal
+        self.spatial_padding_mode = spatial_padding_mode
+        conv_padding = (0, padding, padding) if spatial_padding_mode == "conv" else 0
         self.conv = nn.Conv3d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
-            padding=0,
+            padding=conv_padding,
             bias=True,
         )
 
@@ -88,7 +96,7 @@ class NativeConv3dBlock(nn.Module):
                     last = mx.repeat(x[:, -1:, :, :, :], pad_size, axis=1)
                     x = mx.concatenate([first, x, last], axis=1)
 
-        if p > 0:
+        if p > 0 and self.spatial_padding_mode == "manual":
             # Zero spatial padding (NHWC: pad H and W axes only).
             x = mx.pad(x, [(0, 0), (0, 0), (p, p), (p, p), (0, 0)])
 
@@ -103,10 +111,18 @@ class NativeResBlock3d(nn.Module):
     decoder ResBlockGroups also pass through this class, just stacked.
     """
 
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, spatial_padding_mode: str = "manual"):
         super().__init__()
-        self.conv1 = NativeConv3dBlock(channels, channels)
-        self.conv2 = NativeConv3dBlock(channels, channels)
+        self.conv1 = NativeConv3dBlock(
+            channels,
+            channels,
+            spatial_padding_mode=spatial_padding_mode,
+        )
+        self.conv2 = NativeConv3dBlock(
+            channels,
+            channels,
+            spatial_padding_mode=spatial_padding_mode,
+        )
 
     def __call__(self, x: mx.array, causal: bool = False) -> mx.array:
         residual = x
@@ -118,9 +134,17 @@ class NativeResBlock3d(nn.Module):
 class NativeResBlockGroup(nn.Module):
     """Group of fixed-width residual blocks (BFHWC).  Shared encoder/decoder."""
 
-    def __init__(self, channels: int, num_blocks: int):
+    def __init__(
+        self,
+        channels: int,
+        num_blocks: int,
+        spatial_padding_mode: str = "manual",
+    ):
         super().__init__()
-        self.res_blocks = [NativeResBlock3d(channels) for _ in range(num_blocks)]
+        self.res_blocks = [
+            NativeResBlock3d(channels, spatial_padding_mode=spatial_padding_mode)
+            for _ in range(num_blocks)
+        ]
 
     def __call__(
         self,

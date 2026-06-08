@@ -33,6 +33,7 @@ class NativeDepthToSpaceUpsample3d(nn.Module):
         stride: tuple[int, int, int],
         residual: bool = False,
         out_channels_reduction_factor: int = 1,
+        spatial_padding_mode: str = "conv",
     ):
         super().__init__()
         self.stride = stride
@@ -44,6 +45,7 @@ class NativeDepthToSpaceUpsample3d(nn.Module):
         self.conv = NativeConv3dBlock(
             in_channels,
             conv_out_channels,
+            spatial_padding_mode=spatial_padding_mode,
         )
 
     def _depth_to_space(self, x: mx.array, out_channels: int) -> mx.array:
@@ -93,6 +95,7 @@ class NativeConv3dVideoDecoder(nn.Module):
         timestep_conditioning: bool = False,
         compute_dtype: mx.Dtype = mx.bfloat16,
         causal: bool = False,
+        spatial_padding_mode: str = "conv",
     ):
         super().__init__()
         self.compute_dtype = compute_dtype
@@ -111,7 +114,12 @@ class NativeConv3dVideoDecoder(nn.Module):
         self.std_of_means = mx.ones((128,), dtype=mx.float32)
 
         feature_channels = base_channels * 8
-        self.conv_in = NativeConv3dBlock(128, feature_channels, causal=causal)
+        self.conv_in = NativeConv3dBlock(
+            128,
+            feature_channels,
+            causal=causal,
+            spatial_padding_mode=spatial_padding_mode,
+        )
         self.up_blocks = []
         self.block_types = []
 
@@ -121,6 +129,7 @@ class NativeConv3dVideoDecoder(nn.Module):
                 block = NativeResBlockGroup(
                     feature_channels,
                     num_blocks=block_config["num_layers"],
+                    spatial_padding_mode=spatial_padding_mode,
                 )
                 self.up_blocks.append(block)
                 self.block_types.append("res")
@@ -131,6 +140,7 @@ class NativeConv3dVideoDecoder(nn.Module):
                     stride=_STRIDE_MAP[block_name],
                     residual=block_config.get("residual", False),
                     out_channels_reduction_factor=multiplier,
+                    spatial_padding_mode=spatial_padding_mode,
                 )
                 feature_channels = feature_channels // multiplier
                 self.up_blocks.append(block)
@@ -139,7 +149,12 @@ class NativeConv3dVideoDecoder(nn.Module):
                 raise ValueError(f"Unsupported native Conv3d decoder block: {block_name}")
 
         self.final_channels = feature_channels
-        self.conv_out = NativeConv3dBlock(feature_channels, 48, causal=causal)
+        self.conv_out = NativeConv3dBlock(
+            feature_channels,
+            48,
+            causal=causal,
+            spatial_padding_mode=spatial_padding_mode,
+        )
 
     def _iter_convs(self):
         yield "conv_in.conv", self.conv_in
