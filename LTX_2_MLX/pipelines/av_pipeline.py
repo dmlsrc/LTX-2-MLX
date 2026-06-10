@@ -1216,6 +1216,14 @@ class AVPipeline:
             STAGE_2_DISTILLED_SIGMA_VALUES if stage_2_sigmas is None else stage_2_sigmas,
             dtype=mx.float32,
         )
+        _s1o = os.environ.get("LTX_STAGE1_SIGMAS")
+        if _s1o:
+            stage_1_sigmas = mx.array([float(x) for x in _s1o.split(",") if x.strip()], dtype=mx.float32)
+            print(f"  [LTX_STAGE1_SIGMAS] stage-1 schedule override: {len(stage_1_sigmas) - 1} steps")
+        _s2o = os.environ.get("LTX_STAGE2_SIGMAS")
+        if _s2o:
+            stage_2_sigmas = mx.array([float(x) for x in _s2o.split(",") if x.strip()], dtype=mx.float32)
+            print(f"  [LTX_STAGE2_SIGMAS] stage-2 schedule override: {len(stage_2_sigmas) - 1} steps")
         if len(stage_1_sigmas) < 2:
             raise ValueError("stage_1_sigmas must contain at least two sigma values.")
         if len(stage_2_sigmas) < 2:
