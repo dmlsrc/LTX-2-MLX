@@ -1626,6 +1626,12 @@ class AVPipeline:
         noiser = GaussianNoiser()
         stepper = self.diffusion_step
         stage_2_sigmas = mx.array(STAGE_2_DISTILLED_SIGMA_VALUES)
+        _s2_override = os.environ.get("LTX_STAGE2_SIGMAS")
+        if _s2_override:
+            stage_2_sigmas = mx.array([float(x) for x in _s2_override.split(",") if x.strip()])
+            print(f"  [LTX_STAGE2_SIGMAS] stage-2 schedule override: "
+                  f"{[round(float(s), 6) for s in stage_2_sigmas]} "
+                  f"({len(stage_2_sigmas) - 1} steps)")
         total_steps = len(stage_2_sigmas) - 1
         if callback:
             callback(0, total_steps)
