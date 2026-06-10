@@ -1072,6 +1072,13 @@ class AVPipeline:
                 # Cast pattern matches EulerDiffusionStep: do the lerp in
                 # the source dtype path; sigmas come in as Python floats.
                 new_video_latent = video_state.latent + dt * video_out
+                if os.environ.get("LTX_STEP_PROBE"):
+                    try:
+                        import stage2_step_contribution_probe as _ssp
+                        _ssp.record(step_idx, sigma, sigma_next,
+                                    video_state.latent, new_video_latent, velocity=video_out)
+                    except Exception:
+                        pass
                 video_state = video_state.replace(latent=new_video_latent)
                 if audio_state is not None and audio_out is not None:
                     new_audio_latent = audio_state.latent + dt * audio_out

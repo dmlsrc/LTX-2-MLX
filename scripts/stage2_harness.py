@@ -529,6 +529,17 @@ def main() -> None:
             blocks_per_step=int(os.environ.get("LTX_CONC_BPS", "0")),
         )
 
+    # Opt-in per-step contribution probe (gates the stage-2 schedule
+    # experiment; see KinoMLX benches/stage2_step_contribution_probe.py).
+    # Logs how much each stage-2 Euler step moves the video latent. Off
+    # unless LTX_STEP_PROBE is set; runs on the normal compiled path.
+    if os.environ.get("LTX_STEP_PROBE"):
+        _bench = os.path.join(os.environ.get("KINO_REPO", ""), "benches")
+        if _bench and _bench not in sys.path:
+            sys.path.insert(0, _bench)
+        import stage2_step_contribution_probe as _ssp
+        _ssp.install_capture()
+
     if args.save_all_sidecars:
         args.save_latents = True
         args.save_run_log = True
