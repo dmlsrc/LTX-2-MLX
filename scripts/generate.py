@@ -1953,6 +1953,41 @@ def load_text_conditioning(embedding_path: str, use_av_encoder: bool) -> dict:
     return loaded
 
 
+def _cast_bf16_weights_to(model, target_dtype: mx.Dtype) -> int:
+    """Cast remaining BF16 weight tensors to the transformer compute dtype.
+
+    The weights cache stores tensors at checkpoint dtype (BF16), plus any
+    FF-dtype-baked FP16 entries; constructing the model with a compute
+    dtype only affects activation casts at the forward boundary.  Running
+    FP16 activations against BF16 weights silently promotes every matmul
+    to FP32 (MLX type promotion: bfloat16 x float16 -> float32), which is
+    both slower than BF16 and defeats the FP16 request.  So a non-BF16
+    transformer must cast its weights once at load.
+
+    Walks every module entry (including underscore-private cached layout
+    tensors, which `parameters()` filters out) and casts ONLY bfloat16
+    arrays: integer/packed-quant tensors, FP32 islands, and already-FP16
+    FF weights pass through unchanged.  Evaluates in chunks so the cast
+    streams from the lazy cache load instead of materializing two full
+    copies of the model.
+    """
+    count = 0
+    pending: list[mx.array] = []
+    for module in model.modules():
+        for key, value in module.items():
+            if isinstance(value, mx.array) and value.dtype == mx.bfloat16:
+                new_value = value.astype(target_dtype)
+                module[key] = new_value
+                pending.append(new_value)
+                count += 1
+                if len(pending) >= 256:
+                    mx.eval(pending)
+                    pending.clear()
+    if pending:
+        mx.eval(pending)
+    return count
+
+
 def load_transformer(
     weights_path: str,
     num_layers: int = 48,
@@ -1986,6 +2021,12 @@ def load_transformer(
         fast_mode: If True, skip intermediate evaluations.
         profile_transformer_once: If True, print one forced-eval transformer timing trace.
     """
+    if transformer_block_resident_blocks and compute_dtype != mx.bfloat16:
+        raise ValueError(
+            "Transformer block streaming reloads BF16 cache tensors mid-run, "
+            "which would reintroduce mixed-dtype promotion; non-BF16 "
+            "transformer dtypes require the non-streaming loader."
+        )
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
     profile_str = " (profile first call)" if profile_transformer_once else ""
@@ -2061,6 +2102,12 @@ def load_transformer(
             layouts_loaded_from_cache = True
         else:
             load_transformer_weights(model, weights_path)
+        if compute_dtype != mx.bfloat16:
+            cast_count = _cast_bf16_weights_to(model, compute_dtype)
+            print(
+                f"  Cast {cast_count} BF16 weight tensors -> "
+                f"{compute_dtype_name(compute_dtype)} (transformer compute dtype)"
+            )
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
     if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
@@ -2191,6 +2238,12 @@ def load_av_transformer(
         1000,
     )
 
+    if transformer_block_resident_blocks and compute_dtype != mx.bfloat16:
+        raise ValueError(
+            "Transformer block streaming reloads BF16 cache tensors mid-run, "
+            "which would reintroduce mixed-dtype promotion; non-BF16 "
+            "transformer dtypes require the non-streaming loader."
+        )
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
     profile_str = " (profile first call)" if profile_transformer_once else ""
@@ -2292,6 +2345,12 @@ def load_av_transformer(
             layouts_loaded_from_cache = True
         else:
             load_av_transformer_weights(model, weights_path)
+        if compute_dtype != mx.bfloat16:
+            cast_count = _cast_bf16_weights_to(model, compute_dtype)
+            print(
+                f"  Cast {cast_count} BF16 weight tensors -> "
+                f"{compute_dtype_name(compute_dtype)} (transformer compute dtype)"
+            )
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
     if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
@@ -2508,6 +2567,7 @@ def generate_video(
     gemma_path: str | None = None,
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
+    transformer_dtype: str | mx.Dtype | None = None,
     vae_decoder_backend: str = "native",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
@@ -2698,6 +2758,21 @@ def generate_video(
         video_attn_layout_layers = ()
 
     compute_dtype = parse_compute_dtype(dtype)
+    # The transformer (denoise) dtype may diverge from the rest of the
+    # pipeline: VAE, audio decoder, vocoder, and text encoding keep
+    # `compute_dtype` while the DiT runs at `transformer_compute_dtype`.
+    # Boundary casts are already in place (the model casts its inputs, the
+    # VAE decoder casts its latents), so the split needs no pipeline glue.
+    transformer_compute_dtype = (
+        parse_compute_dtype(transformer_dtype) if transformer_dtype else compute_dtype
+    )
+    if not (prompt or "").strip() and not embedding_path:
+        raise SystemExit(
+            "ERROR: prompt is empty. If you passed a shell variable "
+            '(e.g. "$PROMPT"), it did not expand in this shell - check with '
+            "'echo \"$PROMPT\"'. Pass --embedding to reuse saved text "
+            "conditioning if an empty prompt is intentional."
+        )
     requested_profile_steps = set(profile_transformer_steps or ())
     if profile_transformer_once:
         requested_profile_steps.add(1)
@@ -2793,6 +2868,7 @@ def generate_video(
                 "skip_vae": skip_vae,
                 "dtype": dtype if isinstance(dtype, str) else str(dtype),
                 "compute_dtype": compute_dtype_name(compute_dtype),
+                "transformer_dtype": compute_dtype_name(transformer_compute_dtype),
                 "vae_decoder_backend": vae_decoder_backend,
                 "vae_tiling_mode": vae_tiling_mode,
                 "tiled_vae": tiled_vae,
@@ -2902,6 +2978,11 @@ def generate_video(
     ):
         print(source_line)
     print(f"Compute dtype: {compute_dtype_name(compute_dtype)}")
+    if transformer_compute_dtype != compute_dtype:
+        print(
+            f"Transformer dtype: {compute_dtype_name(transformer_compute_dtype)} "
+            "(denoise only; VAE/audio/vocoder keep compute dtype)"
+        )
     if not skip_vae:
         print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
     if skip_vae:
@@ -3300,7 +3381,8 @@ def generate_video(
             # by default; opt-in with LTX_ADALN_PRETRANSPOSE=1.
             _adaln_pretranspose = bool(os.environ.get("LTX_ADALN_PRETRANSPOSE"))
             model = load_av_transformer(
-                transformer_weights_path, num_layers=48, compute_dtype=compute_dtype,
+                transformer_weights_path, num_layers=48,
+                compute_dtype=transformer_compute_dtype,
                 low_memory=low_memory,
                 fast_mode=fast_mode,
                 video_ff_quantize_specs=video_ff_quantize_specs,
@@ -3342,7 +3424,7 @@ def generate_video(
             velocity_model = load_transformer(
                 transformer_weights_path,
                 num_layers=48,
-                compute_dtype=compute_dtype,
+                compute_dtype=transformer_compute_dtype,
                 low_memory=low_memory,
                 fast_mode=fast_mode,
                 profile_transformer_once=1 in active_profile_steps,
@@ -5009,6 +5091,16 @@ def main():
         help="Compute dtype for model execution (default: bfloat16)"
     )
     parser.add_argument(
+        "--transformer-dtype",
+        choices=sorted(SUPPORTED_COMPUTE_DTYPES),
+        default=None,
+        help=(
+            "Compute dtype for the transformer denoise only (attention, FF, "
+            "projections); weights are cast at load. VAE, audio decoder, "
+            "vocoder, and text encoding keep --dtype. Defaults to --dtype."
+        ),
+    )
+    parser.add_argument(
         "--vae-decoder",
         choices=["native"],
         default="native",
@@ -5537,6 +5629,7 @@ def main():
         gemma_path=args.gemma_path,
         use_gemma=not args.no_gemma,
         dtype=args.dtype,
+        transformer_dtype=args.transformer_dtype,
         vae_decoder_backend=args.vae_decoder,
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
