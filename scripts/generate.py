@@ -2785,6 +2785,26 @@ def generate_video(
             "'echo \"$PROMPT\"'. Pass --embedding to reuse saved text "
             "conditioning if an empty prompt is intentional."
         )
+    if transformer_compute_dtype != mx.bfloat16:
+        _t_dtype_str = (
+            "float16" if transformer_compute_dtype == mx.float16 else "float32"
+        )
+        for _ff_flag, _ff_value in (
+            ("--video-ff-dtype", video_ff_dtype),
+            ("--audio-ff-dtype", audio_ff_dtype),
+        ):
+            if _ff_value is not None and _ff_value != _t_dtype_str:
+                raise SystemExit(
+                    f"ERROR: {_ff_flag} {_ff_value} conflicts with transformer "
+                    f"dtype {_t_dtype_str}; the FF interior is part of the "
+                    "transformer and --transformer-dtype subsumes the FF dtype "
+                    "flags."
+                )
+        # Subsumed: normalize the FF dtype flags away so the weights-cache
+        # hash is identical whether or not they were passed. The FP16 FF
+        # pretranspose auto-adds key off the transformer dtype instead.
+        video_ff_dtype = None
+        audio_ff_dtype = None
     requested_profile_steps = set(profile_transformer_steps or ())
     if profile_transformer_once:
         requested_profile_steps.add(1)
@@ -3385,7 +3405,13 @@ def generate_video(
             # of whether video FF is also FP16).  Otherwise the audio
             # project_in matmul would do FP16 × BF16 → FP32 promotion.
             _audio_ff_layout_specs = _ensure_audio_ff_layout_for_dtype(
-                _audio_ff_layout_specs, audio_ff_dtype
+                _audio_ff_layout_specs,
+                audio_ff_dtype
+                or (
+                    "float16"
+                    if transformer_compute_dtype == mx.float16
+                    else None
+                ),
             )
             # AdaLN pretranspose is cache-integrated (no per-load RAM spike),
             # but measured neutral-to-slight-regression at small T because the
@@ -5108,8 +5134,10 @@ def main():
         default=None,
         help=(
             "Compute dtype for the transformer denoise only (attention, FF, "
-            "projections); weights are cast at load. VAE, audio decoder, "
-            "vocoder, and text encoding keep --dtype. Defaults to --dtype."
+            "projections); baked into the weights cache. VAE, audio decoder, "
+            "vocoder, and text encoding keep --dtype. Subsumes "
+            "--video-ff-dtype/--audio-ff-dtype (and keeps their FP16 "
+            "pretranspose auto-add). Defaults to --dtype."
         ),
     )
     parser.add_argument(
@@ -5660,7 +5688,12 @@ def main():
         video_ff_quantize_bits=args.video_ff_quantize_bits,
         video_ff_quantize_layers=args.video_ff_quantize_layers,
         video_ff_layout_specs=_ensure_ff_layout_for_dtype(
-            args.video_ff_layout, args.video_ff_dtype
+            args.video_ff_layout,
+            # An FP16 transformer makes the FF interior FP16 regardless of the
+            # FF flags, so the pretranspose auto-add (BlockLoader-cliff dodge)
+            # must fire for it too.
+            args.video_ff_dtype
+            or ("float16" if args.transformer_dtype == "float16" else None),
         ),
         video_ff_layout_layers=args.video_ff_layout_layers,
         video_attn_layout_specs=args.video_attn_layout,
