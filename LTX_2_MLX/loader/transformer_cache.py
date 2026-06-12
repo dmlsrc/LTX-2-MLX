@@ -365,6 +365,7 @@ def _dtype_to_payload_name(dtype: Optional[mx.Dtype]) -> Optional[str]:
 def _cache_payload(
     weights_path: str,
     *,
+    transformer_dtype: Optional[mx.Dtype] = None,
     include_audio: bool,
     video_ff_layout_specs: Tuple[Tuple[str, str], ...],
     video_ff_layout_layers: Tuple[int, ...],
@@ -419,6 +420,8 @@ def _cache_payload(
         payload["video_ff_dtype"] = _dtype_to_payload_name(video_ff_dtype)
     if audio_ff_dtype is not None and audio_ff_dtype != mx.bfloat16:
         payload["audio_ff_dtype"] = _dtype_to_payload_name(audio_ff_dtype)
+    if transformer_dtype is not None and transformer_dtype != mx.bfloat16:
+        payload["transformer_dtype"] = _dtype_to_payload_name(transformer_dtype)
     return payload
 
 
@@ -452,6 +455,7 @@ def transformer_cache_paths(
     weights_path: str,
     cache_root: str | None,
     *,
+    transformer_dtype: Optional[mx.Dtype] = None,
     include_audio: bool,
     video_ff_layout_specs: Tuple[Tuple[str, str], ...],
     video_ff_layout_layers: Tuple[int, ...],
@@ -490,6 +494,7 @@ def transformer_cache_paths(
         video_ff_quantize_bits=video_ff_quantize_bits,
         video_ff_dtype=video_ff_dtype,
         audio_ff_dtype=audio_ff_dtype,
+        transformer_dtype=transformer_dtype,
     )
     root = Path(cache_root).expanduser() if cache_root else default_transformer_cache_root()
     cache_dir = root / f"{_safe_stem(weights_path)}-{_payload_digest(payload)}"
@@ -861,6 +866,7 @@ def build_transformer_cache(
     metadata_file: Path,
     payload: dict[str, Any],
     *,
+    transformer_dtype: Optional[mx.Dtype] = None,
     include_audio: bool,
     video_ff_layout_specs: Tuple[Tuple[str, str], ...],
     video_ff_layout_layers: Tuple[int, ...],
@@ -912,6 +918,11 @@ def build_transformer_cache(
                 if _cache_quant_pretransposed(transformer_cache_quantize)
                 else value
             )
+            # Whole-transformer dtype: quantize from the target dtype so the
+            # produced scales/biases match it (BF16 scales against FP16
+            # activations would reintroduce mixed-dtype promotion).
+            if transformer_dtype is not None and quant_value.dtype == mx.bfloat16:
+                quant_value = quant_value.astype(transformer_dtype)
             group_size, bits = _quant_defaults(
                 quant_mode,
                 video_ff_quantize_group_size,
@@ -951,12 +962,20 @@ def build_transformer_cache(
         # FP16 weight directly — no BF16 copy ever lives in RAM.
         # Applies to both the pretransposed `.weight_t` tensors and to
         # the plain `.bias` tensors that flow through the fall-through
-        # branch.
+        # branch.  `transformer_dtype` extends the same baking to every
+        # remaining checkpoint-dtype (BF16) tensor, so a non-BF16
+        # transformer loads its weights directly with no load-time cast.
         target_dtype = _ff_cache_dtype_for_key(
             mlx_key,
             video_ff_dtype=video_ff_dtype,
             audio_ff_dtype=audio_ff_dtype,
         )
+        if (
+            target_dtype is None
+            and transformer_dtype is not None
+            and value.dtype == mx.bfloat16
+        ):
+            target_dtype = transformer_dtype
         if layout_key is not None:
             stored = mx.contiguous(value.T)
             if target_dtype is not None and stored.dtype != target_dtype:
@@ -1394,6 +1413,7 @@ def load_transformer_cache(
 def ensure_transformer_cache(
     weights_path: str,
     *,
+    transformer_dtype: Optional[mx.Dtype] = None,
     cache_mode: str,
     cache_root: str | None,
     include_audio: bool,
@@ -1421,6 +1441,7 @@ def ensure_transformer_cache(
     cache_file, metadata_file, payload = transformer_cache_paths(
         weights_path,
         cache_root,
+        transformer_dtype=transformer_dtype,
         include_audio=include_audio,
         video_ff_layout_specs=video_ff_layout_specs,
         video_ff_layout_layers=video_ff_layout_layers,
@@ -1448,6 +1469,7 @@ def ensure_transformer_cache(
             cache_file,
             metadata_file,
             payload,
+            transformer_dtype=transformer_dtype,
             include_audio=include_audio,
             video_ff_layout_specs=video_ff_layout_specs,
             video_ff_layout_layers=video_ff_layout_layers,
@@ -1482,6 +1504,7 @@ def load_transformer_weights_cached(
     model: nn.Module,
     weights_path: str,
     *,
+    transformer_dtype: Optional[mx.Dtype] = None,
     cache_mode: str,
     cache_root: str | None,
     include_audio: bool,
@@ -1501,6 +1524,7 @@ def load_transformer_weights_cached(
     """Build if needed, then load a transformer cache into ``model``."""
     result = ensure_transformer_cache(
         weights_path,
+        transformer_dtype=transformer_dtype,
         cache_mode=cache_mode,
         cache_root=cache_root,
         include_audio=include_audio,
@@ -1540,6 +1564,7 @@ def load_transformer_weights_cached_streaming(
     model: nn.Module,
     weights_path: str,
     *,
+    transformer_dtype: Optional[mx.Dtype] = None,
     cache_mode: str,
     cache_root: str | None,
     include_audio: bool,
@@ -1567,6 +1592,7 @@ def load_transformer_weights_cached_streaming(
 
     result = ensure_transformer_cache(
         weights_path,
+        transformer_dtype=transformer_dtype,
         cache_mode=cache_mode,
         cache_root=cache_root,
         include_audio=include_audio,

@@ -2021,12 +2021,6 @@ def load_transformer(
         fast_mode: If True, skip intermediate evaluations.
         profile_transformer_once: If True, print one forced-eval transformer timing trace.
     """
-    if transformer_block_resident_blocks and compute_dtype != mx.bfloat16:
-        raise ValueError(
-            "Transformer block streaming reloads BF16 cache tensors mid-run, "
-            "which would reintroduce mixed-dtype promotion; non-BF16 "
-            "transformer dtypes require the non-streaming loader."
-        )
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
     profile_str = " (profile first call)" if profile_transformer_once else ""
@@ -2049,6 +2043,9 @@ def load_transformer(
     )
 
     layouts_loaded_from_cache = False
+    # Non-BF16 transformer dtype is baked into the weights cache (hash-keyed
+    # like the FF dtypes), so cached loads need no load-time cast.
+    bake_dtype = compute_dtype if compute_dtype != mx.bfloat16 else None
 
     # Load weights
     if weights_path and os.path.exists(weights_path):
@@ -2069,6 +2066,7 @@ def load_transformer(
                 video_ff_quantize_group_size=video_ff_quantize_group_size,
                 video_ff_quantize_bits=video_ff_quantize_bits,
                 resident_blocks=transformer_block_resident_blocks,
+                transformer_dtype=bake_dtype,
                 video_ff_dtype=video_ff_dtype,
             )
             model.transformer_block_compile = transformer_block_compile
@@ -2097,16 +2095,24 @@ def load_transformer(
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
                 transformer_cache_quantize=transformer_cache_quantize,
+                transformer_dtype=bake_dtype,
                 video_ff_dtype=video_ff_dtype,
             )
             layouts_loaded_from_cache = True
         else:
             load_transformer_weights(model, weights_path)
-        if compute_dtype != mx.bfloat16:
-            cast_count = _cast_bf16_weights_to(model, compute_dtype)
+            if bake_dtype is not None:
+                cast_count = _cast_bf16_weights_to(model, bake_dtype)
+                print(
+                    f"  Cast {cast_count} BF16 weight tensors -> "
+                    f"{compute_dtype_name(bake_dtype)} (transformer compute dtype)"
+                )
+        if bake_dtype is not None and (
+            transformer_block_resident_blocks or weights_cache_mode != "off"
+        ):
             print(
-                f"  Cast {cast_count} BF16 weight tensors -> "
-                f"{compute_dtype_name(compute_dtype)} (transformer compute dtype)"
+                f"  Transformer dtype baked into cache: "
+                f"{compute_dtype_name(bake_dtype)}"
             )
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
@@ -2238,12 +2244,6 @@ def load_av_transformer(
         1000,
     )
 
-    if transformer_block_resident_blocks and compute_dtype != mx.bfloat16:
-        raise ValueError(
-            "Transformer block streaming reloads BF16 cache tensors mid-run, "
-            "which would reintroduce mixed-dtype promotion; non-BF16 "
-            "transformer dtypes require the non-streaming loader."
-        )
     mem_str = " (low memory)" if low_memory else ""
     fast_str = " (fast mode)" if fast_mode else ""
     profile_str = " (profile first call)" if profile_transformer_once else ""
@@ -2280,6 +2280,9 @@ def load_av_transformer(
     )
 
     layouts_loaded_from_cache = False
+    # Non-BF16 transformer dtype is baked into the weights cache (hash-keyed
+    # like the FF dtypes), so cached loads need no load-time cast.
+    bake_dtype = compute_dtype if compute_dtype != mx.bfloat16 else None
 
     # Load transformer weights, including the audio-token transformer path.
     if weights_path and os.path.exists(weights_path):
@@ -2305,6 +2308,7 @@ def load_av_transformer(
                 video_ff_quantize_group_size=video_ff_quantize_group_size,
                 video_ff_quantize_bits=video_ff_quantize_bits,
                 resident_blocks=transformer_block_resident_blocks,
+                transformer_dtype=bake_dtype,
                 video_ff_dtype=video_ff_dtype,
                 audio_ff_dtype=audio_ff_dtype,
             )
@@ -2339,17 +2343,25 @@ def load_av_transformer(
                 audio_attn_layout_layers=audio_attn_layout_layers,
                 adaln_pretranspose=adaln_pretranspose,
                 transformer_cache_quantize=transformer_cache_quantize,
+                transformer_dtype=bake_dtype,
                 video_ff_dtype=video_ff_dtype,
                 audio_ff_dtype=audio_ff_dtype,
             )
             layouts_loaded_from_cache = True
         else:
             load_av_transformer_weights(model, weights_path)
-        if compute_dtype != mx.bfloat16:
-            cast_count = _cast_bf16_weights_to(model, compute_dtype)
+            if bake_dtype is not None:
+                cast_count = _cast_bf16_weights_to(model, bake_dtype)
+                print(
+                    f"  Cast {cast_count} BF16 weight tensors -> "
+                    f"{compute_dtype_name(bake_dtype)} (transformer compute dtype)"
+                )
+        if bake_dtype is not None and (
+            transformer_block_resident_blocks or weights_cache_mode != "off"
+        ):
             print(
-                f"  Cast {cast_count} BF16 weight tensors -> "
-                f"{compute_dtype_name(compute_dtype)} (transformer compute dtype)"
+                f"  Transformer dtype baked into cache: "
+                f"{compute_dtype_name(bake_dtype)}"
             )
     else:
         print(f"  Warning: Weights not found at {weights_path}, using random init")
