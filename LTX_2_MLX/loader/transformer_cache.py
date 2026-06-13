@@ -74,15 +74,14 @@ WEIGHT_FAMILY_LABELS = {
     "vocoder": "Vocoder",
 }
 
-# Every transformer cache is sharded -- one consistent on-disk layout. The
-# build accumulates a bounded slice of tensors, writes a shard, frees it, and
-# repeats, so peak build memory stays at ~one shard regardless of model size
-# (measured via mx.get_peak_memory: ~12 GB at this limit vs >46 GB unsharded;
-# FP8/non-BF16-bake builds would otherwise hold the whole transformer as
-# anonymous heap and swap). Shards are named transformer-00000.safetensors,
-# etc.; loads merge them (lazy/mmap, so load cost is unchanged). There is no
-# single-file path -- a legacy single-file cache is treated as absent and
-# rebuilt as shards on next use.
+# The transformer cache is sharded (transformer-00000.safetensors, ...) so its
+# build memory stays bounded to ~one shard regardless of model size (measured
+# via mx.get_peak_memory: ~12 GB vs >46 GB unsharded; FP8/non-BF16-bake builds
+# would otherwise hold the whole transformer as anonymous heap and swap). The
+# single-file weight-family caches (connector/video_vae/audio_vae/vocoder)
+# reuse these helpers and are NOT sharded, so existence/load must accept either
+# shape: a single cache_file.safetensors, or its sibling shards. Shard loads
+# merge lazily (mmap), so load cost is unchanged either way.
 _TRANSFORMER_SHARD_LIMIT_BYTES = 4 * 1024**3
 
 
@@ -99,12 +98,12 @@ def _existing_cache_shards(cache_file: Path) -> list[Path]:
 
 
 def _cache_artifacts_exist(cache_file: Path) -> bool:
-    """True if the sharded cache is present (a legacy single file does not count)."""
-    return bool(_existing_cache_shards(cache_file))
+    """True if a cache is present here as a single file OR as shards."""
+    return cache_file.exists() or bool(_existing_cache_shards(cache_file))
 
 
 def _clear_cache_artifacts(cache_file: Path) -> None:
-    """Remove any shards, plus a stale legacy single file, before a rebuild."""
+    """Remove a single-file cache and/or any shards before a rebuild."""
     if cache_file.exists():
         cache_file.unlink()
     for shard in _existing_cache_shards(cache_file):
@@ -112,10 +111,14 @@ def _clear_cache_artifacts(cache_file: Path) -> None:
 
 
 def _load_cache_weights(cache_file: Path) -> Dict[str, mx.array]:
-    """Load a sharded transformer cache, merging all shards (lazy/mmap)."""
+    """Load a cache, whether single-file or sharded (both lazy/mmap)."""
+    if cache_file.exists():
+        return mx.load(str(cache_file))
     shards = _existing_cache_shards(cache_file)
     if not shards:
-        raise FileNotFoundError(f"No transformer cache shards beside {cache_file}.")
+        raise FileNotFoundError(
+            f"No cache at {cache_file} and no shards beside it."
+        )
     merged: Dict[str, mx.array] = {}
     for shard in shards:
         merged.update(mx.load(str(shard)))
