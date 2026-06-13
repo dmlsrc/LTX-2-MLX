@@ -11,31 +11,64 @@ import mlx.core as mx
 from mlx.utils import tree_flatten
 
 
-# Categories a LoRA target can be filtered by, on two orthogonal axes:
-#   branch -- video / audio / cross (the video<->audio bridge attentions)
-#   module type -- attn (to_q/k/v/out) / gate (to_gate_logits) / ff
-# Each target carries one branch tag and one type tag; excluding any tag drops
-# every target that carries it (e.g. exclude {audio, cross} keeps a video-only
-# style without touching the audio branch; exclude {ff} drops feed-forward
-# everywhere). Classification is by substring on the MLX weight key, whose
-# module names survive conversion.
-_LORA_CATEGORIES = frozenset({"video", "audio", "cross", "attn", "gate", "ff"})
+# A LoRA target can be filtered by several overlapping tag families; excluding
+# any tag drops every target that carries it. Each target carries one tag from
+# each applicable family:
+#   branch (coarse modality)  -- video / audio / cross
+#   module type (coarse role) -- attn / gate / ff
+#   module (exact block)      -- attn1, attn2, audio_attn1, audio_attn2,
+#                                video_to_audio_attn, audio_to_video_attn,
+#                                ff, audio_ff
+#   projection (exact linear) -- to_q, to_k, to_v, to_out, to_gate_logits,
+#                                project_in, project_out
+# The branch/type aliases are coarse shortcuts; the module/projection tags give
+# full granularity (e.g. exclude just `audio_to_video_attn` to drop the
+# lip-sync direction, or `attn2` to revert prompt-conditioning to stock).
+# "ff" means all feed-forward (it is both the type and the video-ff module
+# name); use "audio_ff" to target audio feed-forward alone. Classification is
+# by the MLX weight key, whose module/projection names survive conversion.
+_LORA_BRANCH_TAGS = frozenset({"video", "audio", "cross"})
+_LORA_TYPE_TAGS = frozenset({"attn", "gate", "ff"})
+_LORA_MODULE_TAGS = frozenset({
+    "attn1", "attn2", "audio_attn1", "audio_attn2",
+    "video_to_audio_attn", "audio_to_video_attn", "ff", "audio_ff",
+})
+_LORA_PROJ_TAGS = frozenset({
+    "to_q", "to_k", "to_v", "to_out", "to_gate_logits",
+    "project_in", "project_out",
+})
+_LORA_CATEGORIES = (
+    _LORA_BRANCH_TAGS | _LORA_TYPE_TAGS | _LORA_MODULE_TAGS | _LORA_PROJ_TAGS
+)
 
 
 def _lora_key_categories(mlx_key: str) -> set:
     cats = set()
+    # coarse branch
     if "video_to_audio" in mlx_key or "audio_to_video" in mlx_key:
         cats.add("cross")
     elif "audio_attn" in mlx_key or "audio_ff" in mlx_key:
         cats.add("audio")
     else:
         cats.add("video")
+    # coarse module type
     if "to_gate_logits" in mlx_key:
         cats.add("gate")
     elif any(t in mlx_key for t in ("to_q", "to_k", "to_v", "to_out")):
         cats.add("attn")
     elif "ff" in mlx_key:
         cats.add("ff")
+    # exact module + projection (finest granularity)
+    parts = mlx_key.split(".")
+    if "transformer_blocks" in parts:
+        i = parts.index("transformer_blocks")
+        seg = parts[i + 2:]  # segments after the block index
+        if seg and seg[0] in _LORA_MODULE_TAGS:
+            cats.add(seg[0])
+        for p in seg:
+            if p in _LORA_PROJ_TAGS:
+                cats.add(p)
+                break
     return cats
 
 

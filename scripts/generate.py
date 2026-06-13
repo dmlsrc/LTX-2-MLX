@@ -5440,12 +5440,15 @@ def main():
         action="append",
         default=None,
         help="Comma-separated LoRA target categories to drop from the fuse. "
-             "Branches: video, audio, cross (the video<->audio bridge). "
-             "Module types: attn, gate, ff. Example: 'audio,cross' applies "
-             "only the video-branch style and leaves the audio path stock. "
-             "Repeat to match the order of --lora; a single value applies to "
-             "all. Use 'none' (or '') to skip filtering for one LoRA in a "
-             "per-LoRA list."
+             "Coarse: branches video/audio/cross, types attn/gate/ff. Fine "
+             "(exact module): attn1, attn2, audio_attn1, audio_attn2, "
+             "video_to_audio_attn, audio_to_video_attn, ff, audio_ff. Fine "
+             "(projection): to_q, to_k, to_v, to_out, to_gate_logits, "
+             "project_in, project_out. Example: 'audio,cross' keeps a "
+             "video-only style; 'video_to_audio_attn' drops only the "
+             "sound-follows-motion bridge while keeping lip-sync. Repeat to "
+             "match the order of --lora; a single value applies to all; use "
+             "'none' to skip filtering for one LoRA in a per-LoRA list."
     )
     parser.add_argument(
         "--stg-scale",
