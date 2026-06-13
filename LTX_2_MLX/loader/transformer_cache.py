@@ -451,6 +451,102 @@ def _safe_stem(path: str) -> str:
     return safe[:80] or "transformer"
 
 
+_FP8_SAFETENSORS_DTYPES = {"F8_E4M3", "F8_E5M2"}
+
+
+def _safetensors_header_dtypes(weights_path: str) -> Dict[str, str]:
+    """Map tensor key -> raw dtype string from a safetensors header.
+
+    Reads only the JSON header (8-byte length prefix + header), never the
+    tensor data, so it is cheap even on a 40 GB checkpoint and works for
+    dtypes MLX cannot represent.
+    """
+    with open(weights_path, "rb") as f:
+        header_len = int.from_bytes(f.read(8), "little")
+        header = json.loads(f.read(header_len))
+    return {
+        key: entry["dtype"]
+        for key, entry in header.items()
+        if key != "__metadata__" and isinstance(entry, dict) and "dtype" in entry
+    }
+
+
+def checkpoint_has_fp8_tensors(weights_path: str) -> bool:
+    """True when the safetensors file stores any FP8 tensor.
+
+    MLX has no FP8 dtypes (as of 0.31), so such checkpoints can only be
+    used through the cache build, which dequantizes them to a runnable
+    dtype.
+    """
+    try:
+        dtypes = set(_safetensors_header_dtypes(weights_path).values())
+    except Exception:
+        return False
+    return bool(_FP8_SAFETENSORS_DTYPES & dtypes)
+
+
+def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
+    """Yield ``(key, mx.array)`` from an FP8 safetensors checkpoint.
+
+    Decodes per-tensor through torch (lazy import; MLX cannot read FP8
+    safetensors). FP8 values are exactly representable in both FP16 and
+    BF16 (E4M3: |x| <= 448 with a 3-bit mantissa; E5M2: |x| <= 57344
+    with 2 bits), so plain FP8 tensors transit losslessly into
+    ``value_dtype``. Scaled FP8 (an FP8 ``<name>`` with a
+    ``<name>_scale`` float companion, the vllm/ComfyUI convention) is
+    dequantized in FP32 and rounded once to ``value_dtype``; the scale
+    keys are consumed, not emitted. A ``*_scale`` key whose base is not
+    an FP8 tensor is treated as an ordinary weight. Non-FP8 tensors keep
+    their checkpoint dtype (BF16 transits via FP32 because numpy has no
+    BF16; the roundtrip is exact).
+    """
+    try:
+        import torch
+        from safetensors import safe_open
+    except ImportError as exc:
+        raise RuntimeError(
+            "FP8 checkpoints need torch + safetensors for the one-time "
+            "cache build (MLX has no FP8 dtypes)."
+        ) from exc
+
+    header_dtypes = _safetensors_header_dtypes(weights_path)
+    fp8_keys = {
+        key
+        for key, dtype in header_dtypes.items()
+        if dtype in _FP8_SAFETENSORS_DTYPES
+    }
+    scale_suffix = "_scale"
+    scale_keys = {
+        key
+        for key in header_dtypes
+        if key.endswith(scale_suffix) and key[: -len(scale_suffix)] in fp8_keys
+    }
+
+    fp8_torch_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
+    with safe_open(weights_path, framework="pt") as f:
+        for key in sorted(header_dtypes):
+            if key in scale_keys:
+                continue
+            tensor = f.get_tensor(key)
+            if tensor.dtype in fp8_torch_dtypes:
+                scale_key = f"{key}{scale_suffix}"
+                if scale_key in scale_keys:
+                    tensor = tensor.to(torch.float32) * f.get_tensor(
+                        scale_key
+                    ).to(torch.float32)
+                    yield key, mx.array(tensor.numpy()).astype(value_dtype)
+                else:
+                    yield key, mx.array(
+                        tensor.to(torch.float16).numpy()
+                    ).astype(value_dtype)
+            elif tensor.dtype == torch.bfloat16:
+                yield key, mx.array(
+                    tensor.to(torch.float32).numpy()
+                ).astype(mx.bfloat16)
+            else:
+                yield key, mx.array(tensor.numpy())
+
+
 def transformer_cache_paths(
     weights_path: str,
     cache_root: str | None,
@@ -888,14 +984,39 @@ def build_transformer_cache(
     """Build a converted transformer-only cache from a stock checkpoint."""
     cache_file.parent.mkdir(parents=True, exist_ok=True)
 
-    raw_weights = mx.load(weights_path)
+    raw_weights = None
+    if checkpoint_has_fp8_tensors(weights_path):
+        # MLX cannot represent FP8; dequantize during the one-time build so
+        # the cache always holds a directly-runnable dtype.
+        if transformer_dtype is None:
+            transformer_dtype = mx.bfloat16
+        header_dtypes = _safetensors_header_dtypes(weights_path)
+        fp8_keys = {
+            key
+            for key, dtype in header_dtypes.items()
+            if dtype in _FP8_SAFETENSORS_DTYPES
+        }
+        scaled_keys = {
+            key
+            for key in header_dtypes
+            if key.endswith("_scale") and key[: -len("_scale")] in fp8_keys
+        }
+        print(
+            f"  FP8 checkpoint: dequantizing {len(fp8_keys)} tensors "
+            f"({len(scaled_keys)} with scale companions) to "
+            f"{_dtype_to_payload_name(transformer_dtype)} for the cache"
+        )
+        raw_items = _iter_fp8_checkpoint_weights(weights_path, transformer_dtype)
+    else:
+        raw_weights = mx.load(weights_path)
+        raw_items = raw_weights.items()
     cache_weights: Dict[str, mx.array] = {}
     loaded_count = 0
     layout_count = 0
     quant_count = 0
     skipped_count = 0
 
-    for pytorch_key, value in raw_weights.items():
+    for pytorch_key, value in raw_items:
         if not pytorch_key.startswith("model.diffusion_model."):
             continue
 
@@ -988,6 +1109,7 @@ def build_transformer_cache(
             cache_weights[mlx_key] = value
         loaded_count += 1
 
+    del raw_items
     del raw_weights
     gc.collect()
 

@@ -50,6 +50,7 @@ from LTX_2_MLX.loader import (
     LoRAConfig,
     TRANSFORMER_CACHE_QUANTIZE_MODES,
     TRANSFORMER_CACHE_QUANTIZE_OFF,
+    checkpoint_has_fp8_tensors,
     ensure_weight_family_caches,
     load_av_transformer_weights,
     load_transformer_weights,
@@ -2100,6 +2101,12 @@ def load_transformer(
             )
             layouts_loaded_from_cache = True
         else:
+            if checkpoint_has_fp8_tensors(weights_path):
+                raise SystemExit(
+                    "ERROR: FP8 checkpoints require the weights cache "
+                    "(--weights-cache auto), which dequantizes them at build "
+                    "time; MLX cannot load FP8 tensors directly."
+                )
             load_transformer_weights(model, weights_path)
             if bake_dtype is not None:
                 cast_count = _cast_bf16_weights_to(model, bake_dtype)
@@ -2349,6 +2356,12 @@ def load_av_transformer(
             )
             layouts_loaded_from_cache = True
         else:
+            if checkpoint_has_fp8_tensors(weights_path):
+                raise SystemExit(
+                    "ERROR: FP8 checkpoints require the weights cache "
+                    "(--weights-cache auto), which dequantizes them at build "
+                    "time; MLX cannot load FP8 tensors directly."
+                )
             load_av_transformer_weights(model, weights_path)
             if bake_dtype is not None:
                 cast_count = _cast_bf16_weights_to(model, bake_dtype)
