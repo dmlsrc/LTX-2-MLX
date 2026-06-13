@@ -5444,7 +5444,8 @@ def main():
              "Module types: attn, gate, ff. Example: 'audio,cross' applies "
              "only the video-branch style and leaves the audio path stock. "
              "Repeat to match the order of --lora; a single value applies to "
-             "all."
+             "all. Use 'none' (or '') to skip filtering for one LoRA in a "
+             "per-LoRA list."
     )
     parser.add_argument(
         "--stg-scale",
@@ -5703,17 +5704,20 @@ def main():
                 "per LoRA."
             )
 
+        def _parse_excl(spec: str) -> tuple:
+            # "none"/"off"/empty -> no knockout for this LoRA (lets a per-LoRA
+            # list opt one adapter out of filtering without an awkward "").
+            if spec.strip().lower() in ("", "none", "off"):
+                return ()
+            return tuple(t.strip() for t in spec.split(",") if t.strip())
+
         raw_excl = args.lora_exclude or []
         if len(raw_excl) == 0:
             excludes = [()] * len(args.lora)
         elif len(raw_excl) == 1:
-            one = tuple(t.strip() for t in raw_excl[0].split(",") if t.strip())
-            excludes = [one] * len(args.lora)
+            excludes = [_parse_excl(raw_excl[0])] * len(args.lora)
         elif len(raw_excl) == len(args.lora):
-            excludes = [
-                tuple(t.strip() for t in e.split(",") if t.strip())
-                for e in raw_excl
-            ]
+            excludes = [_parse_excl(e) for e in raw_excl]
         else:
             raise SystemExit(
                 f"ERROR: got {len(args.lora)} --lora but "
