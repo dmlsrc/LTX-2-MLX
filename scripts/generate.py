@@ -2642,6 +2642,7 @@ def generate_video(
     lora_path: str = None,
     lora_strength: float = 1.0,
     lora_configs: "list | None" = None,
+    lora_allow_partial: bool = False,
     tiled_vae: bool = False,
     vae_tiling_mode: str = "auto",
     vae_temporal_tile_frames: int | None = None,
@@ -3537,7 +3538,7 @@ def generate_video(
         print(
             f"\n  Fusing {len(lora_configs)} LoRA(s) into the loaded model:"
         )
-        fuse_loras_into_model(model, lora_configs)
+        fuse_loras_into_model(model, lora_configs, allow_partial=lora_allow_partial)
         print(f"  LoRA fusion complete")
 
     # Whether to use CFG
@@ -5427,6 +5428,13 @@ def main():
              "order of --lora; a single value applies to all."
     )
     parser.add_argument(
+        "--lora-allow-partial",
+        action="store_true",
+        help="Allow a LoRA fuse that places <50%% of its resolved targets "
+             "(otherwise a hard error flags a likely format/model mismatch). "
+             "Use for LoRAs that intentionally modify only a few weights."
+    )
+    parser.add_argument(
         "--stg-scale",
         type=float,
         default=0.0,
@@ -5754,6 +5762,7 @@ def main():
         image_path=args.image,
         image_strength=args.image_strength,
         lora_configs=cli_lora_configs,
+        lora_allow_partial=args.lora_allow_partial,
         tiled_vae=args.tiled_vae,
         vae_tiling_mode=args.vae_tiling,
         vae_temporal_tile_frames=args.vae_temporal_tile_frames,
