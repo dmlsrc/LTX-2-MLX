@@ -452,6 +452,29 @@ def _safe_stem(path: str) -> str:
 
 
 _FP8_SAFETENSORS_DTYPES = {"F8_E4M3", "F8_E5M2"}
+_FP16_MAX = 65504.0
+
+
+def _cast_for_cache(value: mx.array, target_dtype: mx.Dtype, key: str) -> mx.array:
+    """Cast a weight to the cache dtype, guarding the FP16 range ceiling.
+
+    FP16 is the only target with a range smaller than the BF16/F32 sources
+    (max finite 65504), so casting a larger-magnitude weight would silently
+    produce ``inf`` and then NaN output. The 1.1 distilled DiT maxes at
+    ~9.6, so this never fires today; the check enforces the "trust the
+    checkpoint's dtype choices" assumption rather than leaving it implicit,
+    turning a future out-of-range checkpoint into a named build-time error
+    instead of garbage video. Only pays a reduction when target is FP16.
+    """
+    if target_dtype == mx.float16 and value.dtype != mx.float16:
+        max_abs = float(mx.max(mx.abs(value.astype(mx.float32))))
+        if max_abs > _FP16_MAX:
+            raise ValueError(
+                f"{key}: max|w|={max_abs:.4g} exceeds the float16 range "
+                f"({_FP16_MAX:.0f}); cannot bake this tensor to float16. "
+                "Use --transformer-dtype bfloat16 for this checkpoint."
+            )
+    return value.astype(target_dtype)
 
 
 def _safetensors_header_dtypes(weights_path: str) -> Dict[str, str]:
@@ -552,11 +575,16 @@ def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
         if key in fp8_keys:
             scale_key = f"{key}_scale"
             if scale_key in weight_scale_keys:
-                value = (
+                # Dequantize in FP32; the scale can push values past the FP16
+                # ceiling, so route through the range-guarded cast.
+                value = _cast_for_cache(
                     mx.from_fp8(value, dtype=mx.float32)
-                    * raw_weights[scale_key].astype(mx.float32)
-                ).astype(value_dtype)
+                    * raw_weights[scale_key].astype(mx.float32),
+                    value_dtype,
+                    key,
+                )
             else:
+                # Plain E4M3 maxes at 448, always in FP16 range.
                 value = mx.from_fp8(value, dtype=value_dtype)
         yield key, value
 
@@ -1108,12 +1136,12 @@ def build_transformer_cache(
         if layout_key is not None:
             stored = mx.contiguous(value.T)
             if target_dtype is not None and stored.dtype != target_dtype:
-                stored = stored.astype(target_dtype)
+                stored = _cast_for_cache(stored, target_dtype, mlx_key)
             cache_weights[f"{LAYOUT_KEY_PREFIX}{layout_key}"] = stored
             layout_count += 1
         else:
             if target_dtype is not None and value.dtype != target_dtype:
-                value = value.astype(target_dtype)
+                value = _cast_for_cache(value, target_dtype, mlx_key)
             cache_weights[mlx_key] = value
         loaded_count += 1
 

@@ -1972,11 +1972,25 @@ def _cast_bf16_weights_to(model, target_dtype: mx.Dtype) -> int:
     streams from the lazy cache load instead of materializing two full
     copies of the model.
     """
+    # FP16 is the only target narrower than the BF16 source; an out-of-range
+    # weight would silently cast to inf. The distilled DiT maxes at ~9.6, so
+    # this never fires today -- it enforces the assumption rather than leaving
+    # a silent-NaN hole for a future checkpoint. (Mirrors _cast_for_cache on
+    # the cached path; this is the rare cache-off branch.)
+    guard_fp16 = target_dtype == mx.float16
     count = 0
     pending: list[mx.array] = []
     for module in model.modules():
         for key, value in module.items():
             if isinstance(value, mx.array) and value.dtype == mx.bfloat16:
+                if guard_fp16:
+                    max_abs = float(mx.max(mx.abs(value.astype(mx.float32))))
+                    if max_abs > 65504.0:
+                        raise SystemExit(
+                            f"ERROR: {key} max|w|={max_abs:.4g} exceeds float16 "
+                            "range; use --transformer-dtype bfloat16 for this "
+                            "checkpoint."
+                        )
                 new_value = value.astype(target_dtype)
                 module[key] = new_value
                 pending.append(new_value)
