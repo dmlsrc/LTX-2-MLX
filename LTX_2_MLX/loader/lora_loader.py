@@ -1,10 +1,12 @@
 """LoRA (Low-Rank Adaptation) loading and fusion for LTX-2 models."""
 
+import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 
 
 @dataclass
@@ -237,6 +239,181 @@ def apply_lora_to_model(
 
     # Evaluate to ensure changes are applied
     mx.eval(model.parameters())
+
+
+def _lora_alpha_scale(path: str, strength: float) -> float:
+    """Effective scale = strength * (alpha/rank), reading the LoRA's metadata.
+
+    Diffusers-style LoRA applies ``(alpha/rank) * (B @ A)``. Many LTX LoRAs
+    ship ``alpha == rank`` (factor 1.0), but honoring the metadata keeps the
+    fuser correct for adapters where they differ. Falls back to ``strength``
+    when the metadata is absent.
+    """
+    try:
+        with open(path, "rb") as f:
+            n = int.from_bytes(f.read(8), "little")
+            meta = json.loads(f.read(n)).get("__metadata__", {}) or {}
+        alpha = float(meta["lora_alpha"])
+        rank = float(meta["lora_rank"])
+        if rank:
+            return strength * (alpha / rank)
+    except Exception:
+        pass
+    return strength
+
+
+def _lora_base_to_ab(
+    lora_weights: Dict[str, mx.array],
+) -> Dict[str, Tuple[str, str]]:
+    """Map each LoRA base key to its (A, B) weight keys."""
+    suffixes = [
+        (".lora_A.weight", ".lora_B.weight"),
+        (".lora_down.weight", ".lora_up.weight"),
+        (".lora_A", ".lora_B"),
+        (".lora_down", ".lora_up"),
+    ]
+    out: Dict[str, Tuple[str, str]] = {}
+    for key in lora_weights:
+        for suf_a, suf_b in suffixes:
+            if key.endswith(suf_a):
+                base = key[: -len(suf_a)]
+                kb = base + suf_b
+                if kb in lora_weights:
+                    out[base] = (key, kb)
+                break
+    return out
+
+
+def fuse_loras_into_model(
+    model,
+    lora_configs: List[LoRAConfig],
+    *,
+    include_audio: bool = True,
+    verbose: bool = True,
+) -> None:
+    """Fuse one or more LoRAs into an already-loaded model, in place.
+
+    Designed for the cached/pretransposed model: a translation table maps
+    each LoRA target (raw checkpoint naming, e.g. ``ff.net.0.proj``) to the
+    model's MLX weight key (e.g. ``ff.project_in.proj.weight``) via the same
+    converter the cache uses, so FF and attention both match. The delta
+    ``(B @ A)`` is ``[out, in]``; it is added directly to a standard weight
+    or transposed for a pretransposed ``_*_weight_t`` slot, decided by shape.
+
+    Memory: only LoRA-touched weights are rewritten, in chunks, freeing the
+    previous copy as it goes -- it never materializes a second full set of
+    weights (unlike fuse_lora_into_weights). Multiple LoRAs sum at their
+    individual strengths. Raises if any LoRA target cannot be placed, so an
+    unsupported layout fails loud instead of silently dropping adaptation.
+    """
+    from .weight_converter import convert_pytorch_key_to_mlx
+
+    target = getattr(model, "velocity_model", model)
+
+    # 1. Translation table: MLX logical ".weight" key -> [(A, B, scale), ...]
+    table: Dict[str, list] = {}
+    for cfg in lora_configs:
+        lw = load_lora_weights(cfg.path)
+        scale = _lora_alpha_scale(cfg.path, cfg.strength)
+        if verbose:
+            print(
+                f"  LoRA {Path(cfg.path).name}: strength={cfg.strength} "
+                f"effective_scale={scale:.4f}"
+            )
+        for base, (ka, kb) in _lora_base_to_ab(lw).items():
+            pytorch_key = base.replace("diffusion_model.", "") + ".weight"
+            mlx_key = convert_pytorch_key_to_mlx(
+                pytorch_key, include_audio=include_audio
+            )
+            if mlx_key is not None:
+                table.setdefault(mlx_key, []).append((lw[ka], lw[kb], scale))
+
+    if not table:
+        if verbose:
+            print("  No LoRA targets resolved; nothing fused.")
+        return
+
+    def delta_fp32(mlx_key: str) -> mx.array:
+        acc = None
+        for a, b, scale in table[mlx_key]:
+            term = mx.matmul(b.astype(mx.float32), a.astype(mx.float32)) * scale
+            acc = term if acc is None else acc + term
+        return acc
+
+    def fused_value(weight: mx.array, d: mx.array, key: str) -> mx.array:
+        if tuple(weight.shape) == tuple(d.shape):
+            return (weight.astype(mx.float32) + d).astype(weight.dtype)
+        if tuple(weight.shape) == tuple(reversed(d.shape)):  # pretransposed slot
+            return (weight.astype(mx.float32) + d.T).astype(weight.dtype)
+        raise ValueError(
+            f"LoRA shape mismatch for {key}: weight {tuple(weight.shape)} "
+            f"vs delta {tuple(d.shape)}"
+        )
+
+    applied = set()
+
+    # 2a. Standard params (attention, AdaLN, non-pretransposed FF, gates).
+    chunk: list = []
+    chunk_bytes = 0
+    for key, weight in tree_flatten(target.parameters()):
+        if key not in table:
+            continue
+        new = fused_value(weight, delta_fp32(key), key)
+        chunk.append((key, new))
+        chunk_bytes += new.nbytes
+        applied.add(key)
+        if chunk_bytes >= 2 * 1024**3:
+            target.load_weights(chunk, strict=False)
+            mx.eval(target.parameters())
+            chunk, chunk_bytes = [], 0
+    if chunk:
+        target.load_weights(chunk, strict=False)
+        mx.eval(target.parameters())
+
+    # 2b. Pretransposed FF slots live in private _project_*_weight_t attrs
+    # (the original .weight was deleted at cache install), so they are absent
+    # from parameters() and handled here by direct, chunked attr replacement.
+    blocks = getattr(target, "transformer_blocks", []) or []
+    ff_slots = (
+        ("ff", "_project_in_weight_t", "ff.project_in.proj.weight"),
+        ("ff", "_project_out_weight_t", "ff.project_out.weight"),
+        ("audio_ff", "_project_in_weight_t", "audio_ff.project_in.proj.weight"),
+        ("audio_ff", "_project_out_weight_t", "audio_ff.project_out.weight"),
+    )
+    pending = []
+    for i, blk in enumerate(blocks):
+        for mod_name, attr, suffix in ff_slots:
+            ff = getattr(blk, mod_name, None)
+            if ff is None:
+                continue
+            wt = getattr(ff, attr, None)
+            if wt is None:
+                continue
+            mlx_key = f"transformer_blocks.{i}.{suffix}"
+            if mlx_key not in table:
+                continue
+            setattr(ff, attr, fused_value(wt, delta_fp32(mlx_key), mlx_key))
+            pending.append(getattr(ff, attr))
+            applied.add(mlx_key)
+            if len(pending) >= 32:
+                mx.eval(pending)
+                pending = []
+    if pending:
+        mx.eval(pending)
+
+    # 3. Fail loud if any resolved LoRA target had no home in this model/layout
+    # (e.g. an unsupported pretransposed attention layout), rather than
+    # silently shipping a partial adaptation.
+    unplaced = sorted(set(table) - applied)
+    if unplaced:
+        raise RuntimeError(
+            f"LoRA fusion incomplete: {len(unplaced)} target(s) had no matching "
+            f"model weight (e.g. {unplaced[:3]}). This usually means a "
+            "pretransposed layout the fuser does not yet handle; refusing to "
+            "ship a partial fusion."
+        )
+    if verbose:
+        print(f"  Fused {len(applied)} weights from {len(lora_configs)} LoRA(s).")
 
 
 # Common LoRA target modules in transformer models

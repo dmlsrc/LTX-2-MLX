@@ -57,7 +57,7 @@ from LTX_2_MLX.loader import (
     load_transformer_weights_cached,
     load_transformer_weights_cached_streaming,
 )
-from LTX_2_MLX.loader.lora_loader import fuse_lora_into_weights
+from LTX_2_MLX.loader.lora_loader import fuse_lora_into_weights, fuse_loras_into_model
 from mlx.utils import tree_flatten
 from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
 from LTX_2_MLX.model.video_vae.native_decoder import (
@@ -2641,6 +2641,7 @@ def generate_video(
     image_strength: float = 0.95,
     lora_path: str = None,
     lora_strength: float = 1.0,
+    lora_configs: "list | None" = None,
     tiled_vae: bool = False,
     vae_tiling_mode: str = "auto",
     vae_temporal_tile_frames: int | None = None,
@@ -3526,23 +3527,18 @@ def generate_video(
             print("  Skipping model load (placeholder mode)")
     timings.mark("transformer load")
 
-    # Apply LoRA if provided
-    if lora_path and model is not None:
-        print(f"\n  Applying LoRA from {lora_path} (strength={lora_strength})")
-        lora_config = LoRAConfig(path=lora_path, strength=lora_strength)
-
-        # Get target model (handle X0Model wrapper)
-        if hasattr(model, 'velocity_model'):
-            target_model = model.velocity_model
-        else:
-            target_model = model
-
-        # Fuse LoRA weights into model
-        flat_params = dict(tree_flatten(target_model.parameters()))
-        fused_weights = fuse_lora_into_weights(flat_params, [lora_config])
-        target_model.load_weights(list(fused_weights.items()))
-        mx.eval(target_model.parameters())
-        print(f"  LoRA applied successfully")
+    # Apply LoRA(s) if provided. Runtime in-place fusion with a key-translation
+    # table (raw LoRA names -> MLX weight keys) that is transpose- and
+    # pretranspose-aware and never holds a second full copy of the weights.
+    # Supports multiple LoRAs at independent strengths.
+    if lora_configs is None and lora_path:
+        lora_configs = [LoRAConfig(path=lora_path, strength=lora_strength)]
+    if lora_configs and model is not None:
+        print(
+            f"\n  Fusing {len(lora_configs)} LoRA(s) into the loaded model:"
+        )
+        fuse_loras_into_model(model, lora_configs)
+        print(f"  LoRA fusion complete")
 
     # Whether to use CFG
     # Distilled models (LTX-2 distilled) are trained without CFG and produce artifacts if CFG > 1.0
@@ -5417,14 +5413,18 @@ def main():
     parser.add_argument(
         "--lora",
         type=str,
+        action="append",
         default=None,
-        help="Path to LoRA weights (.safetensors)"
+        help="Path to LoRA weights (.safetensors). Repeat to fuse multiple "
+             "LoRAs; pair with repeated --lora-strength for per-LoRA strength."
     )
     parser.add_argument(
         "--lora-strength",
         type=float,
-        default=1.0,
-        help="LoRA strength (-2.0 to 2.0, default 1.0)"
+        action="append",
+        default=None,
+        help="LoRA strength (-2.0 to 2.0, default 1.0). Repeat to match the "
+             "order of --lora; a single value applies to all."
     )
     parser.add_argument(
         "--stg-scale",
@@ -5668,6 +5668,23 @@ def main():
             f"to {resolved_num_frames} frames"
         )
 
+    # Build LoRA configs from (possibly repeated) --lora / --lora-strength.
+    # One strength applies to all; N strengths pair with N LoRAs in order.
+    cli_lora_configs = None
+    if args.lora:
+        strengths = args.lora_strength or [1.0]
+        if len(strengths) == 1:
+            strengths = strengths * len(args.lora)
+        if len(strengths) != len(args.lora):
+            raise SystemExit(
+                f"ERROR: got {len(args.lora)} --lora but "
+                f"{len(strengths)} --lora-strength; pass one strength or one "
+                "per LoRA."
+            )
+        cli_lora_configs = [
+            LoRAConfig(path=p, strength=s) for p, s in zip(args.lora, strengths)
+        ]
+
     generate_video(
         distilled_lora=args.distilled_lora,
         distilled_lora_scale=args.distilled_lora_scale,
@@ -5736,8 +5753,7 @@ def main():
         # New parameters
         image_path=args.image,
         image_strength=args.image_strength,
-        lora_path=args.lora,
-        lora_strength=args.lora_strength,
+        lora_configs=cli_lora_configs,
         tiled_vae=args.tiled_vae,
         vae_tiling_mode=args.vae_tiling,
         vae_temporal_tile_frames=args.vae_temporal_tile_frames,
