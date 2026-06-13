@@ -74,14 +74,15 @@ WEIGHT_FAMILY_LABELS = {
     "vocoder": "Vocoder",
 }
 
-# Cache builds that produce *computed* tensors (FP8 dequant, or a non-BF16
-# transformer-dtype bake) accumulate the whole transformer as anonymous heap,
-# unlike the BF16 path whose entries are mmap-backed views. Saving all ~46 GB
-# at once peaks past a 64 GB machine -> swap. Such builds shard the cache so
-# peak stays bounded to one shard plus working set (measured via
-# mx.get_peak_memory: ~12 GB at this limit vs >46 GB unsharded). Shards sit
-# beside the single-file name as transformer-00000.safetensors, etc.; loads
-# merge them transparently (lazy/mmap, so load cost is unchanged).
+# Every transformer cache is sharded -- one consistent on-disk layout. The
+# build accumulates a bounded slice of tensors, writes a shard, frees it, and
+# repeats, so peak build memory stays at ~one shard regardless of model size
+# (measured via mx.get_peak_memory: ~12 GB at this limit vs >46 GB unsharded;
+# FP8/non-BF16-bake builds would otherwise hold the whole transformer as
+# anonymous heap and swap). Shards are named transformer-00000.safetensors,
+# etc.; loads merge them (lazy/mmap, so load cost is unchanged). There is no
+# single-file path -- a legacy single-file cache is treated as absent and
+# rebuilt as shards on next use.
 _TRANSFORMER_SHARD_LIMIT_BYTES = 4 * 1024**3
 
 
@@ -98,12 +99,12 @@ def _existing_cache_shards(cache_file: Path) -> list[Path]:
 
 
 def _cache_artifacts_exist(cache_file: Path) -> bool:
-    """True if either the single-file cache or any shard is present."""
-    return cache_file.exists() or bool(_existing_cache_shards(cache_file))
+    """True if the sharded cache is present (a legacy single file does not count)."""
+    return bool(_existing_cache_shards(cache_file))
 
 
 def _clear_cache_artifacts(cache_file: Path) -> None:
-    """Remove a prior single-file cache and any shards (pre-rebuild cleanup)."""
+    """Remove any shards, plus a stale legacy single file, before a rebuild."""
     if cache_file.exists():
         cache_file.unlink()
     for shard in _existing_cache_shards(cache_file):
@@ -111,18 +112,10 @@ def _clear_cache_artifacts(cache_file: Path) -> None:
 
 
 def _load_cache_weights(cache_file: Path) -> Dict[str, mx.array]:
-    """Load a transformer cache, merging shards when the build was sharded.
-
-    Both branches return lazy/mmap-backed arrays, so a sharded cache loads
-    as cheaply as a single file -- only the build side spends the memory.
-    """
-    if cache_file.exists():
-        return mx.load(str(cache_file))
+    """Load a sharded transformer cache, merging all shards (lazy/mmap)."""
     shards = _existing_cache_shards(cache_file)
     if not shards:
-        raise FileNotFoundError(
-            f"No transformer cache at {cache_file} and no shards beside it."
-        )
+        raise FileNotFoundError(f"No transformer cache shards beside {cache_file}.")
     merged: Dict[str, mx.array] = {}
     for shard in shards:
         merged.update(mx.load(str(shard)))
@@ -1106,18 +1099,18 @@ def build_transformer_cache(
     layout_count = 0
     quant_count = 0
     skipped_count = 0
-    # Shard the save when entries are computed (FP8 dequant, or a non-BF16
-    # bake) so peak memory stays bounded to one shard rather than the whole
-    # transformer. The plain BF16 path keeps its single mmap-backed file.
-    shard_build = fp8_build or (
-        transformer_dtype is not None and transformer_dtype != mx.bfloat16
-    )
-    if shard_build:
-        _clear_cache_artifacts(cache_file)
-    # Computed cache entries are lazy graphs (FP8: (from_fp8 -> fp32) * scale
-    # -> cast; bake: bf16 -> cast). Materialize in small chunks so each
-    # tensor's intermediate is freed before the next, then return the freed
-    # buffers to the OS. Verified bounded via mx.get_peak_memory.
+    # All builds shard, for one consistent on-disk layout and bounded build
+    # memory regardless of source. Computed builds (FP8 dequant, non-BF16
+    # bake) would otherwise hold the whole transformer as anonymous heap and
+    # swap; the plain BF16 build is lighter but still benefits from a bounded
+    # rebuild peak. Clear stale artifacts (incl. any legacy single file) first
+    # so a rebuild can't leave a mismatched shard set behind.
+    _clear_cache_artifacts(cache_file)
+    # Entries may be lazy graphs (FP8: (from_fp8 -> fp32) * scale -> cast;
+    # bake: bf16 -> cast) or mmap views (plain BF16). Materialize in small
+    # chunks so each tensor's intermediate is freed before the next, then
+    # return the freed buffers to the OS. Verified bounded via
+    # mx.get_peak_memory.
     pending: list[mx.array] = []
     shard_index = 0
     shard_bytes = 0
@@ -1146,9 +1139,9 @@ def build_transformer_cache(
         shard_bytes = 0
 
     for pytorch_key, value in raw_items:
-        if shard_build and len(pending) >= 24:
+        if len(pending) >= 24:
             _flush_pending()
-        if shard_build and shard_bytes >= _TRANSFORMER_SHARD_LIMIT_BYTES:
+        if shard_bytes >= _TRANSFORMER_SHARD_LIMIT_BYTES:
             _save_shard()
         if not pytorch_key.startswith("model.diffusion_model."):
             continue
@@ -1195,13 +1188,12 @@ def build_transformer_cache(
             if q_biases:
                 cache_weights[f"{base_key}.biases"] = q_biases[0]
                 quant_count += 1
-            if shard_build:
-                pending.append(q_weight)
-                pending.append(q_scales)
-                shard_bytes += q_weight.nbytes + q_scales.nbytes
-                if q_biases:
-                    pending.append(q_biases[0])
-                    shard_bytes += q_biases[0].nbytes
+            pending.append(q_weight)
+            pending.append(q_scales)
+            shard_bytes += q_weight.nbytes + q_scales.nbytes
+            if q_biases:
+                pending.append(q_biases[0])
+                shard_bytes += q_biases[0].nbytes
             loaded_count += 1
             continue
 
@@ -1243,30 +1235,20 @@ def build_transformer_cache(
                 stored = _cast_for_cache(stored, target_dtype, mlx_key)
             cache_weights[f"{LAYOUT_KEY_PREFIX}{layout_key}"] = stored
             layout_count += 1
-            if shard_build:
-                pending.append(stored)
-                shard_bytes += stored.nbytes
+            pending.append(stored)
+            shard_bytes += stored.nbytes
         else:
             if target_dtype is not None and value.dtype != target_dtype:
                 value = _cast_for_cache(value, target_dtype, mlx_key)
             cache_weights[mlx_key] = value
-            if shard_build:
-                pending.append(value)
-                shard_bytes += value.nbytes
+            pending.append(value)
+            shard_bytes += value.nbytes
         loaded_count += 1
 
-    if shard_build:
-        # Flush the remainder as the final shard. Metadata is written last, so
-        # an interrupted build (partial shards, no metadata) is treated as
-        # invalid and rebuilt next time.
-        _save_shard()
-        shard_note = f", {shard_index} shards"
-    else:
-        _flush_pending()
-        tmp_cache = cache_file.parent / f".{cache_file.stem}.tmp.safetensors"
-        mx.save_safetensors(str(tmp_cache), cache_weights)
-        os.replace(tmp_cache, cache_file)
-        shard_note = ""
+    # Flush the remainder as the final shard. Metadata is written last, so an
+    # interrupted build (partial shards, no metadata) is treated as invalid
+    # and rebuilt next time.
+    _save_shard()
     del raw_items
     del raw_weights
     gc.collect()
@@ -1276,7 +1258,7 @@ def build_transformer_cache(
     print(
         f"  Built transformer cache: {loaded_count} tensors "
         f"({layout_count} pretransposed, {quant_count} quantized, "
-        f"skipped {skipped_count}{shard_note})"
+        f"skipped {skipped_count}, {shard_index} shards)"
     )
     return loaded_count, layout_count, quant_count
 
@@ -1766,7 +1748,8 @@ def ensure_transformer_cache(
         )
         rebuilt = True
     else:
-        print(f"  Transformer cache: using {cache_file}")
+        n_shards = len(_existing_cache_shards(cache_file))
+        print(f"  Transformer cache: using {cache_file.parent} ({n_shards} shards)")
 
     return TransformerCacheResult(
         cache_path=cache_file,
