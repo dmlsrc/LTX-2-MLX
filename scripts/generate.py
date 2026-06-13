@@ -2104,8 +2104,8 @@ def load_transformer(
             if checkpoint_has_fp8_tensors(weights_path):
                 raise SystemExit(
                     "ERROR: FP8 checkpoints require the weights cache "
-                    "(--weights-cache auto), which dequantizes them at build "
-                    "time; MLX cannot load FP8 tensors directly."
+                    "(--weights-cache auto), which dequantizes them at "
+                    "build time."
                 )
             load_transformer_weights(model, weights_path)
             if bake_dtype is not None:
@@ -2359,8 +2359,8 @@ def load_av_transformer(
             if checkpoint_has_fp8_tensors(weights_path):
                 raise SystemExit(
                     "ERROR: FP8 checkpoints require the weights cache "
-                    "(--weights-cache auto), which dequantizes them at build "
-                    "time; MLX cannot load FP8 tensors directly."
+                    "(--weights-cache auto), which dequantizes them at "
+                    "build time."
                 )
             load_av_transformer_weights(model, weights_path)
             if bake_dtype is not None:

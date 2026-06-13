@@ -485,66 +485,80 @@ def checkpoint_has_fp8_tensors(weights_path: str) -> bool:
     return bool(_FP8_SAFETENSORS_DTYPES & dtypes)
 
 
-def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
-    """Yield ``(key, mx.array)`` from an FP8 safetensors checkpoint.
+def _fp8_scale_companions(
+    header_dtypes: Dict[str, str],
+) -> tuple[set, set, set]:
+    """Classify FP8 keys and their scale companions from a header map.
 
-    Decodes per-tensor through torch (lazy import; MLX cannot read FP8
-    safetensors). FP8 values are exactly representable in both FP16 and
-    BF16 (E4M3: |x| <= 448 with a 3-bit mantissa; E5M2: |x| <= 57344
-    with 2 bits), so plain FP8 tensors transit losslessly into
-    ``value_dtype``. Scaled FP8 (an FP8 ``<name>`` with a
-    ``<name>_scale`` float companion, the vllm/ComfyUI convention) is
-    dequantized in FP32 and rounded once to ``value_dtype``; the scale
-    keys are consumed, not emitted. A ``*_scale`` key whose base is not
-    an FP8 tensor is treated as an ordinary weight. Non-FP8 tensors keep
-    their checkpoint dtype (BF16 transits via FP32 because numpy has no
-    BF16; the roundtrip is exact).
+    Returns ``(fp8_keys, weight_scale_keys, input_scale_keys)``.  Follows
+    the vllm-style static-FP8 convention shipped in Lightricks' ``-fp8``
+    bundles: each FP8 ``<base>.weight`` has scalar F32 companions
+    ``<base>.weight_scale`` (dequant factor) and ``<base>.input_scale``
+    (static activation-quant parameter).  A ``*_scale`` key whose base is
+    not an FP8 tensor (e.g. the AdaLN ``scale_shift_table`` weights) is an
+    ordinary tensor and is left alone.
     """
-    try:
-        import torch
-        from safetensors import safe_open
-    except ImportError as exc:
-        raise RuntimeError(
-            "FP8 checkpoints need torch + safetensors for the one-time "
-            "cache build (MLX has no FP8 dtypes)."
-        ) from exc
-
-    header_dtypes = _safetensors_header_dtypes(weights_path)
     fp8_keys = {
         key
         for key, dtype in header_dtypes.items()
         if dtype in _FP8_SAFETENSORS_DTYPES
     }
     scale_suffix = "_scale"
-    scale_keys = {
+    weight_scale_keys = {
         key
         for key in header_dtypes
         if key.endswith(scale_suffix) and key[: -len(scale_suffix)] in fp8_keys
     }
+    input_scale_keys = set()
+    weight_suffix = ".weight"
+    for key in fp8_keys:
+        if key.endswith(weight_suffix):
+            candidate = key[: -len(weight_suffix)] + ".input_scale"
+            if candidate in header_dtypes:
+                input_scale_keys.add(candidate)
+    return fp8_keys, weight_scale_keys, input_scale_keys
 
-    fp8_torch_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
-    with safe_open(weights_path, framework="pt") as f:
-        for key in sorted(header_dtypes):
-            if key in scale_keys:
-                continue
-            tensor = f.get_tensor(key)
-            if tensor.dtype in fp8_torch_dtypes:
-                scale_key = f"{key}{scale_suffix}"
-                if scale_key in scale_keys:
-                    tensor = tensor.to(torch.float32) * f.get_tensor(
-                        scale_key
-                    ).to(torch.float32)
-                    yield key, mx.array(tensor.numpy()).astype(value_dtype)
-                else:
-                    yield key, mx.array(
-                        tensor.to(torch.float16).numpy()
-                    ).astype(value_dtype)
-            elif tensor.dtype == torch.bfloat16:
-                yield key, mx.array(
-                    tensor.to(torch.float32).numpy()
-                ).astype(mx.bfloat16)
+
+def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
+    """Yield ``(key, mx.array)`` from an FP8 safetensors checkpoint.
+
+    Pure-MLX path: ``mx.load`` maps ``F8_E4M3`` tensors to ``uint8`` and
+    ``mx.from_fp8`` decodes them (verified bit-identical to torch
+    ``float8_e4m3fn`` on every non-NaN code).  FP8 values are exactly
+    representable in both FP16 and BF16, so unscaled tensors transit
+    losslessly into ``value_dtype``; scaled tensors dequantize in FP32
+    (``from_fp8(w) * weight_scale``) and round once.  ``weight_scale``
+    companions are consumed; ``input_scale`` companions are dropped —
+    they parameterize static activation quantization for real FP8 GEMMs,
+    and after weight dequantization activations run at full precision.
+    Everything stays lazy, so the build never holds an eager copy of the
+    checkpoint.  E5M2 is unsupported (``mx.from_fp8`` decodes E4M3 only;
+    no known E5M2 LTX release).
+    """
+    header_dtypes = _safetensors_header_dtypes(weights_path)
+    if any(dtype == "F8_E5M2" for dtype in header_dtypes.values()):
+        raise ValueError(
+            "F8_E5M2 checkpoints are not supported "
+            "(mx.from_fp8 decodes E4M3 only)."
+        )
+    fp8_keys, weight_scale_keys, input_scale_keys = _fp8_scale_companions(
+        header_dtypes
+    )
+
+    raw_weights = mx.load(weights_path)
+    for key, value in raw_weights.items():
+        if key in weight_scale_keys or key in input_scale_keys:
+            continue
+        if key in fp8_keys:
+            scale_key = f"{key}_scale"
+            if scale_key in weight_scale_keys:
+                value = (
+                    mx.from_fp8(value, dtype=mx.float32)
+                    * raw_weights[scale_key].astype(mx.float32)
+                ).astype(value_dtype)
             else:
-                yield key, mx.array(tensor.numpy())
+                value = mx.from_fp8(value, dtype=value_dtype)
+        yield key, value
 
 
 def transformer_cache_paths(
@@ -991,19 +1005,13 @@ def build_transformer_cache(
         if transformer_dtype is None:
             transformer_dtype = mx.bfloat16
         header_dtypes = _safetensors_header_dtypes(weights_path)
-        fp8_keys = {
-            key
-            for key, dtype in header_dtypes.items()
-            if dtype in _FP8_SAFETENSORS_DTYPES
-        }
-        scaled_keys = {
-            key
-            for key in header_dtypes
-            if key.endswith("_scale") and key[: -len("_scale")] in fp8_keys
-        }
+        fp8_keys, weight_scale_keys, input_scale_keys = _fp8_scale_companions(
+            header_dtypes
+        )
         print(
             f"  FP8 checkpoint: dequantizing {len(fp8_keys)} tensors "
-            f"({len(scaled_keys)} with scale companions) to "
+            f"({len(weight_scale_keys)} weight scales applied, "
+            f"{len(input_scale_keys)} input scales dropped) to "
             f"{_dtype_to_payload_name(transformer_dtype)} for the cache"
         )
         raw_items = _iter_fp8_checkpoint_weights(weights_path, transformer_dtype)
