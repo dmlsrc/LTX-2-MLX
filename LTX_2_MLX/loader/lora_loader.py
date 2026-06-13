@@ -352,27 +352,34 @@ def fuse_loras_into_model(
 
     applied = set()
 
+    # Each fused weight is computed, evaluated, and written back one at a time,
+    # so the old weight frees the moment it is replaced and the FP32 delta +
+    # weight-copy temporaries free before the next weight. Crucially we do NOT
+    # hold a flattened parameter list across the loop -- that would pin every
+    # old array and pile up a second full copy of the model. We snapshot only
+    # the keys to fuse, then navigate to each weight on demand.
+    def _navigate(root, key: str):
+        parts = key.split(".")
+        obj = root
+        for p in parts[:-1]:
+            obj = obj[int(p)] if p.isdigit() else getattr(obj, p)
+        return obj, parts[-1]
+
     # 2a. Standard params (attention, AdaLN, non-pretransposed FF, gates).
-    chunk: list = []
-    chunk_bytes = 0
-    for key, weight in tree_flatten(target.parameters()):
-        if key not in table:
-            continue
-        new = fused_value(weight, delta_fp32(key), key)
-        chunk.append((key, new))
-        chunk_bytes += new.nbytes
+    fuse_keys = [k for k, _ in tree_flatten(target.parameters()) if k in table]
+    for n, key in enumerate(fuse_keys):
+        obj, leaf = _navigate(target, key)
+        new = fused_value(getattr(obj, leaf), delta_fp32(key), key)
+        mx.eval(new)
+        setattr(obj, leaf, new)
         applied.add(key)
-        if chunk_bytes >= 2 * 1024**3:
-            target.load_weights(chunk, strict=False)
-            mx.eval(target.parameters())
-            chunk, chunk_bytes = [], 0
-    if chunk:
-        target.load_weights(chunk, strict=False)
-        mx.eval(target.parameters())
+        if (n + 1) % 32 == 0:
+            mx.clear_cache()
+    mx.clear_cache()
 
     # 2b. Pretransposed FF slots live in private _project_*_weight_t attrs
     # (the original .weight was deleted at cache install), so they are absent
-    # from parameters() and handled here by direct, chunked attr replacement.
+    # from parameters() and handled here by direct attr replacement.
     blocks = getattr(target, "transformer_blocks", []) or []
     ff_slots = (
         ("ff", "_project_in_weight_t", "ff.project_in.proj.weight"),
@@ -380,7 +387,7 @@ def fuse_loras_into_model(
         ("audio_ff", "_project_in_weight_t", "audio_ff.project_in.proj.weight"),
         ("audio_ff", "_project_out_weight_t", "audio_ff.project_out.weight"),
     )
-    pending = []
+    since_clear = 0
     for i, blk in enumerate(blocks):
         for mod_name, attr, suffix in ff_slots:
             ff = getattr(blk, mod_name, None)
@@ -392,14 +399,15 @@ def fuse_loras_into_model(
             mlx_key = f"transformer_blocks.{i}.{suffix}"
             if mlx_key not in table:
                 continue
-            setattr(ff, attr, fused_value(wt, delta_fp32(mlx_key), mlx_key))
-            pending.append(getattr(ff, attr))
+            new = fused_value(wt, delta_fp32(mlx_key), mlx_key)
+            mx.eval(new)
+            setattr(ff, attr, new)
             applied.add(mlx_key)
-            if len(pending) >= 32:
-                mx.eval(pending)
-                pending = []
-    if pending:
-        mx.eval(pending)
+            since_clear += 1
+            if since_clear >= 32:
+                mx.clear_cache()
+                since_clear = 0
+    mx.clear_cache()
 
     # 3. Fail loud if any resolved LoRA target had no home in this model/layout
     # (e.g. an unsupported pretransposed attention layout), rather than
