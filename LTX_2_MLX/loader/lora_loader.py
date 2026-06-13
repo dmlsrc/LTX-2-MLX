@@ -11,16 +11,56 @@ import mlx.core as mx
 from mlx.utils import tree_flatten
 
 
+# Categories a LoRA target can be filtered by, on two orthogonal axes:
+#   branch -- video / audio / cross (the video<->audio bridge attentions)
+#   module type -- attn (to_q/k/v/out) / gate (to_gate_logits) / ff
+# Each target carries one branch tag and one type tag; excluding any tag drops
+# every target that carries it (e.g. exclude {audio, cross} keeps a video-only
+# style without touching the audio branch; exclude {ff} drops feed-forward
+# everywhere). Classification is by substring on the MLX weight key, whose
+# module names survive conversion.
+_LORA_CATEGORIES = frozenset({"video", "audio", "cross", "attn", "gate", "ff"})
+
+
+def _lora_key_categories(mlx_key: str) -> set:
+    cats = set()
+    if "video_to_audio" in mlx_key or "audio_to_video" in mlx_key:
+        cats.add("cross")
+    elif "audio_attn" in mlx_key or "audio_ff" in mlx_key:
+        cats.add("audio")
+    else:
+        cats.add("video")
+    if "to_gate_logits" in mlx_key:
+        cats.add("gate")
+    elif any(t in mlx_key for t in ("to_q", "to_k", "to_v", "to_out")):
+        cats.add("attn")
+    elif "ff" in mlx_key:
+        cats.add("ff")
+    return cats
+
+
 @dataclass
 class LoRAConfig:
-    """Configuration for a single LoRA adapter."""
+    """Configuration for a single LoRA adapter.
+
+    ``exclude`` lists categories (see ``_LORA_CATEGORIES``) whose targets are
+    dropped from this adapter's fusion -- e.g. ``("audio", "cross")`` applies
+    only the video-branch style and leaves the audio path stock.
+    """
 
     path: str
     strength: float = 1.0
+    exclude: Tuple[str, ...] = ()
 
     def __post_init__(self):
         if not -2.0 <= self.strength <= 2.0:
             raise ValueError(f"LoRA strength should be between -2.0 and 2.0, got {self.strength}")
+        bad = sorted(set(self.exclude) - _LORA_CATEGORIES)
+        if bad:
+            raise ValueError(
+                f"Unknown LoRA exclude categories {bad}; "
+                f"valid: {sorted(_LORA_CATEGORIES)}"
+            )
 
 
 def load_lora_weights(path: str) -> Dict[str, mx.array]:
@@ -337,11 +377,14 @@ def fuse_loras_into_model(
     table: Dict[str, list] = {}
     unresolved = 0   # LoRA pairs whose key did not map to any model weight name
     bad_alpha = 0    # rejected non-finite / out-of-range alpha values
+    excluded = 0     # targets dropped by a cfg.exclude category filter
     for cfg in lora_configs:
         lw = load_lora_weights(cfg.path)
         meta_alpha = _lora_metadata_alpha(cfg.path)
         ab = _lora_base_to_ab(lw)
+        exclude = set(cfg.exclude)
         scales_seen = set()
+        cfg_excluded = 0
         for base, (ka, kb) in ab.items():
             a = lw[ka]
             rank = a.shape[0] if a.ndim >= 1 else 0
@@ -369,7 +412,11 @@ def fuse_loras_into_model(
             if mlx_key is None:
                 unresolved += 1
                 continue
+            if exclude and (_lora_key_categories(mlx_key) & exclude):
+                cfg_excluded += 1
+                continue
             table.setdefault(mlx_key, []).append((lw[ka], lw[kb], scale))
+        excluded += cfg_excluded
         if verbose:
             srep = sorted(scales_seen)
             srep_str = (
@@ -377,9 +424,13 @@ def fuse_loras_into_model(
                 else f"{len(srep)} distinct ({min(srep):.4f}-{max(srep):.4f})"
             )
             meta_note = "" if meta_alpha is None else f", meta_alpha={meta_alpha:g}"
+            excl_note = (
+                "" if not exclude
+                else f", excluding {sorted(exclude)} ({cfg_excluded} dropped)"
+            )
             print(
                 f"  LoRA {Path(cfg.path).name}: strength={cfg.strength}, "
-                f"{len(ab)} targets, scale={srep_str}{meta_note}"
+                f"{len(ab)} targets, scale={srep_str}{meta_note}{excl_note}"
             )
 
     resolved = len(table)
@@ -480,6 +531,8 @@ def fuse_loras_into_model(
     coverage = placed / resolved
     if verbose:
         bits = [f"placed {placed}/{resolved}"]
+        if excluded:
+            bits.append(f"{excluded} excluded")
         if shape_skipped:
             bits.append(f"{len(shape_skipped)} shape-skipped")
         if unresolved:

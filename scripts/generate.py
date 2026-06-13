@@ -5435,6 +5435,18 @@ def main():
              "Use for LoRAs that intentionally modify only a few weights."
     )
     parser.add_argument(
+        "--lora-exclude",
+        type=str,
+        action="append",
+        default=None,
+        help="Comma-separated LoRA target categories to drop from the fuse. "
+             "Branches: video, audio, cross (the video<->audio bridge). "
+             "Module types: attn, gate, ff. Example: 'audio,cross' applies "
+             "only the video-branch style and leaves the audio path stock. "
+             "Repeat to match the order of --lora; a single value applies to "
+             "all."
+    )
+    parser.add_argument(
         "--stg-scale",
         type=float,
         default=0.0,
@@ -5676,8 +5688,9 @@ def main():
             f"to {resolved_num_frames} frames"
         )
 
-    # Build LoRA configs from (possibly repeated) --lora / --lora-strength.
-    # One strength applies to all; N strengths pair with N LoRAs in order.
+    # Build LoRA configs from (possibly repeated) --lora / --lora-strength /
+    # --lora-exclude. A single strength/exclude applies to all LoRAs; N values
+    # pair with N LoRAs in order.
     cli_lora_configs = None
     if args.lora:
         strengths = args.lora_strength or [1.0]
@@ -5689,9 +5702,31 @@ def main():
                 f"{len(strengths)} --lora-strength; pass one strength or one "
                 "per LoRA."
             )
-        cli_lora_configs = [
-            LoRAConfig(path=p, strength=s) for p, s in zip(args.lora, strengths)
-        ]
+
+        raw_excl = args.lora_exclude or []
+        if len(raw_excl) == 0:
+            excludes = [()] * len(args.lora)
+        elif len(raw_excl) == 1:
+            one = tuple(t.strip() for t in raw_excl[0].split(",") if t.strip())
+            excludes = [one] * len(args.lora)
+        elif len(raw_excl) == len(args.lora):
+            excludes = [
+                tuple(t.strip() for t in e.split(",") if t.strip())
+                for e in raw_excl
+            ]
+        else:
+            raise SystemExit(
+                f"ERROR: got {len(args.lora)} --lora but "
+                f"{len(raw_excl)} --lora-exclude; pass one or one per LoRA."
+            )
+
+        try:
+            cli_lora_configs = [
+                LoRAConfig(path=p, strength=s, exclude=ex)
+                for p, s, ex in zip(args.lora, strengths, excludes)
+            ]
+        except ValueError as exc:
+            raise SystemExit(f"ERROR: {exc}")
 
     generate_video(
         distilled_lora=args.distilled_lora,
