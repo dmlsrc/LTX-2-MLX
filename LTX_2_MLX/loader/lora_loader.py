@@ -320,6 +320,38 @@ def apply_lora_to_model(
 # otherwise scale the delta into garbage. Mirrors the mflux loader's filter.
 _LORA_ALPHA_MAX = 1.0e6
 
+# Max finite magnitude per float cache dtype. LoRA fusion runs in float32 and is
+# cast back to the weight's dtype; a fused value beyond that dtype's range casts
+# silently to +-inf, which becomes NaN in the forward pass and renders as a flat
+# (green) frame. An overflowed weight never produces useful output, so the fuse
+# fails fast here -- for ANY dtype -- rather than after a full generation.
+_DTYPE_MAX_FINITE = {
+    mx.float16: 65504.0,
+    mx.bfloat16: 3.3895313892515355e38,
+    mx.float32: 3.4028234663852886e38,
+}
+
+
+def _guard_fused_range(fused_f32: mx.array, target_dtype, mlx_key: str) -> None:
+    """Raise if the float32 fused weight is non-finite or would overflow
+    ``target_dtype`` when cast back. Overflow -> inf -> NaN -> degenerate
+    output, so this is unconditionally an error."""
+    peak = float(mx.max(mx.abs(fused_f32)).item())
+    if not math.isfinite(peak):
+        raise ValueError(
+            f"LoRA fusion produced a non-finite weight at '{mlx_key}' -- the "
+            f"base weight or the delta already overflowed float32. Lower "
+            f"--lora-strength or check the adapter."
+        )
+    limit = _DTYPE_MAX_FINITE.get(target_dtype)
+    if limit is not None and peak > limit:
+        raise ValueError(
+            f"LoRA fusion overflows {target_dtype} at '{mlx_key}': fused "
+            f"|max|={peak:.4g} exceeds the dtype ceiling {limit:.4g}. Cache the "
+            f"transformer in a wider dtype (--transformer-dtype bf16) or lower "
+            f"--lora-strength."
+        )
+
 
 def _lora_metadata_alpha(path: str) -> Optional[float]:
     """File-level LoRA alpha from safetensors metadata, or None.
@@ -485,12 +517,15 @@ def fuse_loras_into_model(
             acc = term if acc is None else acc + term
         return acc
 
-    def fused_value(weight: mx.array, d: mx.array) -> Optional[mx.array]:
+    def fused_value(weight: mx.array, d: mx.array, mlx_key: str) -> Optional[mx.array]:
         if tuple(weight.shape) == tuple(d.shape):
-            return (weight.astype(mx.float32) + d).astype(weight.dtype)
-        if tuple(weight.shape) == tuple(reversed(d.shape)):  # pretransposed slot
-            return (weight.astype(mx.float32) + d.T).astype(weight.dtype)
-        return None  # shape mismatch -> skip, counted below
+            fused = weight.astype(mx.float32) + d
+        elif tuple(weight.shape) == tuple(reversed(d.shape)):  # pretransposed slot
+            fused = weight.astype(mx.float32) + d.T
+        else:
+            return None  # shape mismatch -> skip, counted below
+        _guard_fused_range(fused, weight.dtype, mlx_key)
+        return fused.astype(weight.dtype)
 
     # Navigate to each weight on demand rather than holding a flattened
     # parameter list across the loop (that would pin every old array and pile
@@ -511,7 +546,7 @@ def fuse_loras_into_model(
     fuse_keys = [k for k, _ in tree_flatten(target.parameters()) if k in table]
     for n, key in enumerate(fuse_keys):
         obj, leaf = _navigate(target, key)
-        new = fused_value(getattr(obj, leaf), delta_fp32(key))
+        new = fused_value(getattr(obj, leaf), delta_fp32(key), key)
         if new is None:
             shape_skipped.append(key)
             continue
@@ -544,7 +579,7 @@ def fuse_loras_into_model(
             mlx_key = f"transformer_blocks.{i}.{suffix}"
             if mlx_key not in table:
                 continue
-            new = fused_value(wt, delta_fp32(mlx_key))
+            new = fused_value(wt, delta_fp32(mlx_key), mlx_key)
             if new is None:
                 shape_skipped.append(mlx_key)
                 continue
