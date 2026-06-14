@@ -17,8 +17,12 @@ from LTX_2_MLX.loader.weight_converter import (
 )
 from LTX_2_MLX.loader.lora_loader import (
     LoRAConfig,
+    format_lora_stage_scale_lines,
     fuse_loras_into_model,
     get_lora_target_keys,
+    lora_configs_for_stage,
+    lora_configs_for_stage_delta,
+    lora_configs_have_stage_strengths,
     restore_lora_base_weights,
     snapshot_lora_base_weights,
 )
@@ -302,6 +306,124 @@ class TestLoRAConfig:
         assert config1.strength == -2.0
         assert config2.strength == 2.0
 
+    def test_stage_strength_defaults_to_scalar_strength(self):
+        """Test stage strengths fall back to the scalar strength."""
+        config = LoRAConfig(path="/path", strength=0.4)
+
+        assert not config.has_stage_strengths()
+        assert config.strength_for_stage(1) == 0.4
+        assert config.strength_for_stage(2) == 0.4
+
+    def test_stage_strength_overrides(self):
+        """Test per-stage LoRA strengths override scalar strength."""
+        config = LoRAConfig(
+            path="/path",
+            strength=0.4,
+            stage_1_strength=0.25,
+            stage_2_strength=0.75,
+        )
+
+        assert config.has_stage_strengths()
+        assert config.strength_for_stage(1) == 0.25
+        assert config.strength_for_stage(2) == 0.75
+
+    def test_rejects_out_of_range_stage_strengths(self):
+        """Test stage strength validation (-2.0 to 2.0)."""
+        with pytest.raises(ValueError):
+            LoRAConfig(path="/path", stage_1_strength=3.0)
+
+        with pytest.raises(ValueError):
+            LoRAConfig(path="/path", stage_2_strength=-3.0)
+
+    def test_rejects_invalid_stage(self):
+        """Test only stages 1 and 2 are accepted."""
+        config = LoRAConfig(path="/path")
+
+        with pytest.raises(ValueError, match="stage must be 1 or 2"):
+            config.strength_for_stage(3)
+
+    def test_lora_configs_have_stage_strengths(self):
+        """Test stage-strength detection."""
+        configs = [
+            LoRAConfig(path="/plain", strength=0.8),
+            LoRAConfig(path="/stage", strength=0.8, stage_2_strength=0.5),
+        ]
+
+        assert lora_configs_have_stage_strengths(configs)
+        assert not lora_configs_have_stage_strengths(configs[:1])
+        assert not lora_configs_have_stage_strengths(None)
+
+    def test_lora_configs_for_stage_uses_fallback_and_filters_zero(self):
+        """Test stage config derivation keeps default behavior unless overridden."""
+        configs = [
+            LoRAConfig(path="/plain", strength=0.8, exclude=("audio",)),
+            LoRAConfig(path="/stage", strength=0.7, stage_1_strength=0.0, stage_2_strength=0.5),
+        ]
+
+        stage_1 = lora_configs_for_stage(configs, 1)
+        stage_2 = lora_configs_for_stage(configs, 2)
+
+        assert [(cfg.path, cfg.strength, cfg.exclude) for cfg in stage_1] == [
+            ("/plain", 0.8, ("audio",)),
+        ]
+        assert [(cfg.path, cfg.strength, cfg.exclude) for cfg in stage_2] == [
+            ("/plain", 0.8, ("audio",)),
+            ("/stage", 0.5, ()),
+        ]
+
+    def test_lora_configs_for_stage_delta(self):
+        """Test stage deltas are computed from resolved strengths."""
+        configs = [
+            LoRAConfig(path="/unchanged", strength=0.8),
+            LoRAConfig(path="/increase", strength=0.7, stage_1_strength=0.25, stage_2_strength=0.5),
+            LoRAConfig(path="/decrease", strength=0.7, stage_1_strength=0.5, stage_2_strength=0.25),
+        ]
+
+        delta = lora_configs_for_stage_delta(configs, from_stage=1, to_stage=2)
+
+        assert [(cfg.path, cfg.strength) for cfg in delta] == [
+            ("/increase", 0.25),
+            ("/decrease", -0.25),
+        ]
+
+    def test_format_lora_stage_scale_lines(self):
+        """Test staged LoRA scale logs include stage totals and changes."""
+        configs = [
+            LoRAConfig(path="/loras/unchanged.safetensors", strength=0.8),
+            LoRAConfig(
+                path="/loras/increase.safetensors",
+                strength=0.7,
+                stage_1_strength=0.25,
+                stage_2_strength=0.5,
+            ),
+            LoRAConfig(
+                path="/loras/decrease.safetensors",
+                strength=0.7,
+                stage_1_strength=0.5,
+                stage_2_strength=0.25,
+            ),
+        ]
+
+        assert format_lora_stage_scale_lines(configs, 1) == [
+            "    unchanged.safetensors: total=0.8000",
+            "    increase.safetensors: total=0.2500",
+            "    decrease.safetensors: total=0.5000",
+        ]
+        assert format_lora_stage_scale_lines(configs, 2, from_stage=1) == [
+            "    increase.safetensors: total=0.5000, change=+0.2500",
+            "    decrease.safetensors: total=0.2500, change=-0.2500",
+        ]
+        assert format_lora_stage_scale_lines(
+            configs,
+            2,
+            from_stage=1,
+            include_unchanged=True,
+        ) == [
+            "    unchanged.safetensors: total=0.8000, change=+0.0000",
+            "    increase.safetensors: total=0.5000, change=+0.2500",
+            "    decrease.safetensors: total=0.2500, change=-0.2500",
+        ]
+
 
 class TinyLoRALinear(nn.Module):
     def __init__(self, shape, dtype=mx.float32):
@@ -337,7 +459,7 @@ class TinyLoRAModel(nn.Module):
 class TestFuseLorasIntoModel:
     """Tests for the unified model-level LoRA fuser."""
 
-    def test_converts_ff_key_and_applies_alpha(self, tmp_path):
+    def test_converts_ff_key_and_ignores_alpha(self, tmp_path):
         path = tmp_path / "ff_lora.safetensors"
         mx.save_safetensors(
             str(path),
@@ -364,12 +486,85 @@ class TestFuseLorasIntoModel:
 
         fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
 
-        expected = mx.array([[1.5, 3.0], [2.0, 4.0]], dtype=mx.float32)
+        expected = mx.array([[3.0, 6.0], [4.0, 8.0]], dtype=mx.float32)
         assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
         assert model._lora_restore_cache_source["valid"] is True
         assert len(model._lora_restore_cache_source["persistent_loras"]) == 1
 
-    def test_rejects_fused_value_outside_target_dtype(self, tmp_path):
+    def test_fuses_bfloat16_safetensors_lora(self, tmp_path):
+        path = tmp_path / "bf16_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "transformer_blocks.0.ff.project_out.lora_A.weight": mx.array(
+                    [[1.0, 2.0]], dtype=mx.bfloat16
+                ),
+                "transformer_blocks.0.ff.project_out.lora_B.weight": mx.array(
+                    [[3.0], [4.0]], dtype=mx.bfloat16
+                ),
+            },
+        )
+        model = TinyLoRAModel()
+
+        fuse_loras_into_model(
+            model,
+            [LoRAConfig(str(path))],
+            verbose=False,
+            lora_load_mode="stream",
+        )
+
+        expected = mx.array([[3.0, 6.0], [4.0, 8.0]], dtype=mx.float32)
+        assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
+
+    def test_rejects_invalid_lora_load_mode(self, tmp_path):
+        path = tmp_path / "invalid_mode_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "transformer_blocks.0.ff.project_out.lora_A.weight": mx.array(
+                    [[1.0, 0.0]], dtype=mx.float32
+                ),
+                "transformer_blocks.0.ff.project_out.lora_B.weight": mx.array(
+                    [[2.0], [3.0]], dtype=mx.float32
+                ),
+            },
+        )
+        model = TinyLoRAModel()
+
+        with pytest.raises(ValueError, match="lora_load_mode"):
+            fuse_loras_into_model(
+                model,
+                [LoRAConfig(str(path))],
+                verbose=False,
+                lora_load_mode="sideways",
+            )
+
+    def test_fused_range_guard_is_disabled_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("LTX_LORA_FUSE_RANGE_GUARD", raising=False)
+        path = tmp_path / "overflow_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "transformer_blocks.0.attn1.to_q.lora_A.weight": mx.array(
+                    [[70000.0]], dtype=mx.float32
+                ),
+                "transformer_blocks.0.attn1.to_q.lora_B.weight": mx.array(
+                    [[1.0]], dtype=mx.float32
+                ),
+            },
+        )
+        model = TinyLoRAModel()
+
+        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
+
+        assert bool(mx.isinf(model.transformer_blocks[0].attn1.to_q.weight).item())
+
+    def test_rejects_fused_value_outside_target_dtype_when_guard_enabled(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("LTX_LORA_FUSE_RANGE_GUARD", "1")
         path = tmp_path / "overflow_lora.safetensors"
         mx.save_safetensors(
             str(path),
@@ -491,7 +686,7 @@ class TestFuseLorasIntoModel:
             "video_ff_quantize_bits": None,
             "persistent_loras": (),
         }
-        expected = mx.array([[1.5, 3.0], [2.0, 4.0]], dtype=mx.float32)
+        expected = mx.array([[3.0, 6.0], [4.0, 8.0]], dtype=mx.float32)
 
         fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
         snapshot = snapshot_lora_base_weights(model)

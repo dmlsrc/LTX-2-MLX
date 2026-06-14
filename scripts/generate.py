@@ -52,6 +52,7 @@ from LTX_2_MLX.loader import (
     TRANSFORMER_CACHE_QUANTIZE_OFF,
     checkpoint_has_fp8_tensors,
     ensure_weight_family_caches,
+    lora_configs_have_stage_strengths,
     load_av_transformer_weights,
     load_transformer_weights,
     load_transformer_weights_cached,
@@ -3535,18 +3536,57 @@ def generate_video(
             print("  Skipping model load (placeholder mode)")
     timings.mark("transformer load")
 
+    stage_scoped_loras_requested = lora_configs_have_stage_strengths(lora_configs)
+    stage_scoped_loras_active = stage_scoped_loras_requested and (
+        pipeline_type == "two-stage" or distilled_two_stage_requested
+    )
+
     # Apply LoRA(s) if provided. Runtime in-place fusion with a key-translation
     # table (raw LoRA names -> MLX weight keys) that is transpose- and
     # pretranspose-aware and never holds a second full copy of the weights.
     # Supports multiple LoRAs at independent strengths.
     if lora_configs is None and lora_path:
         lora_configs = [LoRAConfig(path=lora_path, strength=lora_strength)]
+        stage_scoped_loras_requested = False
+        stage_scoped_loras_active = False
     if lora_configs and model is not None:
+        if stage_scoped_loras_active:
+            print(
+                f"\n  Deferring {len(lora_configs)} LoRA(s) to per-stage fusion"
+            )
+        else:
+            if stage_scoped_loras_requested:
+                print(
+                    "  WARNING: LoRA stage strengths were provided outside a "
+                    "two-stage mode; using default --lora-strength values."
+                )
+            print(
+                f"\n  Fusing {len(lora_configs)} LoRA(s) into the loaded model:"
+            )
+            lora_fuse_start = time.perf_counter()
+            fuse_loras_into_model(model, lora_configs, allow_partial=lora_allow_partial)
+            lora_fuse_elapsed = time.perf_counter() - lora_fuse_start
+            timings.extend([("lora fuse", lora_fuse_elapsed)])
+            print(f"  LoRA fusion complete in {format_duration(lora_fuse_elapsed)}")
+
+    stage_managed_lora_configs = lora_configs if stage_scoped_loras_active else None
+    if stage_scoped_loras_active and distilled_lora:
+        # If another LoRA requested per-stage strengths, route the legacy
+        # distilled LoRA through the same staged mechanism as a stage-2-only
+        # adapter. This preserves the old no-stage-flags behavior while
+        # avoiding the legacy stage-2 special case being skipped.
+        stage_managed_lora_configs = list(lora_configs or ()) + [
+            LoRAConfig(
+                path=distilled_lora,
+                strength=distilled_lora_scale,
+                stage_1_strength=0.0,
+                stage_2_strength=distilled_lora_scale,
+            )
+        ]
         print(
-            f"\n  Fusing {len(lora_configs)} LoRA(s) into the loaded model:"
+            f"  Distilled LoRA: {distilled_lora} "
+            f"(stage 2 scale {distilled_lora_scale})"
         )
-        fuse_loras_into_model(model, lora_configs, allow_partial=lora_allow_partial)
-        print(f"  LoRA fusion complete")
 
     # Whether to use CFG
     # Distilled models (LTX-2 distilled) are trained without CFG and produce artifacts if CFG > 1.0
@@ -3737,10 +3777,10 @@ def generate_video(
 
         # Create distilled LoRA config if provided
         distilled_lora_config = None
-        if distilled_lora:
+        if distilled_lora and not stage_scoped_loras_active:
             print(f"  Distilled LoRA: {distilled_lora} (scale {distilled_lora_scale})")
             distilled_lora_config = LoRAConfig(path=distilled_lora, strength=distilled_lora_scale)
-        elif pipeline_type == "two-stage":
+        elif pipeline_type == "two-stage" and not stage_scoped_loras_active:
              print("  WARNING: No distilled LoRA provided for two-stage pipeline. Stage 2 quality may be degraded.")
 
         # Create config
@@ -3755,6 +3795,7 @@ def generate_video(
             guidance_rescale=guidance_rescale,
             dtype=compute_dtype,
             distilled_lora_config=distilled_lora_config,
+            stage_lora_configs=stage_managed_lora_configs,
             tiling_config=vae_tiling_config,
             audio_enabled=generate_audio,
         )
@@ -4233,6 +4274,7 @@ def generate_video(
                     positive_audio_encoding=text_audio_encoding,
                     latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
                     decode_video=not _stream_decode,
+                    stage_lora_configs=stage_managed_lora_configs,
                 )
         else:
             print(f"\n[5/5] Running audio-video generation ({num_steps} steps)...")
@@ -5196,6 +5238,22 @@ def main():
         help="Scale for distilled LoRA (default 1.0)"
     )
     parser.add_argument(
+        "--distilled-lora-stage1-scale",
+        "--distilled-lora-strength-stage-1",
+        dest="distilled_lora_stage1_scale",
+        type=float,
+        default=None,
+        help="Optional stage-1 strength for --distilled-lora in two-stage modes."
+    )
+    parser.add_argument(
+        "--distilled-lora-stage2-scale",
+        "--distilled-lora-strength-stage-2",
+        dest="distilled_lora_stage2_scale",
+        type=float,
+        default=None,
+        help="Optional stage-2 strength for --distilled-lora in two-stage modes."
+    )
+    parser.add_argument(
         "--upscale-spatial",
         action="store_true",
         help="Apply 2x spatial upscaling to output (256->512, etc.)"
@@ -5432,6 +5490,24 @@ def main():
         default=None,
         help="LoRA strength (-2.0 to 2.0, default 1.0). Repeat to match the "
              "order of --lora; a single value applies to all."
+    )
+    parser.add_argument(
+        "--lora-stage1-strength",
+        "--lora-strength-stage-1",
+        dest="lora_stage1_strength",
+        type=float,
+        action="append",
+        default=None,
+        help="Optional stage-1 LoRA strength. Repeat to match --lora; a single value applies to all."
+    )
+    parser.add_argument(
+        "--lora-stage2-strength",
+        "--lora-strength-stage-2",
+        dest="lora_stage2_strength",
+        type=float,
+        action="append",
+        default=None,
+        help="Optional stage-2 LoRA strength. Repeat to match --lora; a single value applies to all."
     )
     parser.add_argument(
         "--lora-allow-partial",
@@ -5698,10 +5774,27 @@ def main():
             f"to {resolved_num_frames} frames"
         )
 
+    def _expand_optional_lora_values(values, count: int, option: str):
+        if not values:
+            return [None] * count
+        if len(values) == 1:
+            return values * count
+        if len(values) == count:
+            return values
+        raise SystemExit(
+            f"ERROR: got {count} --lora but {len(values)} {option}; pass one "
+            "value or one per LoRA."
+        )
+
     # Build LoRA configs from (possibly repeated) --lora / --lora-strength /
     # --lora-exclude. A single strength/exclude applies to all LoRAs; N values
-    # pair with N LoRAs in order.
+    # pair with N LoRAs in order. Optional per-stage strengths are ignored in
+    # one-stage modes and activate stage-managed fusion in two-stage modes.
     cli_lora_configs = None
+    if not args.lora and (args.lora_stage1_strength or args.lora_stage2_strength):
+        raise SystemExit(
+            "ERROR: --lora-stage1-strength/--lora-stage2-strength require at least one --lora."
+        )
     if args.lora:
         strengths = args.lora_strength or [1.0]
         if len(strengths) == 1:
@@ -5734,15 +5827,59 @@ def main():
             )
 
         try:
+            stage1_strengths = _expand_optional_lora_values(
+                args.lora_stage1_strength,
+                len(args.lora),
+                "--lora-stage1-strength",
+            )
+            stage2_strengths = _expand_optional_lora_values(
+                args.lora_stage2_strength,
+                len(args.lora),
+                "--lora-stage2-strength",
+            )
             cli_lora_configs = [
-                LoRAConfig(path=p, strength=s, exclude=ex)
-                for p, s, ex in zip(args.lora, strengths, excludes)
+                LoRAConfig(
+                    path=p,
+                    strength=s,
+                    stage_1_strength=s1,
+                    stage_2_strength=s2,
+                    exclude=ex,
+                )
+                for p, s, s1, s2, ex in zip(
+                    args.lora,
+                    strengths,
+                    stage1_strengths,
+                    stage2_strengths,
+                    excludes,
+                )
             ]
         except ValueError as exc:
             raise SystemExit(f"ERROR: {exc}")
 
+    distilled_stage_strength_requested = (
+        args.distilled_lora_stage1_scale is not None
+        or args.distilled_lora_stage2_scale is not None
+    )
+    if distilled_stage_strength_requested and not args.distilled_lora:
+        raise SystemExit(
+            "ERROR: --distilled-lora-stage1-scale/--distilled-lora-stage2-scale require --distilled-lora."
+        )
+    legacy_distilled_lora = args.distilled_lora
+    if args.distilled_lora and distilled_stage_strength_requested:
+        try:
+            distilled_config = LoRAConfig(
+                path=args.distilled_lora,
+                strength=args.distilled_lora_scale,
+                stage_1_strength=args.distilled_lora_stage1_scale,
+                stage_2_strength=args.distilled_lora_stage2_scale,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"ERROR: {exc}")
+        cli_lora_configs = (cli_lora_configs or []) + [distilled_config]
+        legacy_distilled_lora = None
+
     generate_video(
-        distilled_lora=args.distilled_lora,
+        distilled_lora=legacy_distilled_lora,
         distilled_lora_scale=args.distilled_lora_scale,
 
         prompt=args.prompt,

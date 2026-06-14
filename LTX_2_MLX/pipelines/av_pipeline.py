@@ -72,6 +72,15 @@ from ..conditioning.tools import VideoLatentTools, AudioLatentTools
 from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model, Modality
 from ..components.guiders import STGGuider
 from ..components.perturbations import create_batched_stg_config, BatchedPerturbationConfig
+from ..loader import (
+    LoRAConfig,
+    fuse_loras_into_model,
+    format_lora_stage_scale_lines,
+    lora_configs_for_stage,
+    lora_configs_for_stage_delta,
+    restore_lora_base_weights,
+    snapshot_lora_base_weights,
+)
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
@@ -1158,6 +1167,7 @@ class AVPipeline:
         stage_1_sigmas: Optional[Sequence[float]] = None,
         stage_2_sigmas: Optional[Sequence[float]] = None,
         decode_video: bool = True,
+        stage_lora_configs: Optional[List[LoRAConfig]] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate with the distilled AV checkpoint in two stages.
@@ -1237,6 +1247,35 @@ class AVPipeline:
                 progress_message(message)
             else:
                 print(message)
+
+        stage_1_loras = lora_configs_for_stage(stage_lora_configs, 1)
+        stage_2_delta_loras = lora_configs_for_stage_delta(
+            stage_lora_configs,
+            from_stage=1,
+            to_stage=2,
+        )
+        stage_lora_snapshot = None
+        stage_1_lora_elapsed = 0.0
+        stage_2_lora_elapsed = 0.0
+        lora_restore_elapsed = 0.0
+        if stage_1_loras or stage_2_delta_loras:
+            stage_lora_snapshot = snapshot_lora_base_weights(self.transformer)
+        if stage_1_loras:
+            stage_lines = format_lora_stage_scale_lines(stage_lora_configs, 1)
+            if stage_lines:
+                emit_progress_message("  Stage 1 LoRA scales:")
+                for line in stage_lines:
+                    emit_progress_message(line)
+            lora_fuse_start = time.perf_counter()
+            fuse_loras_into_model(
+                self.transformer,
+                stage_1_loras,
+                track_for_restore=False,
+            )
+            stage_1_lora_elapsed = time.perf_counter() - lora_fuse_start
+            emit_progress_message(
+                f"  Stage 1 LoRA fuse complete in {stage_1_lora_elapsed:.1f}s"
+            )
 
         stage_1_height = config.height // 2
         stage_1_width = config.width // 2
@@ -1377,6 +1416,28 @@ class AVPipeline:
         mx.clear_cache()
         upscale_elapsed = time.perf_counter() - upscale_start
 
+        if stage_2_delta_loras:
+            stage_lines = format_lora_stage_scale_lines(
+                stage_lora_configs,
+                2,
+                from_stage=1,
+                include_unchanged=True,
+            )
+            if stage_lines:
+                emit_progress_message("  Stage 2 LoRA scales:")
+                for line in stage_lines:
+                    emit_progress_message(line)
+            lora_fuse_start = time.perf_counter()
+            fuse_loras_into_model(
+                self.transformer,
+                stage_2_delta_loras,
+                track_for_restore=False,
+            )
+            stage_2_lora_elapsed = time.perf_counter() - lora_fuse_start
+            emit_progress_message(
+                f"  Stage 2 LoRA delta fuse complete in {stage_2_lora_elapsed:.1f}s"
+            )
+
         stage_2_pixel_shape = VideoPixelShape(
             batch=1,
             frames=config.num_frames,
@@ -1446,6 +1507,13 @@ class AVPipeline:
             profile_blocks=global_profile_blocks,
         )
         stage_2_elapsed = time.perf_counter() - stage_2_start
+        if stage_lora_snapshot is not None:
+            lora_restore_start = time.perf_counter()
+            restore_lora_base_weights(self.transformer, stage_lora_snapshot)
+            lora_restore_elapsed = time.perf_counter() - lora_restore_start
+            emit_progress_message(
+                f"  LoRA restore complete in {lora_restore_elapsed:.1f}s"
+            )
         post_denoise_start = time.perf_counter()
 
         video_state_2 = video_tools_2.clear_conditioning(video_state_2)
@@ -1518,13 +1586,20 @@ class AVPipeline:
         else:
             audio_decode_elapsed = 0.0
 
-        self.last_timing_sections = [
-            ("pipeline setup", stage_1_start - call_start),
+        setup_elapsed = max(0.0, stage_1_start - call_start - stage_1_lora_elapsed)
+        self.last_timing_sections = [("pipeline setup", setup_elapsed)]
+        if stage_1_lora_elapsed:
+            self.last_timing_sections.append(("stage 1 lora fuse", stage_1_lora_elapsed))
+        self.last_timing_sections.extend([
             ("distilled stage 1 denoise", stage_1_elapsed),
             ("spatial upscale", upscale_elapsed),
-            ("distilled stage 2 denoise", stage_2_elapsed),
-            ("post-denoise prep", post_denoise_elapsed),
-        ]
+        ])
+        if stage_2_lora_elapsed:
+            self.last_timing_sections.append(("stage 2 lora delta fuse", stage_2_lora_elapsed))
+        self.last_timing_sections.append(("distilled stage 2 denoise", stage_2_elapsed))
+        if lora_restore_elapsed:
+            self.last_timing_sections.append(("lora restore", lora_restore_elapsed))
+        self.last_timing_sections.append(("post-denoise prep", post_denoise_elapsed))
         if decode_video:
             self.last_timing_sections.append(("vae decode", decode_elapsed))
         if audio_decode_elapsed:
@@ -1548,6 +1623,7 @@ class AVPipeline:
         burn_stage1_rng: bool = True,
         decode_video: bool = True,
         stage2_state_probe: Optional[Callable[[LatentState, Optional[LatentState], mx.array], None]] = None,
+        stage_lora_configs: Optional[List[LoRAConfig]] = None,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Resume the distilled two-stage pipeline from saved stage-1 latents.
@@ -1649,6 +1725,28 @@ class AVPipeline:
                 progress_message(message)
             else:
                 print(message)
+
+        stage_2_loras = lora_configs_for_stage(stage_lora_configs, 2)
+        stage_lora_snapshot = None
+        stage_2_lora_elapsed = 0.0
+        lora_restore_elapsed = 0.0
+        if stage_2_loras:
+            stage_lora_snapshot = snapshot_lora_base_weights(self.transformer)
+            stage_lines = format_lora_stage_scale_lines(stage_lora_configs, 2)
+            if stage_lines:
+                emit_progress_message("  Stage 2 LoRA scales:")
+                for line in stage_lines:
+                    emit_progress_message(line)
+            lora_fuse_start = time.perf_counter()
+            fuse_loras_into_model(
+                self.transformer,
+                stage_2_loras,
+                track_for_restore=False,
+            )
+            stage_2_lora_elapsed = time.perf_counter() - lora_fuse_start
+            emit_progress_message(
+                f"  Stage 2 LoRA fuse complete in {stage_2_lora_elapsed:.1f}s"
+            )
 
         stage_1_video_latent = stage_1_video_latent.astype(config.dtype)
         stage_1_audio_latent_for_save = None
@@ -1756,6 +1854,13 @@ class AVPipeline:
             profile_blocks=profile_blocks,
         )
         stage_2_elapsed = time.perf_counter() - stage_2_start
+        if stage_lora_snapshot is not None:
+            lora_restore_start = time.perf_counter()
+            restore_lora_base_weights(self.transformer, stage_lora_snapshot)
+            lora_restore_elapsed = time.perf_counter() - lora_restore_start
+            emit_progress_message(
+                f"  LoRA restore complete in {lora_restore_elapsed:.1f}s"
+            )
         post_denoise_start = time.perf_counter()
 
         video_state_2 = video_tools_2.clear_conditioning(video_state_2)
@@ -1826,12 +1931,17 @@ class AVPipeline:
         else:
             audio_decode_elapsed = 0.0
 
-        self.last_timing_sections = [
-            ("pipeline setup", upscale_start - call_start),
+        setup_elapsed = max(0.0, upscale_start - call_start - stage_2_lora_elapsed)
+        self.last_timing_sections = [("pipeline setup", setup_elapsed)]
+        if stage_2_lora_elapsed:
+            self.last_timing_sections.append(("stage 2 lora fuse", stage_2_lora_elapsed))
+        self.last_timing_sections.extend([
             ("spatial upscale", upscale_elapsed),
             ("distilled stage 2 denoise", stage_2_elapsed),
-            ("post-denoise prep", post_denoise_elapsed),
-        ]
+        ])
+        if lora_restore_elapsed:
+            self.last_timing_sections.append(("lora restore", lora_restore_elapsed))
+        self.last_timing_sections.append(("post-denoise prep", post_denoise_elapsed))
         if decode_video:
             self.last_timing_sections.append(("vae decode", decode_elapsed))
         if audio_decode_elapsed:

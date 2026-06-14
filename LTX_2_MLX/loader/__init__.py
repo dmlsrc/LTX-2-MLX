@@ -39,6 +39,10 @@ from .lora_loader import (
     snapshot_lora_base_weights,
     restore_lora_base_weights,
     fuse_loras_into_model,
+    format_lora_stage_scale_lines,
+    lora_configs_for_stage,
+    lora_configs_for_stage_delta,
+    lora_configs_have_stage_strengths,
     get_lora_target_keys,
     LORA_TARGET_MODULES,
 )
@@ -84,6 +88,10 @@ __all__ = [
     "snapshot_lora_base_weights",
     "restore_lora_base_weights",
     "fuse_loras_into_model",
+    "format_lora_stage_scale_lines",
+    "lora_configs_for_stage",
+    "lora_configs_for_stage_delta",
+    "lora_configs_have_stage_strengths",
     "get_lora_target_keys",
     "LORA_TARGET_MODULES",
     # Registry

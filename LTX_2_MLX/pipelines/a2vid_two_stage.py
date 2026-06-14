@@ -7,6 +7,7 @@ denoising). Stage 2 upsamples 2x and refines with distilled sigmas.
 The original audio waveform is returned as-is (not VAE-decoded) for fidelity.
 """
 
+import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
@@ -42,6 +43,9 @@ from ..model.audio_vae import AudioDecoder, Vocoder
 from ..loader.lora_loader import (
     LoRAConfig,
     fuse_loras_into_model,
+    format_lora_stage_scale_lines,
+    lora_configs_for_stage,
+    lora_configs_for_stage_delta,
     restore_lora_base_weights,
     snapshot_lora_base_weights,
 )
@@ -69,6 +73,7 @@ class A2VidConfig:
 
     # LoRA for stage 2 refinement
     distilled_lora_config: Optional[LoRAConfig] = None
+    stage_lora_configs: Optional[List[LoRAConfig]] = None
 
     tiling_config: Optional[TilingConfig] = None
     dtype: mx.Dtype = mx.bfloat16
@@ -308,6 +313,32 @@ class A2VidPipelineTwoStage:
         images = images or []
         mx.random.seed(config.seed)
 
+        stage_1_loras = lora_configs_for_stage(config.stage_lora_configs, 1)
+        stage_2_delta_loras = lora_configs_for_stage_delta(
+            config.stage_lora_configs,
+            from_stage=1,
+            to_stage=2,
+        )
+        stage_lora_active = bool(stage_1_loras or stage_2_delta_loras)
+        if stage_lora_active and self._original_weights is None:
+            self._original_weights = snapshot_lora_base_weights(self._velocity_model)
+        if stage_1_loras:
+            stage_lines = format_lora_stage_scale_lines(config.stage_lora_configs, 1)
+            if stage_lines:
+                print("  Stage 1 LoRA scales:")
+                for line in stage_lines:
+                    print(line)
+            lora_fuse_start = time.perf_counter()
+            fuse_loras_into_model(
+                self._velocity_model,
+                stage_1_loras,
+                track_for_restore=False,
+            )
+            print(
+                f"  Stage 1 LoRA fuse complete in "
+                f"{time.perf_counter() - lora_fuse_start:.1f}s"
+            )
+
         noiser = GaussianNoiser()
 
         # Load and preserve original audio
@@ -396,14 +427,40 @@ class A2VidPipelineTwoStage:
         upscaled_latent = self.video_encoder.per_channel_statistics.normalize(upscaled_unnorm)
         mx.eval(upscaled_latent)
 
-        # Apply distilled LoRA
-        if config.distilled_lora_config is not None:
+        # Apply stage-specific or legacy stage-2 LoRA if provided.
+        if stage_2_delta_loras:
+            stage_lines = format_lora_stage_scale_lines(
+                config.stage_lora_configs,
+                2,
+                from_stage=1,
+                include_unchanged=True,
+            )
+            if stage_lines:
+                print("  Stage 2 LoRA scales:")
+                for line in stage_lines:
+                    print(line)
+            lora_fuse_start = time.perf_counter()
+            fuse_loras_into_model(
+                self._velocity_model,
+                stage_2_delta_loras,
+                track_for_restore=False,
+            )
+            print(
+                f"  Stage 2 LoRA delta fuse complete in "
+                f"{time.perf_counter() - lora_fuse_start:.1f}s"
+            )
+        elif not stage_lora_active and config.distilled_lora_config is not None:
             if self._original_weights is None:
                 self._original_weights = snapshot_lora_base_weights(self._velocity_model)
+            lora_fuse_start = time.perf_counter()
             fuse_loras_into_model(
                 self._velocity_model,
                 [config.distilled_lora_config],
                 track_for_restore=False,
+            )
+            print(
+                f"  Stage 2 LoRA fuse complete in "
+                f"{time.perf_counter() - lora_fuse_start:.1f}s"
             )
 
         # Stage 2 shapes
@@ -454,7 +511,10 @@ class A2VidPipelineTwoStage:
         )
 
         # Restore weights
-        if config.distilled_lora_config is not None and self._original_weights is not None:
+        if (
+            (stage_lora_active or config.distilled_lora_config is not None)
+            and self._original_weights is not None
+        ):
             restore_lora_base_weights(self._velocity_model, self._original_weights)
             self._original_weights = None
 

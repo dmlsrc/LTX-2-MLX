@@ -1,12 +1,17 @@
 """LoRA (Low-Rank Adaptation) loading and fusion for LTX-2 models."""
 
+import gc
 import json
 import math
+import mmap
+import os
+import struct
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 from mlx.utils import tree_flatten
 
 
@@ -46,6 +51,9 @@ _LORA_FF_PRETRANSPOSE_SLOTS = (
     ("audio_ff", "_project_out_weight_t", "audio_ff.project_out.weight"),
 )
 _LORA_RESTORE_CACHE_ATTR = "_lora_restore_cache_source"
+_LORA_LOAD_MODES = frozenset({"auto", "fast", "stream"})
+_LORA_FAST_LOAD_SAFETY_FACTOR = 1.25
+_LORA_FUSE_RANGE_GUARD_ENV = "LTX_LORA_FUSE_RANGE_GUARD"
 
 
 def _lora_key_categories(mlx_key: str) -> set:
@@ -82,6 +90,10 @@ def _lora_key_categories(mlx_key: str) -> set:
 class LoRAConfig:
     """Configuration for a single LoRA adapter.
 
+    ``strength`` is the default/global adapter strength. Two-stage pipelines can
+    optionally use ``stage_1_strength`` and/or ``stage_2_strength`` to override
+    that default for a specific denoise stage.
+
     ``exclude`` lists categories (see ``_LORA_CATEGORIES``) whose targets are
     dropped from this adapter's fusion -- e.g. ``("audio", "cross")`` applies
     only the video-branch style and leaves the audio path stock.
@@ -89,17 +101,92 @@ class LoRAConfig:
 
     path: str
     strength: float = 1.0
+    stage_1_strength: Optional[float] = None
+    stage_2_strength: Optional[float] = None
     exclude: Tuple[str, ...] = ()
 
     def __post_init__(self):
-        if not -2.0 <= self.strength <= 2.0:
-            raise ValueError(f"LoRA strength should be between -2.0 and 2.0, got {self.strength}")
+        for name, value in (
+            ("strength", self.strength),
+            ("stage_1_strength", self.stage_1_strength),
+            ("stage_2_strength", self.stage_2_strength),
+        ):
+            if value is not None and not -2.0 <= value <= 2.0:
+                raise ValueError(
+                    f"LoRA {name} should be between -2.0 and 2.0, got {value}"
+                )
         bad = sorted(set(self.exclude) - _LORA_CATEGORIES)
         if bad:
             raise ValueError(
                 f"Unknown LoRA exclude categories {bad}; "
                 f"valid: {sorted(_LORA_CATEGORIES)}"
             )
+
+    def has_stage_strengths(self) -> bool:
+        return self.stage_1_strength is not None or self.stage_2_strength is not None
+
+    def strength_for_stage(self, stage: int) -> float:
+        if stage == 1:
+            return self.strength if self.stage_1_strength is None else self.stage_1_strength
+        if stage == 2:
+            return self.strength if self.stage_2_strength is None else self.stage_2_strength
+        raise ValueError(f"LoRA stage must be 1 or 2, got {stage}")
+
+    def with_strength(self, strength: float) -> "LoRAConfig":
+        return LoRAConfig(path=self.path, strength=strength, exclude=self.exclude)
+
+
+def lora_configs_have_stage_strengths(lora_configs: Optional[List[LoRAConfig]]) -> bool:
+    return any(cfg.has_stage_strengths() for cfg in (lora_configs or ()))
+
+
+def lora_configs_for_stage(
+    lora_configs: Optional[List[LoRAConfig]],
+    stage: int,
+) -> List[LoRAConfig]:
+    return [
+        cfg.with_strength(cfg.strength_for_stage(stage))
+        for cfg in (lora_configs or ())
+        if cfg.strength_for_stage(stage) != 0.0
+    ]
+
+
+def lora_configs_for_stage_delta(
+    lora_configs: Optional[List[LoRAConfig]],
+    *,
+    from_stage: int,
+    to_stage: int,
+) -> List[LoRAConfig]:
+    out: List[LoRAConfig] = []
+    for cfg in lora_configs or ():
+        delta = cfg.strength_for_stage(to_stage) - cfg.strength_for_stage(from_stage)
+        if delta != 0.0:
+            out.append(cfg.with_strength(delta))
+    return out
+
+
+def format_lora_stage_scale_lines(
+    lora_configs: Optional[List[LoRAConfig]],
+    stage: int,
+    *,
+    from_stage: Optional[int] = None,
+    include_unchanged: bool = False,
+) -> List[str]:
+    """Return human-readable stage LoRA total/change lines."""
+    lines: List[str] = []
+    for cfg in lora_configs or ():
+        total = cfg.strength_for_stage(stage)
+        name = Path(cfg.path).name
+        if from_stage is None:
+            if total == 0.0 and not include_unchanged:
+                continue
+            lines.append(f"    {name}: total={total:.4f}")
+            continue
+        change = total - cfg.strength_for_stage(from_stage)
+        if change == 0.0 and not include_unchanged:
+            continue
+        lines.append(f"    {name}: total={total:.4f}, change={change:+.4f}")
+    return lines
 
 
 def load_lora_weights(path: str) -> Dict[str, mx.array]:
@@ -113,6 +200,153 @@ def load_lora_weights(path: str) -> Dict[str, mx.array]:
         Dictionary mapping weight names to arrays.
     """
     return dict(mx.load(path))
+
+
+class _DictLoRATensorSource:
+    def __init__(self, weights: Dict[str, mx.array]):
+        self.weights = weights
+
+    def __iter__(self):
+        return iter(self.weights)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.weights
+
+    def keys(self):
+        return self.weights.keys()
+
+    def load(self, key: str) -> mx.array:
+        return self.weights[key]
+
+    def close(self) -> None:
+        self.weights.clear()
+
+
+class _SafetensorsLoRATensorSource:
+    _DTYPES = {
+        "F16": np.dtype("<f2"),
+        "F32": np.dtype("<f4"),
+        "F64": np.dtype("<f8"),
+        "I8": np.dtype("i1"),
+        "I16": np.dtype("<i2"),
+        "I32": np.dtype("<i4"),
+        "I64": np.dtype("<i8"),
+        "U8": np.dtype("u1"),
+        "U16": np.dtype("<u2"),
+        "U32": np.dtype("<u4"),
+        "U64": np.dtype("<u8"),
+    }
+
+    def __init__(self, path: str):
+        self.path = path
+        self._file = open(path, "rb")
+        self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            if len(self._mmap) < 8:
+                raise ValueError("safetensors file is too small")
+            header_len = struct.unpack("<Q", self._mmap[:8])[0]
+            header_start = 8
+            header_end = header_start + header_len
+            if header_end > len(self._mmap):
+                raise ValueError("safetensors header extends past EOF")
+            header = json.loads(self._mmap[header_start:header_end])
+            self._data_start = header_end
+            self._tensors = {
+                key: value
+                for key, value in header.items()
+                if key != "__metadata__"
+            }
+        except Exception:
+            self.close()
+            raise
+
+    def __iter__(self):
+        return iter(self._tensors)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._tensors
+
+    def keys(self):
+        return self._tensors.keys()
+
+    def load(self, key: str) -> mx.array:
+        spec = self._tensors[key]
+        dtype_name = spec["dtype"]
+        shape = tuple(int(x) for x in spec["shape"])
+        start, end = spec["data_offsets"]
+        start += self._data_start
+        end += self._data_start
+        view = memoryview(self._mmap)[start:end]
+        try:
+            if dtype_name == "BF16":
+                np_view = np.frombuffer(view, dtype=np.dtype("<u2")).reshape(shape)
+                bits = mx.array(np_view, dtype=mx.uint16)
+                arr = bits.view(mx.bfloat16)
+                mx.eval(arr)
+                del bits, np_view
+                return arr
+            np_dtype = self._DTYPES.get(dtype_name)
+            if np_dtype is None:
+                raise TypeError(f"Unsupported safetensors dtype {dtype_name}")
+            np_view = np.frombuffer(view, dtype=np_dtype).reshape(shape)
+            arr = mx.array(np_view)
+            mx.eval(arr)
+            del np_view
+            return arr
+        finally:
+            view.release()
+
+    def close(self) -> None:
+        mmap_obj = getattr(self, "_mmap", None)
+        if mmap_obj is not None:
+            self._mmap = None
+            mmap_obj.close()
+        file_obj = getattr(self, "_file", None)
+        if file_obj is not None:
+            self._file = None
+            file_obj.close()
+
+
+def _estimate_lora_bulk_load_bytes(lora_configs: List[LoRAConfig]) -> int:
+    total = 0
+    for cfg in lora_configs:
+        try:
+            total += Path(cfg.path).stat().st_size
+        except OSError:
+            # Unknown size: make auto choose the conservative streaming path.
+            return 2**63 - 1
+    return total
+
+
+def _lora_auto_load_mode(lora_configs: List[LoRAConfig]):
+    from ..model.video_vae.tiling import (
+        default_vae_decode_budget_gb,
+        detect_system_memory_gb,
+    )
+
+    budget_gb = default_vae_decode_budget_gb(detect_system_memory_gb())
+    estimate_bytes = _estimate_lora_bulk_load_bytes(lora_configs)
+    estimate_gb = (estimate_bytes * _LORA_FAST_LOAD_SAFETY_FACTOR) / (1000**3)
+    return ("fast" if estimate_gb <= budget_gb else "stream"), estimate_gb, budget_gb
+
+
+def _resolve_lora_load_mode(lora_configs: List[LoRAConfig], requested: str):
+    if requested not in _LORA_LOAD_MODES:
+        raise ValueError(
+            f"lora_load_mode must be one of {sorted(_LORA_LOAD_MODES)}, got {requested!r}"
+        )
+    if requested != "auto":
+        return requested, None, None
+    return _lora_auto_load_mode(lora_configs)
+
+
+def _open_lora_tensor_source(path: str, load_mode: str):
+    if load_mode == "fast":
+        return _DictLoRATensorSource(load_lora_weights(path))
+    try:
+        return _SafetensorsLoRATensorSource(path)
+    except Exception:
+        return _DictLoRATensorSource(load_lora_weights(path))
 
 
 def _pretransposed_lora_slots(model):
@@ -226,26 +460,27 @@ def _record_persistent_loras(
     setattr(model, _LORA_RESTORE_CACHE_ATTR, source)
 
 
-# Reject alphas that are non-finite or absurdly large; a junk value would
-# otherwise scale the delta into garbage. Mirrors the mflux loader's filter.
-_LORA_ALPHA_MAX = 1.0e6
-
-# Max finite magnitude per float cache dtype. LoRA fusion runs in float32 and is
-# cast back to the weight's dtype; a fused value beyond that dtype's range casts
-# silently to +-inf, which becomes NaN in the forward pass and renders as a flat
-# (green) frame. An overflowed weight never produces useful output, so the fuse
-# fails fast here -- for ANY dtype -- rather than after a full generation.
+# Max finite magnitude per narrow cache dtype. This check is sync-heavy, so it
+# only runs when LTX_LORA_FUSE_RANGE_GUARD=1 is set.
 _DTYPE_MAX_FINITE = {
     mx.float16: 65504.0,
-    mx.bfloat16: 3.3895313892515355e38,
-    mx.float32: 3.4028234663852886e38,
 }
 
 
+def _env_truthy(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _lora_fuse_range_guard_enabled() -> bool:
+    return _env_truthy(_LORA_FUSE_RANGE_GUARD_ENV)
+
+
 def _guard_fused_range(fused_f32: mx.array, target_dtype, mlx_key: str) -> None:
-    """Raise if the float32 fused weight is non-finite or would overflow
-    ``target_dtype`` when cast back. Overflow -> inf -> NaN -> degenerate
-    output, so this is unconditionally an error."""
+    """Raise if the float32 fused weight would overflow a narrow target dtype."""
+    limit = _DTYPE_MAX_FINITE.get(target_dtype)
+    if limit is None:
+        return
     peak = float(mx.max(mx.abs(fused_f32)).item())
     if not math.isfinite(peak):
         raise ValueError(
@@ -253,38 +488,13 @@ def _guard_fused_range(fused_f32: mx.array, target_dtype, mlx_key: str) -> None:
             f"base weight or the delta already overflowed float32. Lower "
             f"--lora-strength or check the adapter."
         )
-    limit = _DTYPE_MAX_FINITE.get(target_dtype)
-    if limit is not None and peak > limit:
+    if peak > limit:
         raise ValueError(
             f"LoRA fusion overflows {target_dtype} at '{mlx_key}': fused "
             f"|max|={peak:.4g} exceeds the dtype ceiling {limit:.4g}. Cache the "
             f"transformer in a wider dtype (--transformer-dtype bf16) or lower "
             f"--lora-strength."
         )
-
-
-def _lora_metadata_alpha(path: str) -> Optional[float]:
-    """File-level LoRA alpha from safetensors metadata, or None.
-
-    Honors diffusers-style ``lora_alpha`` and kohya-style ``ss_network_alpha``.
-    Per-module ``.alpha`` tensors (read at fuse time) take precedence; this is
-    only the fallback for LoRAs that record alpha solely in metadata. The
-    companion rank is taken from the actual ``lora_A`` shape, not metadata, so
-    only the alpha value is needed here.
-    """
-    try:
-        with open(path, "rb") as f:
-            n = int.from_bytes(f.read(8), "little")
-            meta = json.loads(f.read(n)).get("__metadata__", {}) or {}
-    except Exception:
-        return None
-    for key in ("lora_alpha", "ss_network_alpha", "alpha"):
-        if key in meta:
-            try:
-                return float(meta[key])
-            except (TypeError, ValueError):
-                pass
-    return None
 
 
 def _lora_base_to_ab(
@@ -318,6 +528,8 @@ def fuse_loras_into_model(
     allow_partial: bool = False,
     verbose: bool = True,
     track_for_restore: bool = True,
+    clear_every: Optional[int] = None,
+    lora_load_mode: str = "auto",
 ) -> None:
     """Fuse one or more LoRAs into an already-loaded model, in place.
 
@@ -328,14 +540,16 @@ def fuse_loras_into_model(
     standard weight or transposed for a pretransposed ``_*_weight_t`` slot,
     decided by shape.
 
-    Per-target scale = ``strength * alpha/rank`` where rank is the LoRA's
-    actual rank (``lora_A`` row count) and alpha is, in precedence order: the
-    per-module ``.alpha`` tensor, the file metadata alpha (diffusers
-    ``lora_alpha`` or kohya ``ss_network_alpha``), else rank (factor 1.0).
-    Non-finite / absurd alphas are rejected. Multiple LoRAs sum their deltas.
+    Per-target scale is exactly ``strength``. This matches the official LTX
+    fuser, which treats LoRA products as already normalized and computes
+    ``sum((B * strength) @ A)``. Multiple LoRAs sum their deltas.
 
-    Memory: only LoRA-touched weights are rewritten, one at a time, freeing
-    the previous copy as it goes -- never a second full copy of the model.
+    Memory: only LoRA-touched weights are rewritten, one at a time.
+    ``lora_load_mode="auto"`` uses the same total-RAM budget heuristic as VAE
+    tiling: bulk ``mx.load`` when the adapter set fits the budget, otherwise
+    safetensors are indexed and streamed pair-by-pair. By default the MLX cache
+    is drained less often for fast/bulk mode and more often for stream mode;
+    pass ``clear_every`` to override.
 
     Robustness: per-weight shape mismatches and absent targets are skipped
     with a warning rather than aborting. Only the *aggregate* coverage gates
@@ -348,184 +562,209 @@ def fuse_loras_into_model(
     from .weight_converter import convert_pytorch_key_to_mlx
 
     target = getattr(model, "velocity_model", model)
-
-    # 1. Translation table: MLX logical ".weight" key -> [(A, B, scale), ...].
-    table: Dict[str, list] = {}
-    unresolved = 0   # LoRA pairs whose key did not map to any model weight name
-    bad_alpha = 0    # rejected non-finite / out-of-range alpha values
-    excluded = 0     # targets dropped by a cfg.exclude category filter
-    for cfg in lora_configs:
-        lw = load_lora_weights(cfg.path)
-        meta_alpha = _lora_metadata_alpha(cfg.path)
-        ab = _lora_base_to_ab(lw)
-        exclude = set(cfg.exclude)
-        scales_seen = set()
-        cfg_excluded = 0
-        for base, (ka, kb) in ab.items():
-            a = lw[ka]
-            rank = a.shape[0] if a.ndim >= 1 else 0
-            alpha = None
-            alpha_t = lw.get(base + ".alpha")
-            if alpha_t is not None:
-                try:
-                    alpha = float(alpha_t)
-                except Exception:
-                    alpha = None
-            if alpha is None:
-                alpha = meta_alpha
-            if alpha is not None and not (
-                math.isfinite(alpha) and 0.0 < alpha <= _LORA_ALPHA_MAX
-            ):
-                bad_alpha += 1
-                alpha = None
-            ratio = (alpha / rank) if (alpha is not None and rank) else 1.0
-            scale = cfg.strength * ratio
-            scales_seen.add(round(scale, 4))
-            pytorch_key = base.replace("diffusion_model.", "") + ".weight"
-            mlx_key = convert_pytorch_key_to_mlx(
-                pytorch_key, include_audio=include_audio
-            )
-            if mlx_key is None:
-                unresolved += 1
-                continue
-            if exclude and (_lora_key_categories(mlx_key) & exclude):
-                cfg_excluded += 1
-                continue
-            table.setdefault(mlx_key, []).append((lw[ka], lw[kb], scale))
-        excluded += cfg_excluded
-        if verbose:
-            srep = sorted(scales_seen)
-            srep_str = (
-                f"{srep[0]:.4f}" if len(srep) == 1
-                else f"{len(srep)} distinct ({min(srep):.4f}-{max(srep):.4f})"
-            )
-            meta_note = "" if meta_alpha is None else f", meta_alpha={meta_alpha:g}"
-            excl_note = (
-                "" if not exclude
-                else f", excluding {sorted(exclude)} ({cfg_excluded} dropped)"
-            )
+    selected_load_mode, load_estimate_gb, load_budget_gb = _resolve_lora_load_mode(
+        lora_configs,
+        lora_load_mode,
+    )
+    range_guard_enabled = _lora_fuse_range_guard_enabled()
+    if clear_every is None:
+        clear_every = 4 if selected_load_mode == "stream" else 16
+    else:
+        clear_every = max(1, int(clear_every))
+    if verbose:
+        if load_estimate_gb is None:
             print(
-                f"  LoRA {Path(cfg.path).name}: strength={cfg.strength}, "
-                f"{len(ab)} targets, scale={srep_str}{meta_note}{excl_note}"
+                f"  LoRA load mode: {selected_load_mode} "
+                f"(clear every {clear_every} weights)"
             )
-
-    resolved = len(table)
-    if resolved == 0:
-        msg = (
-            "LoRA fusion: no LoRA keys resolved to any model weight -- "
-            f"unrecognized format or wrong model ({unresolved} unmapped keys)."
-        )
-        if allow_partial:
-            if verbose:
-                print(f"  [warn] {msg} (allow_partial: nothing fused)")
-            return
-        raise RuntimeError(msg + " Pass allow_partial=True (--lora-allow-partial) to ignore.")
-    _invalidate_lora_restore_cache(target)
-
-    def delta_fp32(mlx_key: str) -> mx.array:
-        acc = None
-        for a, b, scale in table[mlx_key]:
-            term = mx.matmul(b.astype(mx.float32), a.astype(mx.float32)) * scale
-            acc = term if acc is None else acc + term
-        return acc
-
-    def fused_value(weight: mx.array, d: mx.array, mlx_key: str) -> Optional[mx.array]:
-        if tuple(weight.shape) == tuple(d.shape):
-            fused = weight.astype(mx.float32) + d
-        elif tuple(weight.shape) == tuple(reversed(d.shape)):  # pretransposed slot
-            fused = weight.astype(mx.float32) + d.T
         else:
-            return None  # shape mismatch -> skip, counted below
-        _guard_fused_range(fused, weight.dtype, mlx_key)
-        return fused.astype(weight.dtype)
+            print(
+                f"  LoRA load mode: {selected_load_mode} "
+                f"(auto estimate {load_estimate_gb:.2f} GB, "
+                f"budget {load_budget_gb:.2f} GB, "
+                f"clear every {clear_every} weights)"
+            )
+        if range_guard_enabled:
+            print(f"  LoRA fused-range guard: enabled ({_LORA_FUSE_RANGE_GUARD_ENV}=1)")
+    tensor_sources = []
+    table: Dict[str, list] = {}
 
-    # Navigate to each weight on demand rather than holding a flattened
-    # parameter list across the loop (that would pin every old array and pile
-    # up a second full copy of the model). Each fused weight is evaluated and
-    # written back immediately so the old one and the FP32 temporaries free
-    # before the next.
-    def _navigate(root, key: str):
-        parts = key.split(".")
-        obj = root
-        for p in parts[:-1]:
-            obj = obj[int(p)] if p.isdigit() else getattr(obj, p)
-        return obj, parts[-1]
+    try:
+        # 1. Translation table: MLX logical ".weight" key -> tensor source refs.
+        unresolved = 0   # LoRA pairs whose key did not map to any model weight name
+        excluded = 0     # targets dropped by a cfg.exclude category filter
+        for cfg in lora_configs:
+            source = _open_lora_tensor_source(cfg.path, selected_load_mode)
+            tensor_sources.append(source)
+            ab = _lora_base_to_ab(source)
+            exclude = set(cfg.exclude)
+            cfg_excluded = 0
+            for base, (ka, kb) in ab.items():
+                pytorch_key = base.replace("diffusion_model.", "") + ".weight"
+                mlx_key = convert_pytorch_key_to_mlx(
+                    pytorch_key, include_audio=include_audio
+                )
+                if mlx_key is None:
+                    unresolved += 1
+                    continue
+                if exclude and (_lora_key_categories(mlx_key) & exclude):
+                    cfg_excluded += 1
+                    continue
+                table.setdefault(mlx_key, []).append((source, ka, kb, cfg.strength))
+            excluded += cfg_excluded
+            if verbose:
+                excl_note = (
+                    "" if not exclude
+                    else f", excluding {sorted(exclude)} ({cfg_excluded} dropped)"
+                )
+                print(
+                    f"  LoRA {Path(cfg.path).name}: strength={cfg.strength}, "
+                    f"{len(ab)} targets, scale={cfg.strength:.4f}{excl_note}"
+                )
+            del ab
 
-    applied = set()
-    shape_skipped: list = []
+        resolved = len(table)
+        if resolved == 0:
+            msg = (
+                "LoRA fusion: no LoRA keys resolved to any model weight -- "
+                f"unrecognized format or wrong model ({unresolved} unmapped keys)."
+            )
+            if allow_partial:
+                if verbose:
+                    print(f"  [warn] {msg} (allow_partial: nothing fused)")
+                return
+            raise RuntimeError(
+                msg + " Pass allow_partial=True (--lora-allow-partial) to ignore."
+            )
+        _invalidate_lora_restore_cache(target)
 
-    # 2a. Standard params (attention, AdaLN, non-pretransposed FF, gates).
-    fuse_keys = [k for k, _ in tree_flatten(target.parameters()) if k in table]
-    for n, key in enumerate(fuse_keys):
-        obj, leaf = _navigate(target, key)
-        new = fused_value(getattr(obj, leaf), delta_fp32(key), key)
-        if new is None:
-            shape_skipped.append(key)
-            continue
-        mx.eval(new)
-        setattr(obj, leaf, new)
-        applied.add(key)
-        if (n + 1) % 32 == 0:
-            mx.clear_cache()
-    mx.clear_cache()
+        def delta_fp32(mlx_key: str) -> mx.array:
+            acc = None
+            for source, ka, kb, scale in table[mlx_key]:
+                a = source.load(ka)
+                b = source.load(kb)
+                term = mx.matmul(b.astype(mx.float32), a.astype(mx.float32)) * scale
+                if acc is None:
+                    acc = term
+                else:
+                    acc = acc + term
+                    del term
+                del a, b
+            return acc
 
-    # 2b. Pretransposed FF slots live in private _project_*_weight_t attrs
-    # (the original .weight was deleted at cache install), so they are absent
-    # from parameters() and handled here by direct attr replacement.
-    blocks = getattr(target, "transformer_blocks", []) or []
-    since_clear = 0
-    for i, blk in enumerate(blocks):
-        for mod_name, attr, suffix in _LORA_FF_PRETRANSPOSE_SLOTS:
-            ff = getattr(blk, mod_name, None)
-            if ff is None:
-                continue
-            wt = getattr(ff, attr, None)
-            if wt is None:
-                continue
-            mlx_key = f"transformer_blocks.{i}.{suffix}"
-            if mlx_key not in table:
-                continue
-            new = fused_value(wt, delta_fp32(mlx_key), mlx_key)
+        def fused_value(weight: mx.array, d: mx.array, mlx_key: str) -> Optional[mx.array]:
+            if tuple(weight.shape) == tuple(d.shape):
+                fused = weight.astype(mx.float32) + d
+            elif tuple(weight.shape) == tuple(reversed(d.shape)):  # pretransposed slot
+                fused = weight.astype(mx.float32) + d.T
+            else:
+                return None  # shape mismatch -> skip, counted below
+            if range_guard_enabled:
+                _guard_fused_range(fused, weight.dtype, mlx_key)
+            return fused.astype(weight.dtype)
+
+        # Navigate to each weight on demand rather than holding a flattened
+        # parameter list across the loop (that would pin every old array and pile
+        # up a second full copy of the model). Each fused weight is evaluated and
+        # written back immediately so the old one and the FP32 temporaries free
+        # before the next.
+        def _navigate(root, key: str):
+            parts = key.split(".")
+            obj = root
+            for p in parts[:-1]:
+                obj = obj[int(p)] if p.isdigit() else getattr(obj, p)
+            return obj, parts[-1]
+
+        applied = set()
+        shape_skipped: list = []
+
+        # 2a. Standard params (attention, AdaLN, non-pretransposed FF, gates).
+        fuse_keys = [k for k, _ in tree_flatten(target.parameters()) if k in table]
+        for n, key in enumerate(fuse_keys):
+            obj, leaf = _navigate(target, key)
+            weight = getattr(obj, leaf)
+            d = delta_fp32(key)
+            new = fused_value(weight, d, key)
             if new is None:
-                shape_skipped.append(mlx_key)
+                shape_skipped.append(key)
+                del weight, d
                 continue
             mx.eval(new)
-            setattr(ff, attr, new)
-            applied.add(mlx_key)
-            since_clear += 1
-            if since_clear >= 32:
+            setattr(obj, leaf, new)
+            applied.add(key)
+            del weight, d, new
+            if (n + 1) % clear_every == 0:
+                gc.collect()
                 mx.clear_cache()
-                since_clear = 0
-    mx.clear_cache()
+        del fuse_keys
+        mx.clear_cache()
 
-    # 3. Coverage gate. Per-tensor misses (above) were skipped, not fatal;
-    # only the aggregate fraction of resolved targets actually placed decides
-    # whether this is a real fusion or a format/model mismatch.
-    placed = len(applied)
-    coverage = placed / resolved
-    if verbose:
-        bits = [f"placed {placed}/{resolved}"]
-        if excluded:
-            bits.append(f"{excluded} excluded")
-        if shape_skipped:
-            bits.append(f"{len(shape_skipped)} shape-skipped")
-        if unresolved:
-            bits.append(f"{unresolved} unmapped keys")
-        if bad_alpha:
-            bits.append(f"{bad_alpha} bad-alpha ignored")
-        print(
-            f"  Fused {placed} weights from {len(lora_configs)} LoRA(s) "
-            f"[{'; '.join(bits)}; coverage {coverage:.0%}]."
-        )
-    if coverage < min_coverage and not allow_partial:
-        unplaced = sorted(set(table) - applied)[:3]
-        raise RuntimeError(
-            f"LoRA fusion coverage {coverage:.0%} < {min_coverage:.0%}: only "
-            f"{placed}/{resolved} resolved targets fused (e.g. unplaced "
-            f"{unplaced}). Likely a layout/model mismatch. If this LoRA "
-            "intentionally targets few weights, pass allow_partial=True "
-            "(--lora-allow-partial)."
-        )
+        # 2b. Pretransposed FF slots live in private _project_*_weight_t attrs
+        # (the original .weight was deleted at cache install), so they are absent
+        # from parameters() and handled here by direct attr replacement.
+        blocks = getattr(target, "transformer_blocks", []) or []
+        since_clear = 0
+        for i, blk in enumerate(blocks):
+            for mod_name, attr, suffix in _LORA_FF_PRETRANSPOSE_SLOTS:
+                ff = getattr(blk, mod_name, None)
+                if ff is None:
+                    continue
+                wt = getattr(ff, attr, None)
+                if wt is None:
+                    continue
+                mlx_key = f"transformer_blocks.{i}.{suffix}"
+                if mlx_key not in table:
+                    continue
+                d = delta_fp32(mlx_key)
+                new = fused_value(wt, d, mlx_key)
+                if new is None:
+                    shape_skipped.append(mlx_key)
+                    del wt, d
+                    continue
+                mx.eval(new)
+                setattr(ff, attr, new)
+                applied.add(mlx_key)
+                del wt, d, new
+                since_clear += 1
+                if since_clear >= clear_every:
+                    gc.collect()
+                    mx.clear_cache()
+                    since_clear = 0
+        mx.clear_cache()
+
+        # 3. Coverage gate. Per-tensor misses (above) were skipped, not fatal;
+        # only the aggregate fraction of resolved targets actually placed decides
+        # whether this is a real fusion or a format/model mismatch.
+        placed = len(applied)
+        coverage = placed / resolved
+        if verbose:
+            bits = [f"placed {placed}/{resolved}"]
+            if excluded:
+                bits.append(f"{excluded} excluded")
+            if shape_skipped:
+                bits.append(f"{len(shape_skipped)} shape-skipped")
+            if unresolved:
+                bits.append(f"{unresolved} unmapped keys")
+            print(
+                f"  Fused {placed} weights from {len(lora_configs)} LoRA(s) "
+                f"[{'; '.join(bits)}; coverage {coverage:.0%}]."
+            )
+        if coverage < min_coverage and not allow_partial:
+            unplaced = sorted(set(table) - applied)[:3]
+            raise RuntimeError(
+                f"LoRA fusion coverage {coverage:.0%} < {min_coverage:.0%}: only "
+                f"{placed}/{resolved} resolved targets fused (e.g. unplaced "
+                f"{unplaced}). Likely a layout/model mismatch. If this LoRA "
+                "intentionally targets few weights, pass allow_partial=True "
+                "(--lora-allow-partial)."
+            )
+    finally:
+        table.clear()
+        for source in tensor_sources:
+            source.close()
+        gc.collect()
+        mx.clear_cache()
+
     if track_for_restore:
         _record_persistent_loras(
             target,
