@@ -17,6 +17,7 @@ from LTX_2_MLX.loader.weight_converter import (
 )
 from LTX_2_MLX.loader.lora_loader import (
     LoRAConfig,
+    _lora_key_categories,
     format_lora_stage_scale_lines,
     fuse_loras_into_model,
     get_lora_target_keys,
@@ -306,6 +307,36 @@ class TestLoRAConfig:
         assert config1.strength == -2.0
         assert config2.strength == 2.0
 
+    def test_accepts_control_path_exclude_tags(self):
+        """Test V2 control-path LoRA exclude tags validate."""
+        config = LoRAConfig(
+            path="/path",
+            exclude=(
+                "adaln",
+                "prompt_adaln",
+                "scale_shift",
+                "prompt_scale_shift",
+                "gate_adaln",
+                "av_ca",
+                "distill_control",
+            ),
+        )
+
+        assert config.exclude == (
+            "adaln",
+            "prompt_adaln",
+            "scale_shift",
+            "prompt_scale_shift",
+            "gate_adaln",
+            "av_ca",
+            "distill_control",
+        )
+
+    def test_rejects_unknown_exclude_tag(self):
+        """Test unknown LoRA exclude categories are rejected."""
+        with pytest.raises(ValueError, match="Unknown LoRA exclude categories"):
+            LoRAConfig(path="/path", exclude=("sideways",))
+
     def test_stage_strength_defaults_to_scalar_strength(self):
         """Test stage strengths fall back to the scalar strength."""
         config = LoRAConfig(path="/path", strength=0.4)
@@ -423,6 +454,53 @@ class TestLoRAConfig:
             "    increase.safetensors: total=0.5000, change=+0.2500",
             "    decrease.safetensors: total=0.2500, change=-0.2500",
         ]
+
+
+class TestLoRACategories:
+    """Tests for LoRA target exclude category classification."""
+
+    def test_distill_control_catches_cross_attention_bridge(self):
+        cats = _lora_key_categories(
+            "transformer_blocks.0.audio_to_video_attn.to_v.weight"
+        )
+
+        assert {"cross", "audio_to_video_attn", "to_v", "distill_control"} <= cats
+
+    def test_distill_control_catches_gate_logits(self):
+        cats = _lora_key_categories("transformer_blocks.0.attn1.to_gate_logits.weight")
+
+        assert {"video", "gate", "attn1", "to_gate_logits", "distill_control"} <= cats
+
+    def test_control_path_tags_top_level_adaln(self):
+        cats = _lora_key_categories("prompt_adaln_single.linear.weight")
+
+        assert {
+            "video",
+            "adaln",
+            "prompt_adaln",
+            "prompt_scale_shift",
+            "distill_control",
+        } <= cats
+
+    def test_control_path_tags_audio_adaln_as_audio(self):
+        cats = _lora_key_categories("audio_prompt_adaln_single.linear.weight")
+
+        assert {
+            "audio",
+            "adaln",
+            "prompt_adaln",
+            "prompt_scale_shift",
+            "distill_control",
+        } <= cats
+
+    def test_control_path_tags_av_ca_scale_shift_and_gate_adaln(self):
+        scale_shift = _lora_key_categories(
+            "av_ca_video_scale_shift_adaln_single.linear.weight"
+        )
+        gate = _lora_key_categories("av_ca_a2v_gate_adaln_single.linear.weight")
+
+        assert {"video", "av_ca", "adaln", "scale_shift", "distill_control"} <= scale_shift
+        assert {"video", "av_ca", "adaln", "gate_adaln", "distill_control"} <= gate
 
 
 class TinyLoRALinear(nn.Module):

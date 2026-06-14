@@ -25,6 +25,9 @@ from mlx.utils import tree_flatten
 #                                ff, audio_ff
 #   projection (exact linear) -- to_q, to_k, to_v, to_out, to_gate_logits,
 #                                project_in, project_out
+#   control path              -- adaln, prompt_adaln, scale_shift,
+#                                prompt_scale_shift, gate_adaln, av_ca,
+#                                distill_control
 # The branch/type aliases are coarse shortcuts; the module/projection tags give
 # full granularity (e.g. exclude just `audio_to_video_attn` to drop the
 # lip-sync direction, or `attn2` to revert prompt-conditioning to stock).
@@ -41,8 +44,20 @@ _LORA_PROJ_TAGS = frozenset({
     "to_q", "to_k", "to_v", "to_out", "to_gate_logits",
     "project_in", "project_out",
 })
+_LORA_CONTROL_TAGS = frozenset({
+    "adaln", "prompt_adaln", "scale_shift", "prompt_scale_shift",
+    "gate_adaln", "av_ca", "distill_control",
+})
+_LORA_DISTILL_CONTROL_TAGS = frozenset({
+    "cross", "gate", "adaln", "prompt_adaln", "scale_shift",
+    "prompt_scale_shift", "gate_adaln", "av_ca",
+})
 _LORA_CATEGORIES = (
-    _LORA_BRANCH_TAGS | _LORA_TYPE_TAGS | _LORA_MODULE_TAGS | _LORA_PROJ_TAGS
+    _LORA_BRANCH_TAGS
+    | _LORA_TYPE_TAGS
+    | _LORA_MODULE_TAGS
+    | _LORA_PROJ_TAGS
+    | _LORA_CONTROL_TAGS
 )
 _LORA_FF_PRETRANSPOSE_SLOTS = (
     ("ff", "_project_in_weight_t", "ff.project_in.proj.weight"),
@@ -61,7 +76,7 @@ def _lora_key_categories(mlx_key: str) -> set:
     # coarse branch
     if "video_to_audio" in mlx_key or "audio_to_video" in mlx_key:
         cats.add("cross")
-    elif "audio_attn" in mlx_key or "audio_ff" in mlx_key:
+    elif mlx_key.startswith("audio_") or ".audio_" in mlx_key or "audio_" in mlx_key:
         cats.add("audio")
     else:
         cats.add("video")
@@ -72,6 +87,21 @@ def _lora_key_categories(mlx_key: str) -> set:
         cats.add("attn")
     elif "ff" in mlx_key:
         cats.add("ff")
+    # Top-level V2 control paths. These are not transformer block projections,
+    # so they need direct tags for targeted LoRA suppression.
+    if "av_ca" in mlx_key or "a2v" in mlx_key or "v2a" in mlx_key:
+        cats.add("av_ca")
+    if "adaln" in mlx_key:
+        cats.add("adaln")
+    if "prompt_adaln" in mlx_key:
+        cats.add("prompt_adaln")
+        cats.add("prompt_scale_shift")
+    if "scale_shift" in mlx_key:
+        cats.add("scale_shift")
+    if "prompt_scale_shift" in mlx_key:
+        cats.add("prompt_scale_shift")
+    if "gate_adaln" in mlx_key:
+        cats.add("gate_adaln")
     # exact module + projection (finest granularity)
     parts = mlx_key.split(".")
     if "transformer_blocks" in parts:
@@ -83,6 +113,8 @@ def _lora_key_categories(mlx_key: str) -> set:
             if p in _LORA_PROJ_TAGS:
                 cats.add(p)
                 break
+    if cats & _LORA_DISTILL_CONTROL_TAGS:
+        cats.add("distill_control")
     return cats
 
 
@@ -96,7 +128,10 @@ class LoRAConfig:
 
     ``exclude`` lists categories (see ``_LORA_CATEGORIES``) whose targets are
     dropped from this adapter's fusion -- e.g. ``("audio", "cross")`` applies
-    only the video-branch style and leaves the audio path stock.
+    only the video-branch style and leaves the audio path stock. Use
+    ``("distill_control",)`` to drop the official-distillation-style control
+    paths: cross bridges, gate logits, AdaLN, scale-shift, prompt scale-shift,
+    and AV cross-conditioning AdaLN.
     """
 
     path: str

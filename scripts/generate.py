@@ -5526,11 +5526,14 @@ def main():
              "(exact module): attn1, attn2, audio_attn1, audio_attn2, "
              "video_to_audio_attn, audio_to_video_attn, ff, audio_ff. Fine "
              "(projection): to_q, to_k, to_v, to_out, to_gate_logits, "
-             "project_in, project_out. Example: 'audio,cross' keeps a "
-             "video-only style; 'video_to_audio_attn' drops only the "
-             "sound-follows-motion bridge while keeping lip-sync. Repeat to "
-             "match the order of --lora; a single value applies to all; use "
-             "'none' to skip filtering for one LoRA in a per-LoRA list."
+             "project_in, project_out. Control-path: adaln, prompt_adaln, "
+             "scale_shift, prompt_scale_shift, gate_adaln, av_ca, "
+             "distill_control. Example: 'audio,cross' keeps a video-only "
+             "style; 'video_to_audio_attn' drops only the sound-follows-motion "
+             "bridge while keeping lip-sync; 'distill_control' drops the "
+             "official-distillation-style control-path set. Repeat to match "
+             "the order of --lora; a single value applies to all; use 'none' "
+             "to skip filtering for one LoRA in a per-LoRA list."
     )
     parser.add_argument(
         "--stg-scale",
