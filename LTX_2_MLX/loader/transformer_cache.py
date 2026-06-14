@@ -256,7 +256,7 @@ class TransformerBlockStreamer:
         elif quant_keys:
             sample_key = quant_keys[0][0]
         if sample_key is not None and sample_key not in self._weights:
-            self._weights = mx.load(str(self.cache_file))
+            self._weights = _load_cache_weights(self.cache_file)
             self._drop_non_block_keys()
 
         quant_bases = _quant_bases_for_block_keys(quant_keys)
@@ -457,6 +457,17 @@ def _cache_payload(
         payload["adaln_pretranspose"] = True
     if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
         payload["transformer_cache_quantize"] = transformer_cache_quantize
+        if video_ff_quantize_group_size is not None:
+            payload["transformer_cache_quantize_group_size"] = video_ff_quantize_group_size
+        if video_ff_quantize_bits is not None:
+            payload["transformer_cache_quantize_bits"] = video_ff_quantize_bits
+    try:
+        if checkpoint_has_fp8_tensors(weights_path):
+            payload["fp8_dequant_policy"] = 2
+    except Exception:
+        # Keep payload construction side-effect-free; the later load/build path
+        # will raise the useful file error if the source is unreadable.
+        pass
     if video_ff_quantize_specs:
         payload.update({
             "video_ff_quantize_specs": _canonical_quant_specs(video_ff_quantize_specs),
@@ -599,8 +610,14 @@ def _fp8_scale_companions(
             if candidate in header_dtypes:
                 input_scale_keys.add(candidate)
     # ComfyUI per-weight metadata tag; never a model parameter, always dropped.
+    # Scope to actual FP8 weight companions so an unrelated future parameter
+    # ending in ".comfy_quant" does not silently disappear.
+    comfy_suffix = ".comfy_quant"
     comfy_quant_keys = {
-        key for key in header_dtypes if key.endswith(".comfy_quant")
+        key
+        for key in header_dtypes
+        if key.endswith(comfy_suffix)
+        and key[: -len(comfy_suffix)] + ".weight" in fp8_keys
     }
     return fp8_keys, weight_scale_keys, input_scale_keys, comfy_quant_keys
 
@@ -1802,6 +1819,10 @@ def load_transformer_weights_cached(
     audio_attn_layout_layers: Tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
+    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
+    video_ff_quantize_layers: Tuple[int, ...] = (),
+    video_ff_quantize_group_size: int | None = None,
+    video_ff_quantize_bits: int | None = None,
     video_ff_dtype: Optional[mx.Dtype] = None,
     audio_ff_dtype: Optional[mx.Dtype] = None,
 ) -> TransformerCacheResult:
@@ -1822,6 +1843,10 @@ def load_transformer_weights_cached(
         audio_attn_layout_layers=audio_attn_layout_layers,
         adaln_pretranspose=adaln_pretranspose,
         transformer_cache_quantize=transformer_cache_quantize,
+        video_ff_quantize_specs=video_ff_quantize_specs,
+        video_ff_quantize_layers=video_ff_quantize_layers,
+        video_ff_quantize_group_size=video_ff_quantize_group_size,
+        video_ff_quantize_bits=video_ff_quantize_bits,
         video_ff_dtype=video_ff_dtype,
         audio_ff_dtype=audio_ff_dtype,
     )
@@ -1830,7 +1855,19 @@ def load_transformer_weights_cached(
         model,
         result.cache_path,
         transformer_cache_quantize=transformer_cache_quantize,
+        video_ff_quantize_specs=video_ff_quantize_specs,
+        video_ff_quantize_group_size=video_ff_quantize_group_size,
+        video_ff_quantize_bits=video_ff_quantize_bits,
     )
+    model._lora_restore_cache_source = {
+        "valid": True,
+        "cache_path": result.cache_path,
+        "transformer_cache_quantize": transformer_cache_quantize,
+        "video_ff_quantize_specs": tuple(video_ff_quantize_specs),
+        "video_ff_quantize_group_size": video_ff_quantize_group_size,
+        "video_ff_quantize_bits": video_ff_quantize_bits,
+        "persistent_loras": (),
+    }
     print(
         f"  Loaded transformer cache: {loaded_count} tensors "
         f"({layout_count} layout tensors, {quant_count} quant tensors)"

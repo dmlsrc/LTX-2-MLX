@@ -39,7 +39,12 @@ from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 from ..model.upscaler import SpatialUpscaler
 from ..model.audio_vae import AudioDecoder, Vocoder
-from ..loader.lora_loader import LoRAConfig, fuse_lora_into_weights
+from ..loader.lora_loader import (
+    LoRAConfig,
+    fuse_loras_into_model,
+    restore_lora_base_weights,
+    snapshot_lora_base_weights,
+)
 from ..types import (
     AudioLatentShape,
     LatentState,
@@ -393,13 +398,13 @@ class A2VidPipelineTwoStage:
 
         # Apply distilled LoRA
         if config.distilled_lora_config is not None:
-            from mlx.utils import tree_flatten
             if self._original_weights is None:
-                self._original_weights = list(tree_flatten(self._velocity_model.parameters()))
-            flat_params = dict(tree_flatten(self._velocity_model.parameters()))
-            fused = fuse_lora_into_weights(flat_params, [config.distilled_lora_config])
-            self._velocity_model.load_weights(list(fused.items()))
-            mx.eval(self._velocity_model.parameters())
+                self._original_weights = snapshot_lora_base_weights(self._velocity_model)
+            fuse_loras_into_model(
+                self._velocity_model,
+                [config.distilled_lora_config],
+                track_for_restore=False,
+            )
 
         # Stage 2 shapes
         stage_2_pixel_shape = VideoPixelShape(
@@ -450,8 +455,7 @@ class A2VidPipelineTwoStage:
 
         # Restore weights
         if config.distilled_lora_config is not None and self._original_weights is not None:
-            self._velocity_model.load_weights(self._original_weights)
-            mx.eval(self._velocity_model.parameters())
+            restore_lora_base_weights(self._velocity_model, self._original_weights)
             self._original_weights = None
 
         # Decode video

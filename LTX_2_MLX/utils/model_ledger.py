@@ -84,8 +84,7 @@ class ModelLedger:
             raise ValueError("checkpoint_path is required to load transformer")
 
         from ..model.transformer import LTXModel, LTXModelType
-        from ..loader import load_transformer_weights, fuse_lora_into_weights
-        from mlx.utils import tree_flatten
+        from ..loader import load_transformer_weights, fuse_loras_into_model
 
         print(f"Loading transformer from {self.checkpoint_path}...")
         model = LTXModel(
@@ -106,10 +105,7 @@ class ModelLedger:
         # Apply LoRAs if any
         if self.loras:
             print(f"Applying {len(self.loras)} LoRA(s)...")
-            flat_params = dict(tree_flatten(model.parameters()))
-            fused = fuse_lora_into_weights(flat_params, self.loras)
-            model.load_weights(list(fused.items()))
-            mx.eval(model.parameters())
+            fuse_loras_into_model(model, self.loras)
 
         self._transformer = model
         return model

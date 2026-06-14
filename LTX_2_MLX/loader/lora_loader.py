@@ -2,7 +2,6 @@
 
 import json
 import math
-import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
@@ -40,6 +39,13 @@ _LORA_PROJ_TAGS = frozenset({
 _LORA_CATEGORIES = (
     _LORA_BRANCH_TAGS | _LORA_TYPE_TAGS | _LORA_MODULE_TAGS | _LORA_PROJ_TAGS
 )
+_LORA_FF_PRETRANSPOSE_SLOTS = (
+    ("ff", "_project_in_weight_t", "ff.project_in.proj.weight"),
+    ("ff", "_project_out_weight_t", "ff.project_out.weight"),
+    ("audio_ff", "_project_in_weight_t", "audio_ff.project_in.proj.weight"),
+    ("audio_ff", "_project_out_weight_t", "audio_ff.project_out.weight"),
+)
+_LORA_RESTORE_CACHE_ATTR = "_lora_restore_cache_source"
 
 
 def _lora_key_categories(mlx_key: str) -> set:
@@ -109,211 +115,115 @@ def load_lora_weights(path: str) -> Dict[str, mx.array]:
     return dict(mx.load(path))
 
 
-def find_lora_keys_for_weight(
-    lora_weights: Dict[str, mx.array],
-    base_key: str,
-) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Find LoRA A and B keys corresponding to a base weight key.
-
-    LoRA weights typically follow naming patterns like:
-    - base_key.lora_A.weight / base_key.lora_B.weight
-    - base_key.lora_down.weight / base_key.lora_up.weight
-
-    Args:
-        lora_weights: Dictionary of LoRA weights.
-        base_key: The base model weight key (e.g., "transformer.layers.0.attn.to_q.weight").
-
-    Returns:
-        Tuple of (lora_A_key, lora_B_key) or (None, None) if not found.
-    """
-    # Remove .weight suffix if present
-    prefix = base_key.replace(".weight", "")
-
-    # Candidate prefixes to try
-    candidate_prefixes = [prefix]
-    if not prefix.startswith("diffusion_model."):
-        candidate_prefixes.append(f"diffusion_model.{prefix}")
-    if prefix.startswith("model."):
-        candidate_prefixes.append(prefix.replace("model.", "diffusion_model."))
-    
-    # Redefine patterns as suffixes to apply to prefix
-    suffixes = [
-        (".lora_A.weight", ".lora_B.weight"),
-        (".lora_down.weight", ".lora_up.weight"),
-        (".lora_A", ".lora_B"),
-        (".lora_down", ".lora_up"),
-    ]
-
-    for cand_prefix in candidate_prefixes:
-        for suff_a, suff_b in suffixes:
-            key_a = f"{cand_prefix}{suff_a}"
-            key_b = f"{cand_prefix}{suff_b}"
-            
-            if key_a in lora_weights and key_b in lora_weights:
-                return key_a, key_b
-
-    return None, None
+def _pretransposed_lora_slots(model):
+    blocks = getattr(model, "transformer_blocks", []) or []
+    for idx, block in enumerate(blocks):
+        for module_name, attr, suffix in _LORA_FF_PRETRANSPOSE_SLOTS:
+            module = getattr(block, module_name, None)
+            if module is None:
+                continue
+            value = getattr(module, attr, None)
+            if value is not None:
+                yield idx, module_name, attr, suffix, value
 
 
-def compute_lora_delta(
-    lora_weights: Dict[str, mx.array],
-    key_a: str,
-    key_b: str,
-    strength: float = 1.0,
-) -> mx.array:
-    """
-    Compute the LoRA delta: strength * (lora_B @ lora_A).
-
-    Args:
-        lora_weights: Dictionary of LoRA weights.
-        key_a: Key for LoRA A weights (down projection).
-        key_b: Key for LoRA B weights (up projection).
-        strength: Scaling factor for the delta.
-
-    Returns:
-        The computed delta to add to base weights.
-    """
-    lora_a = lora_weights[key_a]
-    lora_b = lora_weights[key_b]
-
-    # LoRA computation: delta = B @ A
-    # A: (rank, in_features)
-    # B: (out_features, rank)
-    # Result: (out_features, in_features)
-    delta = mx.matmul(lora_b, lora_a) * strength
-
-    return delta
+def snapshot_lora_base_weights(model) -> dict:
+    """Capture the current model weights before a temporary LoRA fuse."""
+    target = getattr(model, "velocity_model", model)
+    cache_source = getattr(target, _LORA_RESTORE_CACHE_ATTR, None)
+    if cache_source and cache_source.get("valid"):
+        return {
+            "kind": "cache",
+            "source": dict(cache_source),
+        }
+    return {
+        "kind": "memory",
+        "parameters": list(tree_flatten(target.parameters())),
+        "pretransposed": list(_pretransposed_lora_slots(target)),
+    }
 
 
-def fuse_lora_into_weights(
-    model_weights: Dict[str, mx.array],
-    lora_configs: List[LoRAConfig],
-    target_dtype: Optional[mx.Dtype] = None,
-    verbose: bool = True,
-) -> Dict[str, mx.array]:
-    """
-    Fuse LoRA weights into model weights.
+def restore_lora_base_weights(model, weights) -> None:
+    """Restore a snapshot produced by ``snapshot_lora_base_weights``."""
+    target = getattr(model, "velocity_model", model)
+    if isinstance(weights, dict) and weights.get("kind") == "cache":
+        from .transformer_cache import load_transformer_cache
 
-    Computes W_final = W_base + sum(strength_i * (B_i @ A_i)) for each LoRA.
-
-    Args:
-        model_weights: Base model weights dictionary.
-        lora_configs: List of LoRA configurations to apply.
-        target_dtype: Target dtype for output weights. If None, uses base weight dtype.
-        verbose: Whether to print progress information.
-
-    Returns:
-        New dictionary with LoRA-fused weights.
-    """
-    # Load all LoRA weights
-    all_loras = []
-    for config in lora_configs:
-        if verbose:
-            print(f"Loading LoRA: {config.path} (strength={config.strength})")
-        lora_weights = load_lora_weights(config.path)
-        all_loras.append((lora_weights, config.strength))
-
-    # Create output dictionary
-    fused_weights = {}
-    fused_count = 0
-    skipped_count = 0
-
-    for key, base_weight in model_weights.items():
-        # Determine target dtype
-        out_dtype = target_dtype if target_dtype is not None else base_weight.dtype
-
-        # Start with base weight
-        fused = base_weight.astype(mx.float32) if base_weight.dtype != mx.float32 else base_weight
-
-        # Try to find and apply LoRA for this key
-        applied = False
-        for lora_weights, strength in all_loras:
-            key_a, key_b = find_lora_keys_for_weight(lora_weights, key)
-            if key_a is not None and key_b is not None:
-                delta = compute_lora_delta(lora_weights, key_a, key_b, strength)
-
-                # Ensure shapes match
-                if delta.shape == fused.shape:
-                    fused = fused + delta
-                    applied = True
-                elif verbose:
-                    print(f"  Shape mismatch for {key}: base={fused.shape}, delta={delta.shape}")
-
-        if applied:
-            fused_count += 1
-        else:
-            skipped_count += 1
-
-        # Convert to target dtype
-        fused_weights[key] = fused.astype(out_dtype)
-
-    if verbose:
-        print(f"Fused LoRA into {fused_count} weights, skipped {skipped_count}")
-
-    return fused_weights
+        source = dict(weights["source"])
+        persistent_loras = tuple(source.get("persistent_loras", ()))
+        load_transformer_cache(
+            target,
+            source["cache_path"],
+            transformer_cache_quantize=source["transformer_cache_quantize"],
+            video_ff_quantize_specs=source["video_ff_quantize_specs"],
+            video_ff_quantize_group_size=source["video_ff_quantize_group_size"],
+            video_ff_quantize_bits=source["video_ff_quantize_bits"],
+        )
+        source["persistent_loras"] = ()
+        source["valid"] = True
+        setattr(target, _LORA_RESTORE_CACHE_ATTR, source)
+        for entry in persistent_loras:
+            fuse_loras_into_model(
+                target,
+                list(entry["configs"]),
+                include_audio=entry["include_audio"],
+                min_coverage=entry["min_coverage"],
+                allow_partial=entry["allow_partial"],
+                verbose=False,
+                track_for_restore=True,
+            )
+        return
+    if isinstance(weights, dict) and "parameters" in weights:
+        items = list(weights["parameters"])
+        pretransposed = list(weights.get("pretransposed", ()))
+    else:
+        items = list(weights.items()) if isinstance(weights, dict) else list(weights)
+        pretransposed = []
+    target.load_weights(items)
+    restored_private = []
+    blocks = getattr(target, "transformer_blocks", []) or []
+    for idx, module_name, attr, _suffix, value in pretransposed:
+        if idx >= len(blocks):
+            continue
+        module = getattr(blocks[idx], module_name, None)
+        if module is None:
+            continue
+        setattr(module, attr, value)
+        restored_private.append(value)
+    mx.eval(target.parameters())
+    if restored_private:
+        mx.eval(*restored_private)
 
 
-def apply_lora_to_model(
+def _invalidate_lora_restore_cache(model) -> None:
+    source = getattr(model, _LORA_RESTORE_CACHE_ATTR, None)
+    if source:
+        source = dict(source)
+        source["valid"] = False
+        setattr(model, _LORA_RESTORE_CACHE_ATTR, source)
+
+
+def _record_persistent_loras(
     model,
     lora_configs: List[LoRAConfig],
-    verbose: bool = True,
+    *,
+    include_audio: bool,
+    min_coverage: float,
+    allow_partial: bool,
 ) -> None:
-    """
-    Apply LoRA weights directly to a model's parameters in-place.
-
-    Args:
-        model: MLX model with parameters to modify.
-        lora_configs: List of LoRA configurations to apply.
-        verbose: Whether to print progress information.
-    """
-    # Get current model parameters
-    params = dict(model.parameters())
-
-    # Flatten nested parameters
-    flat_params = {}
-    def flatten_params(d, prefix=""):
-        for k, v in d.items():
-            full_key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, dict):
-                flatten_params(v, full_key)
-            else:
-                flat_params[full_key] = v
-    flatten_params(params)
-
-    # Load all LoRAs
-    all_loras = []
-    for config in lora_configs:
-        if verbose:
-            print(f"Loading LoRA: {config.path} (strength={config.strength})")
-        lora_weights = load_lora_weights(config.path)
-        all_loras.append((lora_weights, config.strength))
-
-    # Apply LoRAs to matching parameters
-    fused_count = 0
-    for key, param in flat_params.items():
-        for lora_weights, strength in all_loras:
-            key_a, key_b = find_lora_keys_for_weight(lora_weights, key)
-            if key_a is not None and key_b is not None:
-                delta = compute_lora_delta(lora_weights, key_a, key_b, strength)
-
-                if delta.shape == param.shape:
-                    # Update parameter
-                    new_value = param + delta.astype(param.dtype)
-
-                    # Navigate to and update the nested parameter
-                    parts = key.split(".")
-                    obj = model
-                    for part in parts[:-1]:
-                        obj = getattr(obj, part)
-                    setattr(obj, parts[-1], new_value)
-                    fused_count += 1
-
-    if verbose:
-        print(f"Applied LoRA to {fused_count} parameters")
-
-    # Evaluate to ensure changes are applied
-    mx.eval(model.parameters())
+    source = getattr(model, _LORA_RESTORE_CACHE_ATTR, None)
+    if not source:
+        return
+    source = dict(source)
+    entry = {
+        "configs": tuple(lora_configs),
+        "include_audio": include_audio,
+        "min_coverage": min_coverage,
+        "allow_partial": allow_partial,
+    }
+    source["persistent_loras"] = tuple(source.get("persistent_loras", ())) + (entry,)
+    source["valid"] = True
+    setattr(model, _LORA_RESTORE_CACHE_ATTR, source)
 
 
 # Reject alphas that are non-finite or absurdly large; a junk value would
@@ -407,6 +317,7 @@ def fuse_loras_into_model(
     min_coverage: float = 0.5,
     allow_partial: bool = False,
     verbose: bool = True,
+    track_for_restore: bool = True,
 ) -> None:
     """Fuse one or more LoRAs into an already-loaded model, in place.
 
@@ -509,6 +420,7 @@ def fuse_loras_into_model(
                 print(f"  [warn] {msg} (allow_partial: nothing fused)")
             return
         raise RuntimeError(msg + " Pass allow_partial=True (--lora-allow-partial) to ignore.")
+    _invalidate_lora_restore_cache(target)
 
     def delta_fp32(mlx_key: str) -> mx.array:
         acc = None
@@ -561,15 +473,9 @@ def fuse_loras_into_model(
     # (the original .weight was deleted at cache install), so they are absent
     # from parameters() and handled here by direct attr replacement.
     blocks = getattr(target, "transformer_blocks", []) or []
-    ff_slots = (
-        ("ff", "_project_in_weight_t", "ff.project_in.proj.weight"),
-        ("ff", "_project_out_weight_t", "ff.project_out.weight"),
-        ("audio_ff", "_project_in_weight_t", "audio_ff.project_in.proj.weight"),
-        ("audio_ff", "_project_out_weight_t", "audio_ff.project_out.weight"),
-    )
     since_clear = 0
     for i, blk in enumerate(blocks):
-        for mod_name, attr, suffix in ff_slots:
+        for mod_name, attr, suffix in _LORA_FF_PRETRANSPOSE_SLOTS:
             ff = getattr(blk, mod_name, None)
             if ff is None:
                 continue
@@ -619,6 +525,14 @@ def fuse_loras_into_model(
             f"{unplaced}). Likely a layout/model mismatch. If this LoRA "
             "intentionally targets few weights, pass allow_partial=True "
             "(--lora-allow-partial)."
+        )
+    if track_for_restore:
+        _record_persistent_loras(
+            target,
+            lora_configs,
+            include_audio=include_audio,
+            min_coverage=min_coverage,
+            allow_partial=allow_partial,
         )
 
 

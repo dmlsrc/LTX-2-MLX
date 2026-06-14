@@ -36,10 +36,9 @@ from .transformer_cache import (
 from .lora_loader import (
     LoRAConfig,
     load_lora_weights,
-    find_lora_keys_for_weight,
-    compute_lora_delta,
-    fuse_lora_into_weights,
-    apply_lora_to_model,
+    snapshot_lora_base_weights,
+    restore_lora_base_weights,
+    fuse_loras_into_model,
     get_lora_target_keys,
     LORA_TARGET_MODULES,
 )
@@ -82,10 +81,9 @@ __all__ = [
     # LoRA
     "LoRAConfig",
     "load_lora_weights",
-    "find_lora_keys_for_weight",
-    "compute_lora_delta",
-    "fuse_lora_into_weights",
-    "apply_lora_to_model",
+    "snapshot_lora_base_weights",
+    "restore_lora_base_weights",
+    "fuse_loras_into_model",
     "get_lora_target_keys",
     "LORA_TARGET_MODULES",
     # Registry

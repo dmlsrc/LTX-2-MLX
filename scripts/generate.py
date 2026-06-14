@@ -57,8 +57,7 @@ from LTX_2_MLX.loader import (
     load_transformer_weights_cached,
     load_transformer_weights_cached_streaming,
 )
-from LTX_2_MLX.loader.lora_loader import fuse_lora_into_weights, fuse_loras_into_model
-from mlx.utils import tree_flatten
+from LTX_2_MLX.loader.lora_loader import fuse_loras_into_model, snapshot_lora_base_weights
 from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
 from LTX_2_MLX.model.video_vae.native_decoder import (
     NativeConv3dVideoDecoder,
@@ -2110,6 +2109,10 @@ def load_transformer(
                 video_attn_layout_specs=video_attn_layout_specs,
                 video_attn_layout_layers=video_attn_layout_layers,
                 transformer_cache_quantize=transformer_cache_quantize,
+                video_ff_quantize_specs=video_ff_quantize_specs,
+                video_ff_quantize_layers=video_ff_quantize_layers,
+                video_ff_quantize_group_size=video_ff_quantize_group_size,
+                video_ff_quantize_bits=video_ff_quantize_bits,
                 transformer_dtype=bake_dtype,
                 video_ff_dtype=video_ff_dtype,
             )
@@ -2364,6 +2367,10 @@ def load_av_transformer(
                 audio_attn_layout_layers=audio_attn_layout_layers,
                 adaln_pretranspose=adaln_pretranspose,
                 transformer_cache_quantize=transformer_cache_quantize,
+                video_ff_quantize_specs=video_ff_quantize_specs,
+                video_ff_quantize_layers=video_ff_quantize_layers,
+                video_ff_quantize_group_size=video_ff_quantize_group_size,
+                video_ff_quantize_bits=video_ff_quantize_bits,
                 transformer_dtype=bake_dtype,
                 video_ff_dtype=video_ff_dtype,
                 audio_ff_dtype=audio_ff_dtype,
@@ -3843,11 +3850,10 @@ def generate_video(
         else:
             print(f"  Warning: Spatial upscaler weights not found at {upscaler_path}")
 
-        # Get base transformer weights for restoration after stage 1
-        if hasattr(model, 'velocity_model'):
-            base_weights = dict(tree_flatten(model.velocity_model.parameters()))
-        else:
-            base_weights = dict(tree_flatten(model.parameters()))
+        # Capture the stage-1 LoRA restore baseline. Cache-backed transformers
+        # keep only a small restore descriptor here; cache-off models fall back
+        # to parameter references.
+        base_weights = snapshot_lora_base_weights(model)
 
         # Prepare LoRA configs if provided
         lora_configs = None

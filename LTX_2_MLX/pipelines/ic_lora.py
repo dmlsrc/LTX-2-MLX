@@ -10,7 +10,7 @@ Uses a two-stage approach:
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 import mlx.core as mx
 import numpy as np
@@ -34,7 +34,7 @@ from ..components import (
 from ..conditioning.item import ConditioningItem
 from ..conditioning.keyframe import VideoConditionByKeyframeIndex
 from ..conditioning.tools import VideoLatentTools
-from ..loader import LoRAConfig, fuse_lora_into_weights
+from ..loader import LoRAConfig, fuse_loras_into_model, restore_lora_base_weights
 from ..model.transformer import LTXModel, Modality, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
@@ -437,7 +437,7 @@ class ICLoraPipeline:
         video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
-        base_transformer_weights: Dict[str, mx.array],
+        base_transformer_weights: Any,
         lora_configs: Optional[List[LoRAConfig]] = None,
     ):
         """
@@ -448,7 +448,7 @@ class ICLoraPipeline:
             video_encoder: VAE encoder for encoding images/videos.
             video_decoder: VAE decoder for decoding latents to video.
             spatial_upscaler: 2x spatial upscaler for stage 2.
-            base_transformer_weights: Original transformer weights for restoration.
+            base_transformer_weights: Restore snapshot for removing IC-LoRA.
             lora_configs: IC-LoRA configurations (paths and strengths).
         """
         # Store raw velocity model for LoRA operations
@@ -484,15 +484,12 @@ class ICLoraPipeline:
         if not self.lora_configs:
             return
 
-        fused_weights = fuse_lora_into_weights(
-            self.base_transformer_weights,
+        fuse_loras_into_model(
+            self._velocity_model,
             self.lora_configs,
             verbose=True,
+            track_for_restore=False,
         )
-
-        # Apply fused weights to transformer (use raw velocity model)
-        self._velocity_model.load_weights(list(fused_weights.items()))
-        mx.eval(self._velocity_model.parameters())
 
     def _remove_lora(self) -> None:
         """Restore original weights (remove IC-LoRA)."""
@@ -500,8 +497,7 @@ class ICLoraPipeline:
             return
 
         # Restore base weights (use raw velocity model)
-        self._velocity_model.load_weights(list(self.base_transformer_weights.items()))
-        mx.eval(self._velocity_model.parameters())
+        restore_lora_base_weights(self._velocity_model, self.base_transformer_weights)
 
     def _denoise_loop(
         self,
@@ -759,7 +755,7 @@ def create_ic_lora_pipeline(
     video_encoder: NativeConv3dVideoEncoder,
     video_decoder: NativeConv3dVideoDecoder,
     spatial_upscaler: SpatialUpscaler,
-    base_transformer_weights: Dict[str, mx.array],
+    base_transformer_weights: Any,
     lora_configs: Optional[List[LoRAConfig]] = None,
 ) -> ICLoraPipeline:
     """
@@ -770,7 +766,7 @@ def create_ic_lora_pipeline(
         video_encoder: VAE encoder.
         video_decoder: VAE decoder.
         spatial_upscaler: 2x spatial upscaler.
-        base_transformer_weights: Original weights for LoRA restoration.
+        base_transformer_weights: Restore snapshot for LoRA removal.
         lora_configs: IC-LoRA configurations.
 
     Returns:

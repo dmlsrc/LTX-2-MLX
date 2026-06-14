@@ -38,7 +38,12 @@ from ..components.perturbations import (
 )
 from ..components.patchifiers import AudioPatchifier
 from ..conditioning.tools import VideoLatentTools, AudioLatentTools
-from ..loader import LoRAConfig, fuse_lora_into_weights
+from ..loader import (
+    LoRAConfig,
+    fuse_loras_into_model,
+    restore_lora_base_weights,
+    snapshot_lora_base_weights,
+)
 from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, Modality, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
@@ -654,20 +659,15 @@ class TwoStagePipeline:
 
         # Apply distilled LoRA if provided
         if config.distilled_lora_config is not None:
-            from mlx.utils import tree_flatten
-
             # Store original weights if not already stored (use raw velocity model)
             if self._original_weights is None:
-                self._original_weights = list(tree_flatten(self._velocity_model.parameters()))
+                self._original_weights = snapshot_lora_base_weights(self._velocity_model)
 
-            # Fuse LoRA weights (takes a list of LoRAConfigs)
-            flat_params = dict(tree_flatten(self._velocity_model.parameters()))
-            fused_weights = fuse_lora_into_weights(
-                flat_params,
+            fuse_loras_into_model(
+                self._velocity_model,
                 [config.distilled_lora_config],
+                track_for_restore=False,
             )
-            self._velocity_model.load_weights(list(fused_weights.items()))
-            mx.eval(self._velocity_model.parameters())
 
         # Create stage 2 output shape (full resolution)
         stage_2_pixel_shape = VideoPixelShape(
@@ -756,8 +756,7 @@ class TwoStagePipeline:
 
         # Restore original weights if LoRA was applied (use raw velocity model)
         if config.distilled_lora_config is not None and self._original_weights is not None:
-            self._velocity_model.load_weights(self._original_weights)
-            mx.eval(self._velocity_model.parameters())
+            restore_lora_base_weights(self._velocity_model, self._original_weights)
             self._original_weights = None
 
         # Clear conditioning and unpatchify

@@ -2,6 +2,7 @@
 
 import pytest
 import mlx.core as mx
+import mlx.nn as nn
 import threading
 
 # Import the modules under test
@@ -16,9 +17,10 @@ from LTX_2_MLX.loader.weight_converter import (
 )
 from LTX_2_MLX.loader.lora_loader import (
     LoRAConfig,
-    find_lora_keys_for_weight,
-    compute_lora_delta,
+    fuse_loras_into_model,
     get_lora_target_keys,
+    restore_lora_base_weights,
+    snapshot_lora_base_weights,
 )
 from LTX_2_MLX.loader.registry import (
     DummyRegistry,
@@ -301,81 +303,216 @@ class TestLoRAConfig:
         assert config2.strength == 2.0
 
 
-class TestFindLoraKeysForWeight:
-    """Tests for find_lora_keys_for_weight function."""
+class TinyLoRALinear(nn.Module):
+    def __init__(self, shape, dtype=mx.float32):
+        super().__init__()
+        self.weight = mx.zeros(shape, dtype=dtype)
 
-    def test_finds_lora_a_b_pattern(self):
-        """Test finding lora_A/lora_B pattern."""
-        lora_weights = {
-            "layer.lora_A.weight": mx.array([1]),
-            "layer.lora_B.weight": mx.array([2]),
+
+class TinyLoRAFF(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.project_out = TinyLoRALinear((2, 2), dtype=mx.float32)
+
+
+class TinyLoRAAttn(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.to_q = TinyLoRALinear((1, 1), dtype=mx.float16)
+
+
+class TinyLoRABlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ff = TinyLoRAFF()
+        self.attn1 = TinyLoRAAttn()
+
+
+class TinyLoRAModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.transformer_blocks = [TinyLoRABlock()]
+
+
+class TestFuseLorasIntoModel:
+    """Tests for the unified model-level LoRA fuser."""
+
+    def test_converts_ff_key_and_applies_alpha(self, tmp_path):
+        path = tmp_path / "ff_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "diffusion_model.transformer_blocks.0.ff.net.2.lora_A.weight": mx.array(
+                    [[1.0, 2.0]], dtype=mx.float32
+                ),
+                "diffusion_model.transformer_blocks.0.ff.net.2.lora_B.weight": mx.array(
+                    [[3.0], [4.0]], dtype=mx.float32
+                ),
+                "diffusion_model.transformer_blocks.0.ff.net.2.alpha": mx.array(0.5),
+            },
+        )
+        model = TinyLoRAModel()
+        model._lora_restore_cache_source = {
+            "valid": True,
+            "cache_path": tmp_path / "transformer.safetensors",
+            "transformer_cache_quantize": "off",
+            "video_ff_quantize_specs": (),
+            "video_ff_quantize_group_size": None,
+            "video_ff_quantize_bits": None,
+            "persistent_loras": (),
         }
-        key_a, key_b = find_lora_keys_for_weight(lora_weights, "layer.weight")
-        assert key_a == "layer.lora_A.weight"
-        assert key_b == "layer.lora_B.weight"
 
-    def test_finds_lora_down_up_pattern(self):
-        """Test finding lora_down/lora_up pattern."""
-        lora_weights = {
-            "layer.lora_down.weight": mx.array([1]),
-            "layer.lora_up.weight": mx.array([2]),
+        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
+
+        expected = mx.array([[1.5, 3.0], [2.0, 4.0]], dtype=mx.float32)
+        assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
+        assert model._lora_restore_cache_source["valid"] is True
+        assert len(model._lora_restore_cache_source["persistent_loras"]) == 1
+
+    def test_rejects_fused_value_outside_target_dtype(self, tmp_path):
+        path = tmp_path / "overflow_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "transformer_blocks.0.attn1.to_q.lora_A.weight": mx.array(
+                    [[70000.0]], dtype=mx.float32
+                ),
+                "transformer_blocks.0.attn1.to_q.lora_B.weight": mx.array(
+                    [[1.0]], dtype=mx.float32
+                ),
+            },
+        )
+        model = TinyLoRAModel()
+
+        with pytest.raises(ValueError, match="LoRA fusion overflows"):
+            fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
+
+    def test_snapshot_and_restore_round_trip(self, tmp_path):
+        path = tmp_path / "restore_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "transformer_blocks.0.ff.project_out.lora_A.weight": mx.array(
+                    [[1.0, 0.0]], dtype=mx.float32
+                ),
+                "transformer_blocks.0.ff.project_out.lora_B.weight": mx.array(
+                    [[2.0], [3.0]], dtype=mx.float32
+                ),
+            },
+        )
+        model = TinyLoRAModel()
+        private_original = mx.ones((2, 2), dtype=mx.float32)
+        model.transformer_blocks[0].ff._project_out_weight_t = private_original
+        original = snapshot_lora_base_weights(model)
+
+        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
+        assert not mx.allclose(
+            model.transformer_blocks[0].ff.project_out.weight,
+            mx.zeros((2, 2), dtype=mx.float32),
+        )
+        assert not mx.allclose(
+            model.transformer_blocks[0].ff._project_out_weight_t,
+            private_original,
+        )
+
+        restore_lora_base_weights(model, original)
+        assert mx.allclose(
+            model.transformer_blocks[0].ff.project_out.weight,
+            mx.zeros((2, 2), dtype=mx.float32),
+        )
+        assert mx.allclose(
+            model.transformer_blocks[0].ff._project_out_weight_t,
+            private_original,
+        )
+
+    def test_cache_snapshot_restores_from_cache_source(self, monkeypatch, tmp_path):
+        import LTX_2_MLX.loader.transformer_cache as tc
+
+        model = TinyLoRAModel()
+        cache_path = tmp_path / "transformer.safetensors"
+        model._lora_restore_cache_source = {
+            "valid": True,
+            "cache_path": cache_path,
+            "transformer_cache_quantize": "off",
+            "video_ff_quantize_specs": (("project_out", "mxfp8"),),
+            "video_ff_quantize_group_size": 32,
+            "video_ff_quantize_bits": 8,
+            "persistent_loras": (),
         }
-        key_a, key_b = find_lora_keys_for_weight(lora_weights, "layer.weight")
-        assert key_a == "layer.lora_down.weight"
-        assert key_b == "layer.lora_up.weight"
+        snapshot = snapshot_lora_base_weights(model)
+        assert snapshot["kind"] == "cache"
+        assert "parameters" not in snapshot
 
-    def test_returns_none_when_not_found(self):
-        """Test returns None when no LoRA keys found."""
-        lora_weights = {
-            "other.weight": mx.array([1]),
+        calls = {}
+
+        def fake_load_transformer_cache(target, path, **kwargs):
+            calls["target"] = target
+            calls["path"] = path
+            calls["kwargs"] = kwargs
+            return (0, 0, 0)
+
+        monkeypatch.setattr(tc, "load_transformer_cache", fake_load_transformer_cache)
+
+        restore_lora_base_weights(model, snapshot)
+
+        assert calls["target"] is model
+        assert calls["path"] == cache_path
+        assert calls["kwargs"]["video_ff_quantize_specs"] == (("project_out", "mxfp8"),)
+        assert calls["kwargs"]["video_ff_quantize_group_size"] == 32
+        assert calls["kwargs"]["video_ff_quantize_bits"] == 8
+        assert model._lora_restore_cache_source["valid"] is True
+
+    def test_cache_snapshot_refuses_persistent_loras_without_weight_snapshot(
+        self, monkeypatch, tmp_path
+    ):
+        import LTX_2_MLX.loader.transformer_cache as tc
+
+        path = tmp_path / "global_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "diffusion_model.transformer_blocks.0.ff.net.2.lora_A.weight": mx.array(
+                    [[1.0, 2.0]], dtype=mx.float32
+                ),
+                "diffusion_model.transformer_blocks.0.ff.net.2.lora_B.weight": mx.array(
+                    [[3.0], [4.0]], dtype=mx.float32
+                ),
+                "diffusion_model.transformer_blocks.0.ff.net.2.alpha": mx.array(0.5),
+            },
+        )
+        model = TinyLoRAModel()
+        cache_path = tmp_path / "transformer.safetensors"
+        model._lora_restore_cache_source = {
+            "valid": True,
+            "cache_path": cache_path,
+            "transformer_cache_quantize": "off",
+            "video_ff_quantize_specs": (),
+            "video_ff_quantize_group_size": None,
+            "video_ff_quantize_bits": None,
+            "persistent_loras": (),
         }
-        key_a, key_b = find_lora_keys_for_weight(lora_weights, "layer.weight")
-        assert key_a is None
-        assert key_b is None
+        expected = mx.array([[1.5, 3.0], [2.0, 4.0]], dtype=mx.float32)
 
-    def test_handles_missing_weight_suffix(self):
-        """Test handles base key without .weight suffix."""
-        lora_weights = {
-            "layer.lora_A": mx.array([1]),
-            "layer.lora_B": mx.array([2]),
-        }
-        key_a, key_b = find_lora_keys_for_weight(lora_weights, "layer")
-        assert key_a == "layer.lora_A"
-        assert key_b == "layer.lora_B"
+        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
+        snapshot = snapshot_lora_base_weights(model)
 
+        assert snapshot["kind"] == "cache"
+        assert "parameters" not in snapshot
+        assert len(snapshot["source"]["persistent_loras"]) == 1
 
-class TestComputeLoraDeltas:
-    """Tests for compute_lora_delta function."""
+        def fake_load_transformer_cache(target, path, **_kwargs):
+            assert path == cache_path
+            target.transformer_blocks[0].ff.project_out.weight = mx.zeros(
+                (2, 2), dtype=mx.float32
+            )
+            return (1, 0, 0)
 
-    def test_basic_delta_computation(self):
-        """Test basic LoRA delta: B @ A."""
-        lora_weights = {
-            "lora_A": mx.array([[1.0, 2.0], [3.0, 4.0]]),  # (2, 2) - rank=2
-            "lora_B": mx.array([[1.0, 0.0], [0.0, 1.0]]),  # (2, 2) - identity
-        }
-        delta = compute_lora_delta(lora_weights, "lora_A", "lora_B", strength=1.0)
-        expected = mx.matmul(lora_weights["lora_B"], lora_weights["lora_A"])
-        assert mx.allclose(delta, expected)
+        monkeypatch.setattr(tc, "load_transformer_cache", fake_load_transformer_cache)
+        restore_lora_base_weights(model, snapshot)
 
-    def test_strength_scaling(self):
-        """Test strength scales the delta."""
-        lora_weights = {
-            "lora_A": mx.array([[1.0, 2.0]]),  # (1, 2)
-            "lora_B": mx.array([[1.0], [1.0]]),  # (2, 1)
-        }
-        delta_full = compute_lora_delta(lora_weights, "lora_A", "lora_B", strength=1.0)
-        delta_half = compute_lora_delta(lora_weights, "lora_A", "lora_B", strength=0.5)
-        assert mx.allclose(delta_half, delta_full * 0.5)
-
-    def test_negative_strength(self):
-        """Test negative strength inverts delta."""
-        lora_weights = {
-            "lora_A": mx.array([[1.0, 2.0]]),
-            "lora_B": mx.array([[1.0], [1.0]]),
-        }
-        delta_pos = compute_lora_delta(lora_weights, "lora_A", "lora_B", strength=1.0)
-        delta_neg = compute_lora_delta(lora_weights, "lora_A", "lora_B", strength=-1.0)
-        assert mx.allclose(delta_neg, -delta_pos)
+        assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
+        assert model._lora_restore_cache_source["valid"] is True
+        assert len(model._lora_restore_cache_source["persistent_loras"]) == 1
 
 
 class TestGetLoraTargetKeys:
