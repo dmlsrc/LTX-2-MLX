@@ -560,16 +560,25 @@ def checkpoint_has_fp8_tensors(weights_path: str) -> bool:
 
 def _fp8_scale_companions(
     header_dtypes: Dict[str, str],
-) -> tuple[set, set, set]:
-    """Classify FP8 keys and their scale companions from a header map.
+) -> tuple[set, set, set, set]:
+    """Classify FP8 keys and their scale/metadata companions from a header map.
 
-    Returns ``(fp8_keys, weight_scale_keys, input_scale_keys)``.  Follows
-    the vllm-style static-FP8 convention shipped in Lightricks' ``-fp8``
-    bundles: each FP8 ``<base>.weight`` has scalar F32 companions
-    ``<base>.weight_scale`` (dequant factor) and ``<base>.input_scale``
-    (static activation-quant parameter).  A ``*_scale`` key whose base is
-    not an FP8 tensor (e.g. the AdaLN ``scale_shift_table`` weights) is an
-    ordinary tensor and is left alone.
+    Returns ``(fp8_keys, weight_scale_keys, input_scale_keys,
+    comfy_quant_keys)``.  Two packer conventions appear in the wild:
+
+    - **vllm-style** (Lightricks' ``-fp8`` bundles): each FP8 ``<base>.weight``
+      has scalar F32 companions ``<base>.weight_scale`` (dequant factor) and
+      ``<base>.input_scale`` (static activation-quant parameter).
+    - **ComfyUI**: ``<base>.weight_scale`` plus a ``<base>.comfy_quant`` tensor
+      (U8 — a tiny JSON tag such as ``{"format": "float8_e4m3fn"}``), pure
+      metadata with no numeric payload; the real scale is still
+      ``weight_scale``.
+
+    ``weight_scale`` is consumed; ``input_scale`` and ``comfy_quant`` are
+    dropped (neither is a model parameter — left in, ``comfy_quant`` makes
+    ``model.update()`` raise "Module does not have parameter named
+    comfy_quant").  A ``*_scale`` key whose base is not an FP8 tensor (e.g.
+    the AdaLN ``scale_shift_table`` weights) is an ordinary tensor, left alone.
     """
     fp8_keys = {
         key
@@ -589,7 +598,11 @@ def _fp8_scale_companions(
             candidate = key[: -len(weight_suffix)] + ".input_scale"
             if candidate in header_dtypes:
                 input_scale_keys.add(candidate)
-    return fp8_keys, weight_scale_keys, input_scale_keys
+    # ComfyUI per-weight metadata tag; never a model parameter, always dropped.
+    comfy_quant_keys = {
+        key for key in header_dtypes if key.endswith(".comfy_quant")
+    }
+    return fp8_keys, weight_scale_keys, input_scale_keys, comfy_quant_keys
 
 
 def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
@@ -601,7 +614,8 @@ def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
     representable in both FP16 and BF16, so unscaled tensors transit
     losslessly into ``value_dtype``; scaled tensors dequantize in FP32
     (``from_fp8(w) * weight_scale``) and round once.  ``weight_scale``
-    companions are consumed; ``input_scale`` companions are dropped —
+    companions are consumed; ``input_scale`` and ComfyUI ``comfy_quant``
+    companions are dropped —
     they parameterize static activation quantization for real FP8 GEMMs,
     and after weight dequantization activations run at full precision.
     Everything stays lazy, so the build never holds an eager copy of the
@@ -614,13 +628,17 @@ def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
             "F8_E5M2 checkpoints are not supported "
             "(mx.from_fp8 decodes E4M3 only)."
         )
-    fp8_keys, weight_scale_keys, input_scale_keys = _fp8_scale_companions(
-        header_dtypes
+    fp8_keys, weight_scale_keys, input_scale_keys, comfy_quant_keys = (
+        _fp8_scale_companions(header_dtypes)
     )
 
     raw_weights = mx.load(weights_path)
     for key, value in raw_weights.items():
-        if key in weight_scale_keys or key in input_scale_keys:
+        if (
+            key in weight_scale_keys
+            or key in input_scale_keys
+            or key in comfy_quant_keys
+        ):
             continue
         if key in fp8_keys:
             scale_key = f"{key}_scale"
@@ -1084,13 +1102,17 @@ def build_transformer_cache(
         if transformer_dtype is None:
             transformer_dtype = mx.bfloat16
         header_dtypes = _safetensors_header_dtypes(weights_path)
-        fp8_keys, weight_scale_keys, input_scale_keys = _fp8_scale_companions(
-            header_dtypes
+        fp8_keys, weight_scale_keys, input_scale_keys, comfy_quant_keys = (
+            _fp8_scale_companions(header_dtypes)
+        )
+        comfy_note = (
+            f", {len(comfy_quant_keys)} comfy_quant tags dropped"
+            if comfy_quant_keys else ""
         )
         print(
             f"  FP8 checkpoint: dequantizing {len(fp8_keys)} tensors "
             f"({len(weight_scale_keys)} weight scales applied, "
-            f"{len(input_scale_keys)} input scales dropped) to "
+            f"{len(input_scale_keys)} input scales dropped{comfy_note}) to "
             f"{_dtype_to_payload_name(transformer_dtype)} for the cache"
         )
         raw_items = _iter_fp8_checkpoint_weights(weights_path, transformer_dtype)
