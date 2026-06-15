@@ -27,7 +27,7 @@ from mlx.utils import tree_flatten
 #                                project_in, project_out
 #   control path              -- adaln, prompt_adaln, scale_shift,
 #                                prompt_scale_shift, gate_adaln, av_ca,
-#                                distill_control
+#                                cross_control, distill_control
 # The branch/type aliases are coarse shortcuts; the module/projection tags give
 # full granularity (e.g. exclude just `audio_to_video_attn` to drop the
 # lip-sync direction, or `attn2` to revert prompt-conditioning to stock).
@@ -46,7 +46,10 @@ _LORA_PROJ_TAGS = frozenset({
 })
 _LORA_CONTROL_TAGS = frozenset({
     "adaln", "prompt_adaln", "scale_shift", "prompt_scale_shift",
-    "gate_adaln", "av_ca", "distill_control",
+    "gate_adaln", "av_ca", "cross_control", "distill_control",
+})
+_LORA_CROSS_CONTROL_TAGS = frozenset({
+    "adaln", "attn2", "audio_attn2", "cross",
 })
 _LORA_DISTILL_CONTROL_TAGS = frozenset({
     "cross", "gate", "adaln", "prompt_adaln", "scale_shift",
@@ -113,6 +116,8 @@ def _lora_key_categories(mlx_key: str) -> set:
             if p in _LORA_PROJ_TAGS:
                 cats.add(p)
                 break
+    if cats & _LORA_CROSS_CONTROL_TAGS:
+        cats.add("cross_control")
     if cats & _LORA_DISTILL_CONTROL_TAGS:
         cats.add("distill_control")
     return cats
@@ -129,6 +134,8 @@ class LoRAConfig:
     ``exclude`` lists categories (see ``_LORA_CATEGORIES``) whose targets are
     dropped from this adapter's fusion -- e.g. ``("audio", "cross")`` applies
     only the video-branch style and leaves the audio path stock. Use
+    ``("cross_control",)`` to drop prompt/audio-video cross-conditioning
+    paths: attn2, audio_attn2, cross bridges, and AdaLN. Use
     ``("distill_control",)`` to drop the official-distillation-style control
     paths: cross bridges, gate logits, AdaLN, scale-shift, prompt scale-shift,
     and AV cross-conditioning AdaLN.

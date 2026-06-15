@@ -318,6 +318,7 @@ class TestLoRAConfig:
                 "prompt_scale_shift",
                 "gate_adaln",
                 "av_ca",
+                "cross_control",
                 "distill_control",
             ),
         )
@@ -329,6 +330,7 @@ class TestLoRAConfig:
             "prompt_scale_shift",
             "gate_adaln",
             "av_ca",
+            "cross_control",
             "distill_control",
         )
 
@@ -464,12 +466,31 @@ class TestLoRACategories:
             "transformer_blocks.0.audio_to_video_attn.to_v.weight"
         )
 
-        assert {"cross", "audio_to_video_attn", "to_v", "distill_control"} <= cats
+        assert {
+            "cross",
+            "audio_to_video_attn",
+            "to_v",
+            "cross_control",
+            "distill_control",
+        } <= cats
+
+    def test_cross_control_catches_video_cross_attention(self):
+        cats = _lora_key_categories("transformer_blocks.0.attn2.to_q.weight")
+
+        assert {"video", "attn", "attn2", "to_q", "cross_control"} <= cats
+        assert "distill_control" not in cats
+
+    def test_cross_control_catches_audio_cross_attention(self):
+        cats = _lora_key_categories("transformer_blocks.0.audio_attn2.to_q.weight")
+
+        assert {"audio", "attn", "audio_attn2", "to_q", "cross_control"} <= cats
+        assert "distill_control" not in cats
 
     def test_distill_control_catches_gate_logits(self):
         cats = _lora_key_categories("transformer_blocks.0.attn1.to_gate_logits.weight")
 
         assert {"video", "gate", "attn1", "to_gate_logits", "distill_control"} <= cats
+        assert "cross_control" not in cats
 
     def test_control_path_tags_top_level_adaln(self):
         cats = _lora_key_categories("prompt_adaln_single.linear.weight")
@@ -479,6 +500,7 @@ class TestLoRACategories:
             "adaln",
             "prompt_adaln",
             "prompt_scale_shift",
+            "cross_control",
             "distill_control",
         } <= cats
 
@@ -490,6 +512,7 @@ class TestLoRACategories:
             "adaln",
             "prompt_adaln",
             "prompt_scale_shift",
+            "cross_control",
             "distill_control",
         } <= cats
 
@@ -499,8 +522,22 @@ class TestLoRACategories:
         )
         gate = _lora_key_categories("av_ca_a2v_gate_adaln_single.linear.weight")
 
-        assert {"video", "av_ca", "adaln", "scale_shift", "distill_control"} <= scale_shift
-        assert {"video", "av_ca", "adaln", "gate_adaln", "distill_control"} <= gate
+        assert {
+            "video",
+            "av_ca",
+            "adaln",
+            "scale_shift",
+            "cross_control",
+            "distill_control",
+        } <= scale_shift
+        assert {
+            "video",
+            "av_ca",
+            "adaln",
+            "gate_adaln",
+            "cross_control",
+            "distill_control",
+        } <= gate
 
 
 class TinyLoRALinear(nn.Module):
