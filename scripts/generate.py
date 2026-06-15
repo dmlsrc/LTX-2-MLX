@@ -1113,6 +1113,8 @@ from LTX_2_MLX.pipelines.keyframe_interpolation import (
 )
 from LTX_2_MLX.model.video_vae.native_encoder import (
     NativeConv3dVideoEncoder,
+    NativeConv3dVideoEncoderStatistics,
+    load_native_vae_encoder_statistics,
     load_native_vae_encoder_weights,
 )
 
@@ -2651,6 +2653,7 @@ def generate_video(
     lora_strength: float = 1.0,
     lora_configs: "list | None" = None,
     lora_allow_partial: bool = False,
+    stage2_lora_fuse_mode: str = "delta",
     tiled_vae: bool = False,
     vae_tiling_mode: str = "auto",
     vae_temporal_tile_frames: int | None = None,
@@ -2738,6 +2741,18 @@ def generate_video(
     distilled_single_pass_requested = (
         model_variant == "distilled" and pipeline_type in {"text-to-video", "one-stage"} and v2
     )
+    if stage2_lora_fuse_mode not in {"delta", "fresh-total"}:
+        raise ValueError(
+            "stage2_lora_fuse_mode must be 'delta' or 'fresh-total', "
+            f"got {stage2_lora_fuse_mode!r}"
+        )
+    if stage2_lora_fuse_mode != "delta" and not (
+        distilled_two_stage_requested or pipeline_type == "two-stage"
+    ):
+        print(
+            "  WARNING: --stage2-lora-fuse-mode only affects two-stage "
+            "generation; ignoring it for this pipeline."
+        )
     if (
         distilled_two_stage_requested
         and requested_num_steps is not None
@@ -3639,8 +3654,10 @@ def generate_video(
 
     # Load VAE decoder.
     vae_decoder = None
-    if not skip_vae:
-        print(f"\n[3/5] Loading VAE decoder...")
+    vae_decoder_loader = None
+    defer_av_decoder_load = use_av_encoder and distilled_two_stage_requested and not skip_vae
+
+    def load_video_vae_decoder():
         # Read VAE config from checkpoint to build correct architecture
         vae_config = get_vae_config(config_weights_path) if config_weights_path else {}
         decoder_blocks = vae_config.get("decoder_blocks", None)
@@ -3650,7 +3667,7 @@ def generate_video(
             print(f"  VAE config: {len(decoder_blocks)} blocks, base_ch={base_channels}, timestep={timestep_cond}")
 
         if vae_decoder_backend == "native":
-            vae_decoder = NativeConv3dVideoDecoder(
+            decoder = NativeConv3dVideoDecoder(
                 decoder_blocks=decoder_blocks,
                 base_channels=base_channels,
                 timestep_conditioning=timestep_cond,
@@ -3662,12 +3679,21 @@ def generate_video(
                 f"Only 'native' is supported."
             )
         if video_vae_load_path and not use_placeholder:
-            load_native_vae_decoder_weights(vae_decoder, video_vae_load_path)
+            load_native_vae_decoder_weights(decoder, video_vae_load_path)
         elif use_placeholder:
             print("  Skipping weights load (placeholder)")
+        return decoder
+
+    if not skip_vae:
+        if defer_av_decoder_load:
+            print("\n[3/5] VAE decoder load deferred until video decode")
+            vae_decoder_loader = load_video_vae_decoder
+        else:
+            print(f"\n[3/5] Loading VAE decoder...")
+            vae_decoder = load_video_vae_decoder()
     else:
         print("\n[3/5] VAE decoder skipped by user")
-    timings.mark("vae decoder load")
+    timings.mark("vae decoder setup" if defer_av_decoder_load else "vae decoder load")
 
     # === TWO-STAGE PIPELINE ===
     # Use dedicated two-stage pipeline for higher quality generation
@@ -3796,6 +3822,7 @@ def generate_video(
             dtype=compute_dtype,
             distilled_lora_config=distilled_lora_config,
             stage_lora_configs=stage_managed_lora_configs,
+            stage2_lora_fuse_mode=stage2_lora_fuse_mode,
             tiling_config=vae_tiling_config,
             audio_enabled=generate_audio,
         )
@@ -4096,7 +4123,7 @@ def generate_video(
                 return
             raise ValueError("AV pipeline requires a loaded AudioVideo model")
 
-        if vae_decoder is None and not use_placeholder:
+        if vae_decoder is None and vae_decoder_loader is None and not use_placeholder:
             raise ValueError("AV pipeline requires VAE decoder")
 
         # Create image conditionings if provided. The VAE encoder is needed only
@@ -4111,51 +4138,76 @@ def generate_video(
             )]
 
         video_encoder = None
-        if images or distilled_two_stage:
+        if images:
             print("[3.5/5] Loading VAE encoder...")
             video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
             if video_vae_load_path and not use_placeholder:
                 load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
             else:
                 print("  Skipping weights load (placeholder)")
+        elif distilled_two_stage:
+            print("[3.5/5] Loading VAE encoder statistics...")
+            if video_vae_load_path and not use_placeholder:
+                video_encoder = load_native_vae_encoder_statistics(video_vae_load_path)
+            else:
+                video_encoder = NativeConv3dVideoEncoderStatistics()
+                video_encoder.per_channel_statistics.std_of_means = mx.ones(
+                    (128,),
+                    dtype=mx.float32,
+                )
+                print("  Using placeholder VAE encoder statistics")
         else:
             print("[3.5/5] VAE encoder skipped (no image conditioning)")
 
         spatial_upscaler = None
+        spatial_upscaler_loader = None
         if distilled_two_stage:
             if model_variant != "distilled":
                 raise ValueError("Distilled two-stage requires --model-variant distilled")
             if not spatial_upscaler_weights:
                 raise ValueError("Distilled two-stage requires --spatial-upscaler-weights")
-            print("[3.6/5] Loading spatial upscaler...")
-            spatial_upscaler = SpatialUpscaler()
-            if not use_placeholder:
-                load_spatial_upscaler_weights(spatial_upscaler, spatial_upscaler_weights)
-            else:
-                print("  Skipping weights load (placeholder)")
+            print("[3.6/5] Spatial upscaler load deferred until inter-stage upscale")
+
+            def spatial_upscaler_loader():
+                upscaler = SpatialUpscaler()
+                if not use_placeholder:
+                    load_spatial_upscaler_weights(upscaler, spatial_upscaler_weights)
+                else:
+                    print("  Skipping weights load (placeholder)")
+                return upscaler
 
         audio_decoder = None
         vocoder = None
+        audio_decoder_loader = None
         audio_sample_rate = 24000
-        if generate_audio:
+
+        def load_audio_decode_stack():
             print("  Loading Audio VAE decoder...")
-            audio_decoder = AudioDecoder(compute_dtype=compute_dtype)
+            loaded_audio_decoder = AudioDecoder(compute_dtype=compute_dtype)
             if audio_vae_load_path:
-                load_audio_decoder_weights(audio_decoder, audio_vae_load_path)
+                load_audio_decoder_weights(loaded_audio_decoder, audio_vae_load_path)
 
             print("  Loading Vocoder...")
             is_bwe = False
             if vocoder_load_path:
-                vocoder, is_bwe = create_vocoder_for_checkpoint(config_weights_path, compute_dtype)
+                loaded_vocoder, is_bwe = create_vocoder_for_checkpoint(config_weights_path, compute_dtype)
                 if is_bwe:
                     print("  Detected BWE vocoder (LTX-2.3)")
-                    load_vocoder_with_bwe_weights(vocoder, vocoder_load_path)
+                    load_vocoder_with_bwe_weights(loaded_vocoder, vocoder_load_path)
                 else:
-                    load_vocoder_weights(vocoder, vocoder_load_path)
+                    load_vocoder_weights(loaded_vocoder, vocoder_load_path)
             else:
-                vocoder = Vocoder(compute_dtype=compute_dtype)
+                loaded_vocoder = Vocoder(compute_dtype=compute_dtype)
             print_audio_dtype_summary(compute_dtype, is_bwe)
-            audio_sample_rate = vocoder.output_sample_rate if vocoder else 24000
+            loaded_sample_rate = loaded_vocoder.output_sample_rate if loaded_vocoder else 24000
+            return loaded_audio_decoder, loaded_vocoder, loaded_sample_rate
+
+        if generate_audio:
+            if distilled_two_stage:
+                print("  Audio decoder/vocoder load deferred until audio decode")
+                audio_decoder_loader = load_audio_decode_stack
+            else:
+                audio_decoder, vocoder, audio_sample_rate = load_audio_decode_stack()
 
         # Create one-stage pipeline with audio support
         print("\n[4/5] Creating audio-video pipeline...")
@@ -4165,6 +4217,9 @@ def generate_video(
             video_decoder=vae_decoder,
             audio_decoder=audio_decoder,
             vocoder=vocoder,
+            video_decoder_loader=vae_decoder_loader,
+            audio_decoder_loader=audio_decoder_loader,
+            audio_sample_rate=audio_sample_rate,
         )
 
         del model  # pipeline now holds the only reference; del self.transformer in av_pipeline.py can actually free it
@@ -4275,6 +4330,8 @@ def generate_video(
                     latent_save_path=latent_sidecar_path(output_path) if save_latents else None,
                     decode_video=not _stream_decode,
                     stage_lora_configs=stage_managed_lora_configs,
+                    stage2_lora_fuse_mode=stage2_lora_fuse_mode,
+                    spatial_upscaler_loader=spatial_upscaler_loader,
                 )
         else:
             print(f"\n[5/5] Running audio-video generation ({num_steps} steps)...")
@@ -4322,6 +4379,7 @@ def generate_video(
             timings.extend(pipeline_timings)
         else:
             timings.mark("generation + decode")
+        audio_sample_rate = getattr(av_pipeline, "audio_sample_rate", audio_sample_rate)
 
         if _stream_decode:
             # Streaming path: `video` is the final_video_latent.  Build a
@@ -4342,6 +4400,18 @@ def generate_video(
             n_vae_chunks, tiling_desc = plan_vae_tiling(
                 final_video_latent, effective_tiling,
             )
+            stream_decoder_loaded_now = False
+            if av_pipeline.video_decoder is None:
+                if vae_decoder_loader is None:
+                    raise ValueError("Streaming VAE decode requires a VAE decoder loader")
+                print("  Loading VAE decoder for streaming decode...")
+                decoder_load_start = time.perf_counter()
+                av_pipeline.video_decoder = vae_decoder_loader()
+                decoder_load_elapsed = time.perf_counter() - decoder_load_start
+                print(f"  VAE decoder load complete in {decoder_load_elapsed:.1f}s")
+                timings.sections.append(("vae decoder load", decoder_load_elapsed))
+                timings.last_mark = time.perf_counter()
+                stream_decoder_loaded_now = True
             decoder_name = av_pipeline.video_decoder.__class__.__name__
             print(
                 f"  Streaming VAE decode -> encoder: latent shape "
@@ -4400,6 +4470,10 @@ def generate_video(
                     progress_stack=_stream_bars,
                 )
             print(f"Done! Video saved to {final_path}")
+            if stream_decoder_loaded_now:
+                av_pipeline.video_decoder = None
+                gc.collect()
+                mx.clear_cache()
             timings.mark("output save")
         else:
             # Eager path: pipeline produced a fully decoded video tensor.
@@ -5510,6 +5584,19 @@ def main():
         help="Optional stage-2 LoRA strength. Repeat to match --lora; a single value applies to all."
     )
     parser.add_argument(
+        "--stage2-lora-fuse-mode",
+        "--lora-stage2-fuse-mode",
+        choices=("delta", "fresh-total"),
+        default="delta",
+        help=(
+            "Two-stage LoRA transition strategy. delta (default) applies "
+            "stage2-stage1 strength changes over stage-1 fused weights. "
+            "fresh-total restores the base transformer from the weight cache "
+            "before stage 2 and fuses the full stage-2 LoRA totals; this is "
+            "intended for benchmarking before making it default."
+        ),
+    )
+    parser.add_argument(
         "--lora-allow-partial",
         action="store_true",
         help="Allow a LoRA fuse that places <50%% of its resolved targets "
@@ -5951,6 +6038,7 @@ def main():
         image_strength=args.image_strength,
         lora_configs=cli_lora_configs,
         lora_allow_partial=args.lora_allow_partial,
+        stage2_lora_fuse_mode=args.stage2_lora_fuse_mode,
         tiled_vae=args.tiled_vae,
         vae_tiling_mode=args.vae_tiling,
         vae_temporal_tile_frames=args.vae_temporal_tile_frames,

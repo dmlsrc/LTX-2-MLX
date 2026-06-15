@@ -7,6 +7,7 @@ This pipeline provides high-quality video generation using a two-stage approach:
 This combines the quality of CFG guidance with the speed of distilled refinement.
 """
 
+import gc
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
@@ -120,6 +121,7 @@ class TwoStageCFGConfig:
     # LoRA config for stage 2 (distilled refinement)
     distilled_lora_config: Optional[LoRAConfig] = None
     stage_lora_configs: Optional[List[LoRAConfig]] = None
+    stage2_lora_fuse_mode: str = "delta"
 
     # Custom stage 2 sigmas (None = use default STAGE_2_DISTILLED_SIGMA_VALUES)
     stage_2_sigmas: Optional[list] = None
@@ -532,11 +534,17 @@ class TwoStagePipeline:
         mx.random.seed(config.seed)
 
         stage_1_loras = lora_configs_for_stage(config.stage_lora_configs, 1)
+        stage_2_total_loras = lora_configs_for_stage(config.stage_lora_configs, 2)
         stage_2_delta_loras = lora_configs_for_stage_delta(
             config.stage_lora_configs,
             from_stage=1,
             to_stage=2,
         )
+        if config.stage2_lora_fuse_mode not in {"delta", "fresh-total"}:
+            raise ValueError(
+                "stage2_lora_fuse_mode must be 'delta' or 'fresh-total', "
+                f"got {config.stage2_lora_fuse_mode!r}"
+            )
         stage_lora_active = bool(stage_1_loras or stage_2_delta_loras)
         if stage_lora_active and self._original_weights is None:
             self._original_weights = snapshot_lora_base_weights(self._velocity_model)
@@ -687,27 +695,58 @@ class TwoStagePipeline:
         # Re-normalize back to latent space
         upscaled_video_latent = self.video_encoder.per_channel_statistics.normalize(upscaled_unnorm)
         mx.eval(upscaled_video_latent)
+        # Keep only the latents needed by stage 2 before LoRA fusion starts.
+        del latent_unnorm, upscaled_unnorm
+        del video_state, video_tools
+        del stage_1_video_latent
+        if audio_state is not None:
+            del audio_state
+        if audio_tools is not None:
+            del audio_tools
+        gc.collect()
+        mx.synchronize()
+        mx.clear_cache()
 
         # Apply stage-specific or legacy stage-2 LoRA if provided.
-        if stage_2_delta_loras:
-            stage_lines = format_lora_stage_scale_lines(
-                config.stage_lora_configs,
-                2,
-                from_stage=1,
-                include_unchanged=True,
+        if config.stage2_lora_fuse_mode == "fresh-total" and self._original_weights is not None:
+            lora_restore_start = time.perf_counter()
+            restore_lora_base_weights(self._velocity_model, self._original_weights)
+            print(
+                f"  Stage 2 LoRA base restore complete in "
+                f"{time.perf_counter() - lora_restore_start:.1f}s"
             )
+
+        stage_2_loras_to_fuse = (
+            stage_2_total_loras
+            if config.stage2_lora_fuse_mode == "fresh-total"
+            else stage_2_delta_loras
+        )
+        if stage_2_loras_to_fuse:
+            if config.stage2_lora_fuse_mode == "fresh-total":
+                stage_lines = format_lora_stage_scale_lines(config.stage_lora_configs, 2)
+                line_header = "  Stage 2 LoRA total scales:"
+                complete_label = "  Stage 2 LoRA total fuse complete in "
+            else:
+                stage_lines = format_lora_stage_scale_lines(
+                    config.stage_lora_configs,
+                    2,
+                    from_stage=1,
+                    include_unchanged=True,
+                )
+                line_header = "  Stage 2 LoRA scales:"
+                complete_label = "  Stage 2 LoRA delta fuse complete in "
             if stage_lines:
-                print("  Stage 2 LoRA scales:")
+                print(line_header)
                 for line in stage_lines:
                     print(line)
             lora_fuse_start = time.perf_counter()
             fuse_loras_into_model(
                 self._velocity_model,
-                stage_2_delta_loras,
+                stage_2_loras_to_fuse,
                 track_for_restore=False,
             )
             print(
-                f"  Stage 2 LoRA delta fuse complete in "
+                complete_label +
                 f"{time.perf_counter() - lora_fuse_start:.1f}s"
             )
         elif not stage_lora_active and config.distilled_lora_config is not None:

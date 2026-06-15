@@ -32,6 +32,57 @@ _STRIDE_MAP = {
     "compress_space": (1, 2, 2),
 }
 
+_STAT_KEY_ALIASES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("mean-of-means", "mean"), "mean_of_means"),
+    (("std-of-means", "std"), "std_of_means"),
+    (("mean-of-stds",), "mean_of_stds"),
+    (
+        (
+            "mean-of-stds-over-std-of-means",
+            "mean-of-stds_over_std-of-means",
+        ),
+        "mean_of_stds_over_std_of_means",
+    ),
+    (("channel",), "channel"),
+)
+
+
+class NativeConv3dVideoEncoderStatistics:
+    """Small adapter exposing only encoder latent normalization statistics.
+
+    Distilled two-stage upscaling needs ``encoder.per_channel_statistics`` for
+    latent de-normalize/re-normalize, but text-only runs do not need any of the
+    heavyweight encoder convolution weights.
+    """
+
+    def __init__(self, per_channel_statistics: Optional[PerChannelStatistics] = None):
+        self.per_channel_statistics = (
+            per_channel_statistics
+            if per_channel_statistics is not None
+            else PerChannelStatistics(latent_channels=128)
+        )
+
+
+def _load_per_channel_statistics(
+    stats: PerChannelStatistics,
+    weights: dict,
+) -> int:
+    loaded_count = 0
+    for stat_keys, attr_name in _STAT_KEY_ALIASES:
+        candidates = []
+        for stat_key in stat_keys:
+            candidates.extend([
+                f"vae.per_channel_statistics.{stat_key}",
+                f"vae_encoder.per_channel_statistics.{stat_key}",
+                f"per_channel_statistics.{stat_key}",
+            ])
+        value = lookup_weight(weights, *candidates)
+        if value is None:
+            continue
+        setattr(stats, attr_name, value)
+        loaded_count += 1
+    return loaded_count
+
 
 class NativeSpaceToDepthDownsample3d(nn.Module):
     """Conv3d followed by space-to-depth in BFHWC layout.
@@ -294,18 +345,10 @@ def load_native_vae_encoder_weights(
     loaded_count = 0
 
     # Per-channel statistics (latent normalizer)
-    for stat_key in (
-        "mean-of-means",
-        "std-of-means",
-        "mean-of-stds",
-        "mean-of-stds-over-std-of-means",
-        "channel",
-    ):
-        pt_key = f"vae.per_channel_statistics.{stat_key}"
-        if pt_key in weights:
-            attr_name = stat_key.replace("-", "_")
-            setattr(encoder.per_channel_statistics, attr_name, weights[pt_key])
-            loaded_count += 1
+    loaded_count += _load_per_channel_statistics(
+        encoder.per_channel_statistics,
+        weights,
+    )
 
     # Conv weights + biases
     for local_prefix, conv_block in encoder._iter_convs():
@@ -324,3 +367,27 @@ def load_native_vae_encoder_weights(
             loaded_count += 1
 
     print(f"  Loaded {loaded_count} native Conv3d VAE encoder tensors")
+
+
+def load_native_vae_encoder_statistics(
+    weights_path: str,
+) -> NativeConv3dVideoEncoderStatistics:
+    """Load only the VAE encoder latent normalization statistics."""
+    print(f"Loading native Conv3d VAE encoder statistics from {weights_path}...")
+    weights = mx.load(weights_path)
+    stats_encoder = NativeConv3dVideoEncoderStatistics()
+    loaded_count = _load_per_channel_statistics(
+        stats_encoder.per_channel_statistics,
+        weights,
+    )
+    if loaded_count == 0:
+        raise ValueError(
+            "No VAE encoder per-channel statistics found in "
+            f"{weights_path}"
+        )
+    mx.eval(*[
+        getattr(stats_encoder.per_channel_statistics, attr_name)
+        for _aliases, attr_name in _STAT_KEY_ALIASES
+    ])
+    print(f"  Loaded {loaded_count} native Conv3d VAE encoder statistic tensors")
+    return stats_encoder

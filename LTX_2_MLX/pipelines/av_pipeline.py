@@ -178,6 +178,9 @@ class AVPipeline:
         video_decoder: Optional[NativeConv3dVideoDecoder],
         audio_decoder: Optional[AudioDecoder] = None,
         vocoder: Optional[Vocoder] = None,
+        video_decoder_loader: Optional[Callable[[], NativeConv3dVideoDecoder]] = None,
+        audio_decoder_loader: Optional[Callable[[], tuple[AudioDecoder, object, int]]] = None,
+        audio_sample_rate: int = 24000,
     ):
         """
         Initialize the single-stage pipeline.
@@ -188,6 +191,9 @@ class AVPipeline:
             video_decoder: Optional VAE decoder for decoding latents to video.
             audio_decoder: Optional audio VAE decoder for decoding audio latents to mel spectrograms.
             vocoder: Optional vocoder for converting mel spectrograms to waveforms.
+            video_decoder_loader: Optional lazy loader for the VAE decoder.
+            audio_decoder_loader: Optional lazy loader for the audio VAE decoder + vocoder.
+            audio_sample_rate: Output sample rate to use before a lazy vocoder has been loaded.
         """
         # Wrap transformer in X0Model if needed
         # LTXModel outputs velocity, but denoising expects denoised (X0) predictions
@@ -201,6 +207,13 @@ class AVPipeline:
         self.video_decoder = video_decoder
         self.audio_decoder = audio_decoder
         self.vocoder = vocoder
+        self.video_decoder_loader = video_decoder_loader
+        self.audio_decoder_loader = audio_decoder_loader
+        self.audio_sample_rate = (
+            getattr(vocoder, "output_sample_rate", audio_sample_rate)
+            if vocoder is not None
+            else audio_sample_rate
+        )
         self.patchifier = VideoLatentPatchifier(patch_size=1)
         self.audio_patchifier = AudioPatchifier(patch_size=1)
         self.diffusion_step = EulerDiffusionStep()
@@ -338,6 +351,53 @@ class AVPipeline:
             patchifier=self.audio_patchifier,
             target_shape=target_shape,
         )
+
+    def _ensure_video_decoder(
+        self,
+        progress_message: Optional[Callable[[str], None]] = None,
+    ) -> tuple[float, bool]:
+        """Load the video VAE decoder on demand.
+
+        Returns ``(elapsed_seconds, loaded_now)`` so callers can time and
+        release only the components that this helper materialized.
+        """
+        if self.video_decoder is not None:
+            return 0.0, False
+        if self.video_decoder_loader is None:
+            raise ValueError("Video decoder required for VAE decode.")
+
+        emit = progress_message or print
+        emit("  Loading VAE decoder...")
+        load_start = time.perf_counter()
+        self.video_decoder = self.video_decoder_loader()
+        load_elapsed = time.perf_counter() - load_start
+        if self.video_decoder is None:
+            raise ValueError("Video decoder loader returned None.")
+        emit(f"  VAE decoder load complete in {load_elapsed:.1f}s")
+        return load_elapsed, True
+
+    def _ensure_audio_decoder(
+        self,
+        progress_message: Optional[Callable[[str], None]] = None,
+    ) -> tuple[float, bool]:
+        """Load the audio VAE decoder + vocoder on demand."""
+        if self.audio_decoder is not None and self.vocoder is not None:
+            return 0.0, False
+        if self.audio_decoder_loader is None:
+            raise ValueError("Audio decoder and vocoder required for audio decode.")
+
+        emit = progress_message or print
+        emit("  Loading audio decoder/vocoder...")
+        load_start = time.perf_counter()
+        audio_decoder, vocoder, audio_sample_rate = self.audio_decoder_loader()
+        load_elapsed = time.perf_counter() - load_start
+        if audio_decoder is None or vocoder is None:
+            raise ValueError("Audio decoder loader returned incomplete decode stack.")
+        self.audio_decoder = audio_decoder
+        self.vocoder = vocoder
+        self.audio_sample_rate = audio_sample_rate
+        emit(f"  Audio decoder/vocoder load complete in {load_elapsed:.1f}s")
+        return load_elapsed, True
 
     def _decode_audio(self, audio_latent: mx.array) -> mx.array:
         """
@@ -1157,7 +1217,8 @@ class AVPipeline:
         self,
         positive_encoding: mx.array,
         config: AVCFGConfig,
-        spatial_upscaler,
+        spatial_upscaler=None,
+        spatial_upscaler_loader: Optional[Callable[[], object]] = None,
         images: Optional[List[ImageCondition]] = None,
         callback: Optional[Callable[[int, int], None]] = None,
         stage_callback: Optional[Callable[[str, int, int], None]] = None,
@@ -1168,6 +1229,7 @@ class AVPipeline:
         stage_2_sigmas: Optional[Sequence[float]] = None,
         decode_video: bool = True,
         stage_lora_configs: Optional[List[LoRAConfig]] = None,
+        stage2_lora_fuse_mode: str = "delta",
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate with the distilled AV checkpoint in two stages.
@@ -1200,9 +1262,13 @@ class AVPipeline:
             )
         if self.video_encoder is None:
             raise ValueError("Video encoder required for distilled two-stage upscaling.")
-        if self.video_decoder is None:
+        if (
+            decode_video
+            and self.video_decoder is None
+            and self.video_decoder_loader is None
+        ):
             raise ValueError("Video decoder required for VAE decode.")
-        if spatial_upscaler is None:
+        if spatial_upscaler is None and spatial_upscaler_loader is None:
             raise ValueError("Spatial upscaler required for distilled two-stage generation.")
 
         internal_audio_active = self.is_av_model and (
@@ -1212,7 +1278,11 @@ class AVPipeline:
             raise ValueError(
                 "Positive audio encoding required for AudioVideo distilled two-stage generation."
             )
-        if config.audio_enabled and (self.audio_decoder is None or self.vocoder is None):
+        if (
+            config.audio_enabled
+            and (self.audio_decoder is None or self.vocoder is None)
+            and self.audio_decoder_loader is None
+        ):
             raise ValueError("Audio decoder and vocoder required when audio_enabled is True.")
 
         mx.random.seed(config.seed)
@@ -1249,14 +1319,23 @@ class AVPipeline:
                 print(message)
 
         stage_1_loras = lora_configs_for_stage(stage_lora_configs, 1)
+        stage_2_total_loras = lora_configs_for_stage(stage_lora_configs, 2)
         stage_2_delta_loras = lora_configs_for_stage_delta(
             stage_lora_configs,
             from_stage=1,
             to_stage=2,
         )
+        if stage2_lora_fuse_mode not in {"delta", "fresh-total"}:
+            raise ValueError(
+                "stage2_lora_fuse_mode must be 'delta' or 'fresh-total', "
+                f"got {stage2_lora_fuse_mode!r}"
+            )
         stage_lora_snapshot = None
         stage_1_lora_elapsed = 0.0
+        spatial_upscaler_load_elapsed = 0.0
         stage_2_lora_elapsed = 0.0
+        stage_2_lora_base_restore_elapsed = 0.0
+        stage_2_lora_label = "stage 2 lora delta fuse"
         lora_restore_elapsed = 0.0
         if stage_1_loras or stage_2_delta_loras:
             stage_lora_snapshot = snapshot_lora_base_weights(self.transformer)
@@ -1398,44 +1477,84 @@ class AVPipeline:
             stage_1_audio_latent if latent_save_path is not None else None
         )
 
+        active_spatial_upscaler = spatial_upscaler
+        if active_spatial_upscaler is None:
+            emit_progress_message("  Loading spatial upscaler...")
+            load_start = time.perf_counter()
+            active_spatial_upscaler = spatial_upscaler_loader()
+            spatial_upscaler_load_elapsed = time.perf_counter() - load_start
+            emit_progress_message(
+                f"  Spatial upscaler load complete in {spatial_upscaler_load_elapsed:.1f}s"
+            )
+
         upscale_start = time.perf_counter()
         emit_progress_message("  Upsampling latent 2x with spatial upscaler...")
         latent_unnorm = self.video_encoder.per_channel_statistics.un_normalize(
             stage_1_video_latent
         )
-        upscaled_unnorm = spatial_upscaler(latent_unnorm)
+        upscaled_unnorm = active_spatial_upscaler(latent_unnorm)
         mx.eval(upscaled_unnorm)
         upscaled_video_latent = self.video_encoder.per_channel_statistics.normalize(
             upscaled_unnorm
         )
         mx.eval(upscaled_video_latent)
         del latent_unnorm, upscaled_unnorm
-        if stage_1_video_latent_for_save is None:
-            del stage_1_video_latent
+        del active_spatial_upscaler
+        # Keep only the latents needed by stage 2 before LoRA fusion starts.
+        del video_state, video_tools, conditionings
+        del stage_1_video_latent
+        if audio_state is not None:
+            del audio_state
+        if audio_tools is not None:
+            del audio_tools
         gc.collect()
+        mx.synchronize()
         mx.clear_cache()
         upscale_elapsed = time.perf_counter() - upscale_start
 
-        if stage_2_delta_loras:
-            stage_lines = format_lora_stage_scale_lines(
-                stage_lora_configs,
-                2,
-                from_stage=1,
-                include_unchanged=True,
+        if stage2_lora_fuse_mode == "fresh-total" and stage_lora_snapshot is not None:
+            lora_restore_start = time.perf_counter()
+            restore_lora_base_weights(self.transformer, stage_lora_snapshot)
+            stage_2_lora_base_restore_elapsed = time.perf_counter() - lora_restore_start
+            emit_progress_message(
+                "  Stage 2 LoRA base restore complete in "
+                f"{stage_2_lora_base_restore_elapsed:.1f}s"
             )
+
+        stage_2_loras_to_fuse = (
+            stage_2_total_loras
+            if stage2_lora_fuse_mode == "fresh-total"
+            else stage_2_delta_loras
+        )
+        if stage_2_loras_to_fuse:
+            if stage2_lora_fuse_mode == "fresh-total":
+                stage_lines = format_lora_stage_scale_lines(stage_lora_configs, 2)
+                line_header = "  Stage 2 LoRA total scales:"
+                complete_label = "  Stage 2 LoRA total fuse complete in "
+                stage_2_lora_label = "stage 2 lora total fuse"
+            else:
+                stage_lines = format_lora_stage_scale_lines(
+                    stage_lora_configs,
+                    2,
+                    from_stage=1,
+                    include_unchanged=True,
+                )
+                line_header = "  Stage 2 LoRA scales:"
+                complete_label = "  Stage 2 LoRA delta fuse complete in "
+                stage_2_lora_label = "stage 2 lora delta fuse"
             if stage_lines:
-                emit_progress_message("  Stage 2 LoRA scales:")
+                emit_progress_message(line_header)
                 for line in stage_lines:
                     emit_progress_message(line)
             lora_fuse_start = time.perf_counter()
             fuse_loras_into_model(
                 self.transformer,
-                stage_2_delta_loras,
+                stage_2_loras_to_fuse,
                 track_for_restore=False,
             )
             stage_2_lora_elapsed = time.perf_counter() - lora_fuse_start
             emit_progress_message(
-                f"  Stage 2 LoRA delta fuse complete in {stage_2_lora_elapsed:.1f}s"
+                f"{complete_label}{stage_2_lora_elapsed:.1f}s"
             )
 
         stage_2_pixel_shape = VideoPixelShape(
@@ -1546,29 +1665,39 @@ class AVPipeline:
 
         effective_tiling = config._get_tiling_config()
         post_denoise_elapsed = time.perf_counter() - post_denoise_start
+        video_decoder_load_elapsed = 0.0
         if decode_video:
-            decoder_name = self.video_decoder.__class__.__name__
-            tiling_desc = "tiled" if effective_tiling else "not tiled"
-            emit_progress_message(
-                f"  VAE decode started ({decoder_name}, {tiling_desc})..."
+            video_decoder_load_elapsed, video_decoder_loaded_now = self._ensure_video_decoder(
+                emit_progress_message
             )
-            decode_start = time.perf_counter()
-            if effective_tiling:
+            try:
+                decoder_name = self.video_decoder.__class__.__name__
+                tiling_desc = "tiled" if effective_tiling else "not tiled"
                 emit_progress_message(
-                    "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                    f"  VAE decode started ({decoder_name}, {tiling_desc})..."
                 )
-                video = None
-                for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
-                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                    mx.eval(video)
-                    del chunk
+                decode_start = time.perf_counter()
+                if effective_tiling:
+                    emit_progress_message(
+                        "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                    )
+                    video = None
+                    for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                        video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                        mx.eval(video)
+                        del chunk
+                        gc.collect()
+                        mx.clear_cache()
+                else:
+                    video = decode_latent(final_video_latent, self.video_decoder)
+                mx.eval(video)
+                decode_elapsed = time.perf_counter() - decode_start
+                emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            finally:
+                if video_decoder_loaded_now:
+                    self.video_decoder = None
                     gc.collect()
                     mx.clear_cache()
-            else:
-                video = decode_latent(final_video_latent, self.video_decoder)
-            mx.eval(video)
-            decode_elapsed = time.perf_counter() - decode_start
-            emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
             # Streaming-decode path: caller will run VAE decode on the
             # latent.  Return the latent so the caller can iterate chunks
@@ -1579,10 +1708,21 @@ class AVPipeline:
             decode_elapsed = 0.0
 
         audio_waveform = None
+        audio_decoder_load_elapsed = 0.0
         if final_audio_latent is not None:
-            audio_decode_start = time.perf_counter()
-            audio_waveform = self._decode_audio(final_audio_latent)
-            audio_decode_elapsed = time.perf_counter() - audio_decode_start
+            audio_decoder_load_elapsed, audio_decoder_loaded_now = self._ensure_audio_decoder(
+                emit_progress_message
+            )
+            try:
+                audio_decode_start = time.perf_counter()
+                audio_waveform = self._decode_audio(final_audio_latent)
+                audio_decode_elapsed = time.perf_counter() - audio_decode_start
+            finally:
+                if audio_decoder_loaded_now:
+                    self.audio_decoder = None
+                    self.vocoder = None
+                    gc.collect()
+                    mx.clear_cache()
         else:
             audio_decode_elapsed = 0.0
 
@@ -1592,16 +1732,32 @@ class AVPipeline:
             self.last_timing_sections.append(("stage 1 lora fuse", stage_1_lora_elapsed))
         self.last_timing_sections.extend([
             ("distilled stage 1 denoise", stage_1_elapsed),
-            ("spatial upscale", upscale_elapsed),
         ])
+        if spatial_upscaler_load_elapsed:
+            self.last_timing_sections.append(
+                ("spatial upscaler load", spatial_upscaler_load_elapsed)
+            )
+        self.last_timing_sections.append(("spatial upscale", upscale_elapsed))
         if stage_2_lora_elapsed:
-            self.last_timing_sections.append(("stage 2 lora delta fuse", stage_2_lora_elapsed))
+            if stage_2_lora_base_restore_elapsed:
+                self.last_timing_sections.append(
+                    ("stage 2 lora base restore", stage_2_lora_base_restore_elapsed)
+                )
+            self.last_timing_sections.append((stage_2_lora_label, stage_2_lora_elapsed))
+        elif stage_2_lora_base_restore_elapsed:
+            self.last_timing_sections.append(
+                ("stage 2 lora base restore", stage_2_lora_base_restore_elapsed)
+            )
         self.last_timing_sections.append(("distilled stage 2 denoise", stage_2_elapsed))
         if lora_restore_elapsed:
             self.last_timing_sections.append(("lora restore", lora_restore_elapsed))
         self.last_timing_sections.append(("post-denoise prep", post_denoise_elapsed))
+        if video_decoder_load_elapsed:
+            self.last_timing_sections.append(("vae decoder load", video_decoder_load_elapsed))
         if decode_video:
             self.last_timing_sections.append(("vae decode", decode_elapsed))
+        if audio_decoder_load_elapsed:
+            self.last_timing_sections.append(("audio decoder load", audio_decoder_load_elapsed))
         if audio_decode_elapsed:
             self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
 
@@ -1649,7 +1805,11 @@ class AVPipeline:
             )
         if self.video_encoder is None:
             raise ValueError("Video encoder required for distilled stage-2 upscaling.")
-        if self.video_decoder is None:
+        if (
+            decode_video
+            and self.video_decoder is None
+            and self.video_decoder_loader is None
+        ):
             raise ValueError("Video decoder required for VAE decode.")
         if spatial_upscaler is None:
             raise ValueError("Spatial upscaler required for distilled stage-2 generation.")
@@ -1686,7 +1846,11 @@ class AVPipeline:
                 raise ValueError(
                     "stage_1_audio_latent required when the AV audio branch is active."
                 )
-        if config.audio_enabled and (self.audio_decoder is None or self.vocoder is None):
+        if (
+            config.audio_enabled
+            and (self.audio_decoder is None or self.vocoder is None)
+            and self.audio_decoder_loader is None
+        ):
             raise ValueError("Audio decoder and vocoder required when audio_enabled is True.")
 
         mx.random.seed(config.seed)
@@ -1771,9 +1935,9 @@ class AVPipeline:
         )
         mx.eval(upscaled_video_latent)
         del latent_unnorm, upscaled_unnorm
-        if stage_1_video_latent_for_save is None:
-            del stage_1_video_latent
+        del stage_1_video_latent
         gc.collect()
+        mx.synchronize()
         mx.clear_cache()
         upscale_elapsed = time.perf_counter() - upscale_start
 
@@ -1893,29 +2057,39 @@ class AVPipeline:
 
         effective_tiling = config._get_tiling_config()
         post_denoise_elapsed = time.perf_counter() - post_denoise_start
+        video_decoder_load_elapsed = 0.0
         if decode_video:
-            decoder_name = self.video_decoder.__class__.__name__
-            tiling_desc = "tiled" if effective_tiling else "not tiled"
-            emit_progress_message(
-                f"  VAE decode started ({decoder_name}, {tiling_desc})..."
+            video_decoder_load_elapsed, video_decoder_loaded_now = self._ensure_video_decoder(
+                emit_progress_message
             )
-            decode_start = time.perf_counter()
-            if effective_tiling:
+            try:
+                decoder_name = self.video_decoder.__class__.__name__
+                tiling_desc = "tiled" if effective_tiling else "not tiled"
                 emit_progress_message(
-                    "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                    f"  VAE decode started ({decoder_name}, {tiling_desc})..."
                 )
-                video = None
-                for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
-                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                    mx.eval(video)
-                    del chunk
+                decode_start = time.perf_counter()
+                if effective_tiling:
+                    emit_progress_message(
+                        "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                    )
+                    video = None
+                    for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                        video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                        mx.eval(video)
+                        del chunk
+                        gc.collect()
+                        mx.clear_cache()
+                else:
+                    video = decode_latent(final_video_latent, self.video_decoder)
+                mx.eval(video)
+                decode_elapsed = time.perf_counter() - decode_start
+                emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            finally:
+                if video_decoder_loaded_now:
+                    self.video_decoder = None
                     gc.collect()
                     mx.clear_cache()
-            else:
-                video = decode_latent(final_video_latent, self.video_decoder)
-            mx.eval(video)
-            decode_elapsed = time.perf_counter() - decode_start
-            emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
             # Streaming-decode path: see generate_distilled_two_stage's
             # decode_video=False docstring.  Returning the latent lets the
@@ -1924,10 +2098,21 @@ class AVPipeline:
             decode_elapsed = 0.0
 
         audio_waveform = None
+        audio_decoder_load_elapsed = 0.0
         if final_audio_latent is not None:
-            audio_decode_start = time.perf_counter()
-            audio_waveform = self._decode_audio(final_audio_latent)
-            audio_decode_elapsed = time.perf_counter() - audio_decode_start
+            audio_decoder_load_elapsed, audio_decoder_loaded_now = self._ensure_audio_decoder(
+                emit_progress_message
+            )
+            try:
+                audio_decode_start = time.perf_counter()
+                audio_waveform = self._decode_audio(final_audio_latent)
+                audio_decode_elapsed = time.perf_counter() - audio_decode_start
+            finally:
+                if audio_decoder_loaded_now:
+                    self.audio_decoder = None
+                    self.vocoder = None
+                    gc.collect()
+                    mx.clear_cache()
         else:
             audio_decode_elapsed = 0.0
 
@@ -1942,8 +2127,12 @@ class AVPipeline:
         if lora_restore_elapsed:
             self.last_timing_sections.append(("lora restore", lora_restore_elapsed))
         self.last_timing_sections.append(("post-denoise prep", post_denoise_elapsed))
+        if video_decoder_load_elapsed:
+            self.last_timing_sections.append(("vae decoder load", video_decoder_load_elapsed))
         if decode_video:
             self.last_timing_sections.append(("vae decode", decode_elapsed))
+        if audio_decoder_load_elapsed:
+            self.last_timing_sections.append(("audio decoder load", audio_decoder_load_elapsed))
         if audio_decode_elapsed:
             self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
 
@@ -2037,7 +2226,10 @@ class AVPipeline:
                 "Negative video encoding required when cfg_scale != 1.0."
             )
         if config.audio_enabled:
-            if self.audio_decoder is None or self.vocoder is None:
+            if (
+                (self.audio_decoder is None or self.vocoder is None)
+                and self.audio_decoder_loader is None
+            ):
                 raise ValueError(
                     "Audio decoder and vocoder required when audio_enabled is True."
                 )
@@ -2316,33 +2508,47 @@ class AVPipeline:
             mx.clear_cache()
 
         # Decode video (auto-tile for large generations to prevent Metal watchdog timeout)
-        if self.video_decoder is None:
+        if (
+            decode_video
+            and self.video_decoder is None
+            and self.video_decoder_loader is None
+        ):
             raise ValueError("Video decoder required for VAE decode.")
         effective_tiling = config._get_tiling_config()
         post_denoise_elapsed = time.perf_counter() - post_denoise_start
+        video_decoder_load_elapsed = 0.0
         if decode_video:
-            decoder_name = self.video_decoder.__class__.__name__
-            tiling_desc = "tiled" if effective_tiling else "not tiled"
-            emit_progress_message(
-                f"  VAE decode started ({decoder_name}, {tiling_desc})..."
+            video_decoder_load_elapsed, video_decoder_loaded_now = self._ensure_video_decoder(
+                emit_progress_message
             )
-            decode_start = time.perf_counter()
-            if effective_tiling:
+            try:
+                decoder_name = self.video_decoder.__class__.__name__
+                tiling_desc = "tiled" if effective_tiling else "not tiled"
                 emit_progress_message(
-                    "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                    f"  VAE decode started ({decoder_name}, {tiling_desc})..."
                 )
-                video = None
-                for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
-                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                    mx.eval(video)
-                    del chunk
+                decode_start = time.perf_counter()
+                if effective_tiling:
+                    emit_progress_message(
+                        "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
+                    )
+                    video = None
+                    for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                        video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                        mx.eval(video)
+                        del chunk
+                        gc.collect()
+                        mx.clear_cache()
+                else:
+                    video = decode_latent(final_video_latent, self.video_decoder)
+                mx.eval(video)
+                decode_elapsed = time.perf_counter() - decode_start
+                emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
+            finally:
+                if video_decoder_loaded_now:
+                    self.video_decoder = None
                     gc.collect()
                     mx.clear_cache()
-            else:
-                video = decode_latent(final_video_latent, self.video_decoder)
-            mx.eval(video)
-            decode_elapsed = time.perf_counter() - decode_start
-            emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
         else:
             # Streaming-decode path: see generate_distilled_two_stage's
             # decode_video=False docstring.
@@ -2351,10 +2557,21 @@ class AVPipeline:
 
         # Decode audio if enabled
         audio_waveform = None
+        audio_decoder_load_elapsed = 0.0
         if final_audio_latent is not None:
-            audio_decode_start = time.perf_counter()
-            audio_waveform = self._decode_audio(final_audio_latent)
-            audio_decode_elapsed = time.perf_counter() - audio_decode_start
+            audio_decoder_load_elapsed, audio_decoder_loaded_now = self._ensure_audio_decoder(
+                emit_progress_message
+            )
+            try:
+                audio_decode_start = time.perf_counter()
+                audio_waveform = self._decode_audio(final_audio_latent)
+                audio_decode_elapsed = time.perf_counter() - audio_decode_start
+            finally:
+                if audio_decoder_loaded_now:
+                    self.audio_decoder = None
+                    self.vocoder = None
+                    gc.collect()
+                    mx.clear_cache()
         else:
             audio_decode_elapsed = 0.0
 
@@ -2363,8 +2580,12 @@ class AVPipeline:
             ("denoise", denoise_elapsed),
             ("post-denoise prep", post_denoise_elapsed),
         ]
+        if video_decoder_load_elapsed:
+            self.last_timing_sections.append(("vae decoder load", video_decoder_load_elapsed))
         if decode_video:
             self.last_timing_sections.append(("vae decode", decode_elapsed))
+        if audio_decoder_load_elapsed:
+            self.last_timing_sections.append(("audio decoder load", audio_decoder_load_elapsed))
         if audio_decode_elapsed:
             self.last_timing_sections.append(("audio decode", audio_decode_elapsed))
 
@@ -2377,6 +2598,9 @@ def create_av_pipeline(
     video_decoder: Optional[NativeConv3dVideoDecoder],
     audio_decoder: Optional[AudioDecoder] = None,
     vocoder: Optional[Vocoder] = None,
+    video_decoder_loader: Optional[Callable[[], NativeConv3dVideoDecoder]] = None,
+    audio_decoder_loader: Optional[Callable[[], tuple[AudioDecoder, object, int]]] = None,
+    audio_sample_rate: int = 24000,
 ) -> AVPipeline:
     """
     Create a single-stage CFG pipeline.
@@ -2387,6 +2611,9 @@ def create_av_pipeline(
         video_decoder: Optional VAE decoder.
         audio_decoder: Optional audio VAE decoder (required for audio generation).
         vocoder: Optional vocoder (required for audio generation).
+        video_decoder_loader: Optional lazy VAE decoder loader.
+        audio_decoder_loader: Optional lazy audio decode stack loader.
+        audio_sample_rate: Output sample rate before lazy audio decode stack load.
 
     Returns:
         Configured AVPipeline.
@@ -2397,4 +2624,7 @@ def create_av_pipeline(
         video_decoder=video_decoder,
         audio_decoder=audio_decoder,
         vocoder=vocoder,
+        video_decoder_loader=video_decoder_loader,
+        audio_decoder_loader=audio_decoder_loader,
+        audio_sample_rate=audio_sample_rate,
     )
