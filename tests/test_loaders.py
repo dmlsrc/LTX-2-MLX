@@ -594,6 +594,60 @@ class TestFuseLorasIntoModel:
         expected = mx.array([[3.0, 6.0], [4.0, 8.0]], dtype=mx.float32)
         assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
 
+    def test_fuses_non_square_direct_target(self, tmp_path):
+        path = tmp_path / "direct_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "transformer_blocks.0.ff.project_out.lora_A.weight": mx.array(
+                    [[1.0, 2.0, 3.0]], dtype=mx.float32
+                ),
+                "transformer_blocks.0.ff.project_out.lora_B.weight": mx.array(
+                    [[4.0], [5.0]], dtype=mx.float32
+                ),
+            },
+        )
+        model = TinyLoRAModel()
+        model.transformer_blocks[0].ff.project_out.weight = mx.zeros(
+            (2, 3), dtype=mx.float32
+        )
+
+        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
+
+        expected = mx.array(
+            [[4.0, 8.0, 12.0], [5.0, 10.0, 15.0]], dtype=mx.float32
+        )
+        assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
+
+    def test_fuses_non_square_pretransposed_target(self, tmp_path):
+        path = tmp_path / "pretransposed_lora.safetensors"
+        mx.save_safetensors(
+            str(path),
+            {
+                "transformer_blocks.0.ff.project_out.lora_A.weight": mx.array(
+                    [[1.0, 2.0, 3.0]], dtype=mx.float32
+                ),
+                "transformer_blocks.0.ff.project_out.lora_B.weight": mx.array(
+                    [[4.0], [5.0]], dtype=mx.float32
+                ),
+            },
+        )
+        model = TinyLoRAModel()
+        del model.transformer_blocks[0].ff.project_out.weight
+        model.transformer_blocks[0].ff._project_out_weight_t = mx.zeros(
+            (3, 2), dtype=mx.float32
+        )
+
+        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
+
+        expected = mx.array(
+            [[4.0, 5.0], [8.0, 10.0], [12.0, 15.0]], dtype=mx.float32
+        )
+        assert mx.allclose(
+            model.transformer_blocks[0].ff._project_out_weight_t,
+            expected,
+        )
+
     def test_rejects_invalid_lora_load_mode(self, tmp_path):
         path = tmp_path / "invalid_mode_lora.safetensors"
         mx.save_safetensors(

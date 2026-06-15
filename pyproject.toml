@@ -27,46 +27,36 @@ classifiers = [
 ]
 
 dependencies = [
-    "mlx>=0.20.0",
-    "numpy>=1.24.0",
-    "pillow>=10.0.0",
-    "safetensors>=0.4.0",
-    "tqdm>=4.65.0",
-    "einops>=0.7.0",
-    "transformers>=4.57.3",
-    "sentencepiece>=0.2.1",
-    "protobuf>=6.33.3",
-    "fastapi>=0.135.2",
-    "uvicorn[standard]>=0.42.0",
-    "python-multipart>=0.0.22",
-    "pydantic>=2.12.5",
+    "mlx>=0.31.2",
+    "numpy>=2.4.6",
+    "pillow>=12.2.0",
+    "safetensors>=0.8.0",
+    "tqdm>=4.68.2",
+    "einops>=0.8.2",
+    "transformers>=5.12.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4.0",
-    "pytest-timeout>=2.1.0",
-    "torch>=2.9.1",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
-    "pyright>=1.1.0",
+    "pytest>=9.1.0",
+    "torch>=2.12.0",
+    "ruff>=0.15.17",
 ]
 test = [
-    "pytest>=7.4.0",
-    "pytest-timeout>=2.1.0",
-    "torch>=2.9.1",
+    "pytest>=9.1.0",
+    "torch>=2.12.0",
 ]
 vsr = [
     # Used only by scripts/vsr_harness.py (VideoToolbox Super Resolution).
     # macOS 15+ only; install with: uv pip install '.[vsr]'
-    "pyobjc-core>=10.0",
-    "pyobjc-framework-AVFoundation>=10.0",
-    "pyobjc-framework-CoreAudio>=10.0",
-    "pyobjc-framework-CoreMedia>=10.0",
-    "pyobjc-framework-Cocoa>=10.0",     # Foundation
-    "pyobjc-framework-libdispatch>=10.0",
-    "pyobjc-framework-Quartz>=10.0",
-    "pyobjc-framework-VideoToolbox>=10.0",
+    "pyobjc-core>=12.2",
+    "pyobjc-framework-AVFoundation>=12.2",
+    "pyobjc-framework-CoreAudio>=12.2",
+    "pyobjc-framework-CoreMedia>=12.2",
+    "pyobjc-framework-Cocoa>=12.2",     # Foundation
+    "pyobjc-framework-libdispatch>=12.2",
+    "pyobjc-framework-Quartz>=12.2",
+    "pyobjc-framework-VideoToolbox>=12.2",
 ]
 
 [project.urls]
@@ -100,25 +90,6 @@ markers = [
 # Set PYTHONPATH for tests
 pythonpath = "."
 
-[tool.black]
-line-length = 100
-target-version = ['py310', 'py311', 'py312']
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-  | LTX-2
-)/
-'''
-
 [tool.ruff]
 line-length = 100
 target-version = "py310"
@@ -135,7 +106,7 @@ select = [
     "UP",  # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by black)
+    "E501",  # line length is configured for readability; avoid churn.
     "B008",  # do not perform function calls in argument defaults
     "C901",  # too complex
     "W191",  # indentation contains tabs
@@ -143,17 +114,3 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__ files
-
-[tool.pyright]
-include = ["LTX_2_MLX", "tests"]
-exclude = [
-    "**/__pycache__",
-    "**/.pytest_cache",
-    "LTX-2",
-    "gens",
-    "weights",
-]
-reportMissingImports = true
-reportMissingTypeStubs = false
-pythonVersion = "3.10"
-pythonPlatform = "Darwin"

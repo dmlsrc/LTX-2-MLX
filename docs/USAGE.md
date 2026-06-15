@@ -31,12 +31,12 @@ python scripts/generate.py "A rocket launching into space" \
 git clone https://github.com/your-username/LTX-2-MLX.git
 cd LTX-2-MLX
 
-# Install dependencies (using uv - recommended)
+# Install dependencies
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync
+uv pip install -e .
 
 # Or using pip
-pip install mlx safetensors numpy pillow tqdm einops transformers sentencepiece protobuf
+pip install -e .
 
 # Install ffmpeg
 brew install ffmpeg
