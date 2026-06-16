@@ -9,7 +9,6 @@ from LTX_2_MLX.types import LatentState
 class ConditioningError(Exception):
     """Error raised when conditioning cannot be applied."""
 
-    pass
 
 
 class VideoConditionByLatentIndex:

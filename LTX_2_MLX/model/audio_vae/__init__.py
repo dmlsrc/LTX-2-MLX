@@ -9,9 +9,9 @@ __all__ = [
     "AudioEncoder",
     "Vocoder",
     "VocoderWithBWE",
+    "encode_audio",
     "load_audio_decoder_weights",
     "load_audio_encoder_weights",
     "load_vocoder_weights",
     "load_vocoder_with_bwe_weights",
-    "encode_audio",
 ]

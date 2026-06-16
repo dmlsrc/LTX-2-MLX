@@ -119,7 +119,6 @@ class DummyRegistry:
 
     def clear(self) -> None:
         """No-op clear."""
-        pass
 
 
 @dataclass

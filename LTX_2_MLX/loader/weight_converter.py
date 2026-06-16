@@ -423,9 +423,9 @@ def _convert_numeric_dicts_to_lists(obj: Any) -> Any:
         processed = {k: _convert_numeric_dicts_to_lists(v) for k, v in obj.items()}
 
         # Check if all keys are numeric strings
-        if processed and all(k.isdigit() for k in processed.keys()):
+        if processed and all(k.isdigit() for k in processed):
             # Convert to list, handling potential gaps
-            max_idx = max(int(k) for k in processed.keys())
+            max_idx = max(int(k) for k in processed)
             result = [None] * (max_idx + 1)
             for k, v in processed.items():
                 result[int(k)] = v

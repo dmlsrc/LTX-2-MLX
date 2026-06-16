@@ -41,8 +41,8 @@ from .vsr import VsrSession
 from .writer import AVWriter
 
 __all__ = [
-    "AudioTrack",
     "AVWriter",
+    "AudioTrack",
     "CutDetector",
     "VsrSession",
     "VtfrcSession",

@@ -181,11 +181,11 @@ def _dump_report():
         m_dt = sig[3][1]
         m_sh = sig[3][2]
         print(f"\n[{i:2d}] {n:5d} calls", flush=True)
-        print(f"    q: {str(q_dt):12s} {q_sh}", flush=True)
-        print(f"    k: {str(k_dt):12s} {k_sh}", flush=True)
-        print(f"    v: {str(v_dt):12s} {v_sh}", flush=True)
+        print(f"    q: {q_dt!s:12s} {q_sh}", flush=True)
+        print(f"    k: {k_dt!s:12s} {k_sh}", flush=True)
+        print(f"    v: {v_dt!s:12s} {v_sh}", flush=True)
         if m_dt is not None:
-            print(f"    mask: {str(m_dt):9s} {m_sh}", flush=True)
+            print(f"    mask: {m_dt!s:9s} {m_sh}", flush=True)
         else:
             print("    mask: None", flush=True)
         trace = _first_traces.get(sig)

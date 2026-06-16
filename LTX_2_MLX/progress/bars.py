@@ -116,7 +116,7 @@ class _StackState:
       when `count_width` grows.
     """
 
-    __slots__ = ("total", "count_width", "label_width", "pace_number_width", "bars")
+    __slots__ = ("bars", "count_width", "label_width", "pace_number_width", "total")
 
     def __init__(self) -> None:
         self.total: int = 0
