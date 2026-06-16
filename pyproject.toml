@@ -117,3 +117,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__ files
+"LTX_2_MLX/pipelines/av_pipeline.py" = ["E402"]  # env flags are read before local imports
+"scripts/generate.py" = ["E402"]  # startup setup and helper definitions precede heavy imports
+"scripts/generate_pytorch_checkpoints.py" = ["E402"]  # mutates sys.path before reference imports
+"scripts/probe_native_vae_tail.py" = ["E402"]  # mutates sys.path before package imports
+"scripts/sdpa_dtype_probe.py" = ["E402"]  # registers probes before invoking target script/module
+"scripts/vsr_harness.py" = ["E402"]  # reads VSR env toggle before helper imports

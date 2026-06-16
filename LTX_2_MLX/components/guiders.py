@@ -1,5 +1,6 @@
 """Guidance strategies for LTX-2 diffusion sampling."""
 
+import math
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -203,10 +204,6 @@ class LegacyStatefulAPGGuider:
 
     def enabled(self) -> bool:
         return self.scale != 0.0
-
-
-import math
-
 
 @dataclass(frozen=True)
 class MultiModalGuiderParams:
