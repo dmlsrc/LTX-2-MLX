@@ -34,7 +34,7 @@ from ..components import (
 from ..conditioning.item import ConditioningItem
 from ..conditioning.keyframe import VideoConditionByKeyframeIndex
 from ..conditioning.tools import VideoLatentTools
-from ..loader import LoRAConfig, fuse_loras_into_model, restore_lora_base_weights
+from ..loader import LoRAConfig, fuse_loras_into_model, restore_transformer_cache_state
 from ..model.transformer import LTXModel, Modality, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
@@ -437,7 +437,7 @@ class ICLoraPipeline:
         video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
-        base_transformer_weights: Any,
+        transformer_cache_restore_state: Any,
         lora_configs: Optional[List[LoRAConfig]] = None,
     ):
         """
@@ -448,7 +448,7 @@ class ICLoraPipeline:
             video_encoder: VAE encoder for encoding images/videos.
             video_decoder: VAE decoder for decoding latents to video.
             spatial_upscaler: 2x spatial upscaler for stage 2.
-            base_transformer_weights: Restore snapshot for removing IC-LoRA.
+            transformer_cache_restore_state: Cache state for restoring the base transformer.
             lora_configs: IC-LoRA configurations (paths and strengths).
         """
         # Store raw velocity model for LoRA operations
@@ -462,7 +462,7 @@ class ICLoraPipeline:
         self.video_encoder = video_encoder
         self.video_decoder = video_decoder
         self.spatial_upscaler = spatial_upscaler
-        self.base_transformer_weights = base_transformer_weights
+        self.transformer_cache_restore_state = transformer_cache_restore_state
         self.lora_configs = lora_configs or []
         self.patchifier = VideoLatentPatchifier(patch_size=1)
         self.diffusion_step = EulerDiffusionStep()
@@ -488,16 +488,17 @@ class ICLoraPipeline:
             self._velocity_model,
             self.lora_configs,
             verbose=True,
-            track_for_restore=False,
         )
 
     def _remove_lora(self) -> None:
-        """Restore original weights (remove IC-LoRA)."""
+        """Reload the base transformer cache after IC-LoRA fusion."""
         if not self.lora_configs:
             return
 
-        # Restore base weights (use raw velocity model)
-        restore_lora_base_weights(self._velocity_model, self.base_transformer_weights)
+        restore_transformer_cache_state(
+            self._velocity_model,
+            self.transformer_cache_restore_state,
+        )
 
     def _denoise_loop(
         self,
@@ -755,7 +756,7 @@ def create_ic_lora_pipeline(
     video_encoder: NativeConv3dVideoEncoder,
     video_decoder: NativeConv3dVideoDecoder,
     spatial_upscaler: SpatialUpscaler,
-    base_transformer_weights: Any,
+    transformer_cache_restore_state: Any,
     lora_configs: Optional[List[LoRAConfig]] = None,
 ) -> ICLoraPipeline:
     """
@@ -766,7 +767,7 @@ def create_ic_lora_pipeline(
         video_encoder: VAE encoder.
         video_decoder: VAE decoder.
         spatial_upscaler: 2x spatial upscaler.
-        base_transformer_weights: Restore snapshot for LoRA removal.
+        transformer_cache_restore_state: Cache state for restoring the base transformer.
         lora_configs: IC-LoRA configurations.
 
     Returns:
@@ -777,6 +778,6 @@ def create_ic_lora_pipeline(
         video_encoder=video_encoder,
         video_decoder=video_decoder,
         spatial_upscaler=spatial_upscaler,
-        base_transformer_weights=base_transformer_weights,
+        transformer_cache_restore_state=transformer_cache_restore_state,
         lora_configs=lora_configs,
     )

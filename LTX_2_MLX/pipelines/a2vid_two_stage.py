@@ -41,14 +41,14 @@ from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 from ..model.upscaler import SpatialUpscaler
 from ..model.audio_vae import AudioDecoder, Vocoder
-from ..loader.lora_loader import (
+from ..loader import (
     LoRAConfig,
     fuse_loras_into_model,
     format_lora_stage_scale_lines,
     lora_configs_for_stage,
     lora_configs_for_stage_delta,
-    restore_lora_base_weights,
-    snapshot_lora_base_weights,
+    restore_transformer_cache_state,
+    get_transformer_cache_restore_state,
 )
 from ..types import (
     AudioLatentShape,
@@ -75,7 +75,7 @@ class A2VidConfig:
     # LoRA for stage 2 refinement
     distilled_lora_config: Optional[LoRAConfig] = None
     stage_lora_configs: Optional[List[LoRAConfig]] = None
-    stage2_lora_fuse_mode: str = "delta"
+    stage2_lora_fuse_mode: str = "fresh-total"
 
     tiling_config: Optional[TilingConfig] = None
     dtype: mx.Dtype = mx.bfloat16
@@ -210,7 +210,7 @@ class A2VidPipelineTwoStage:
         self.patchifier = VideoLatentPatchifier(patch_size=1)
         self.stepper = EulerDiffusionStep()
 
-        self._original_weights = None
+        self._transformer_cache_restore_state = None
 
     def _create_video_tools(self, target_shape, fps):
         return VideoLatentTools(patchifier=self.patchifier, target_shape=target_shape, fps=fps)
@@ -328,8 +328,10 @@ class A2VidPipelineTwoStage:
                 f"got {config.stage2_lora_fuse_mode!r}"
             )
         stage_lora_active = bool(stage_1_loras or stage_2_delta_loras)
-        if stage_lora_active and self._original_weights is None:
-            self._original_weights = snapshot_lora_base_weights(self._velocity_model)
+        if stage_lora_active and self._transformer_cache_restore_state is None:
+            self._transformer_cache_restore_state = (
+                get_transformer_cache_restore_state(self._velocity_model)
+            )
         if stage_1_loras:
             stage_lines = format_lora_stage_scale_lines(config.stage_lora_configs, 1)
             if stage_lines:
@@ -340,7 +342,6 @@ class A2VidPipelineTwoStage:
             fuse_loras_into_model(
                 self._velocity_model,
                 stage_1_loras,
-                track_for_restore=False,
             )
             print(
                 f"  Stage 1 LoRA fuse complete in "
@@ -447,9 +448,12 @@ class A2VidPipelineTwoStage:
         mx.clear_cache()
 
         # Apply stage-specific or legacy stage-2 LoRA if provided.
-        if config.stage2_lora_fuse_mode == "fresh-total" and self._original_weights is not None:
+        if config.stage2_lora_fuse_mode == "fresh-total" and self._transformer_cache_restore_state is not None:
             lora_restore_start = time.perf_counter()
-            restore_lora_base_weights(self._velocity_model, self._original_weights)
+            restore_transformer_cache_state(
+                self._velocity_model,
+                self._transformer_cache_restore_state,
+            )
             print(
                 f"  Stage 2 LoRA base restore complete in "
                 f"{time.perf_counter() - lora_restore_start:.1f}s"
@@ -482,20 +486,20 @@ class A2VidPipelineTwoStage:
             fuse_loras_into_model(
                 self._velocity_model,
                 stage_2_loras_to_fuse,
-                track_for_restore=False,
             )
             print(
                 complete_label +
                 f"{time.perf_counter() - lora_fuse_start:.1f}s"
             )
         elif not stage_lora_active and config.distilled_lora_config is not None:
-            if self._original_weights is None:
-                self._original_weights = snapshot_lora_base_weights(self._velocity_model)
+            if self._transformer_cache_restore_state is None:
+                self._transformer_cache_restore_state = (
+                    get_transformer_cache_restore_state(self._velocity_model)
+                )
             lora_fuse_start = time.perf_counter()
             fuse_loras_into_model(
                 self._velocity_model,
                 [config.distilled_lora_config],
-                track_for_restore=False,
             )
             print(
                 f"  Stage 2 LoRA fuse complete in "
@@ -552,10 +556,13 @@ class A2VidPipelineTwoStage:
         # Restore weights
         if (
             (stage_lora_active or config.distilled_lora_config is not None)
-            and self._original_weights is not None
+            and self._transformer_cache_restore_state is not None
         ):
-            restore_lora_base_weights(self._velocity_model, self._original_weights)
-            self._original_weights = None
+            restore_transformer_cache_state(
+                self._velocity_model,
+                self._transformer_cache_restore_state,
+            )
+            self._transformer_cache_restore_state = None
 
         # Decode video
         video_state_2 = video_tools_2.clear_conditioning(video_state_2)

@@ -8,6 +8,7 @@ import mlx.nn as nn
 
 import LTX_2_MLX.loader.transformer_cache as tc
 from LTX_2_MLX.loader.transformer_cache import (
+    TRANSFORMER_CACHE_RESTORE_ATTR,
     TRANSFORMER_CACHE_QUANTIZE_MXFP8_BLOCKS,
     TransformerBlockStreamer,
     TransformerCacheResult,
@@ -160,14 +161,13 @@ def test_load_transformer_weights_cached_threads_quant_specs(monkeypatch, tmp_pa
     assert calls["load"]["video_ff_quantize_specs"] == specs
     assert calls["load"]["video_ff_quantize_group_size"] == 32
     assert calls["load"]["video_ff_quantize_bits"] == 8
-    assert model._lora_restore_cache_source == {
+    assert getattr(model, TRANSFORMER_CACHE_RESTORE_ATTR) == {
         "valid": True,
         "cache_path": cache_file,
         "transformer_cache_quantize": TRANSFORMER_CACHE_QUANTIZE_MXFP8_BLOCKS,
         "video_ff_quantize_specs": specs,
         "video_ff_quantize_group_size": 32,
         "video_ff_quantize_bits": 8,
-        "persistent_loras": (),
     }
 
 

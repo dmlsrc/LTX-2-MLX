@@ -32,6 +32,7 @@ TRANSFORMER_CACHE_QUANTIZE_MODES = (
     TRANSFORMER_CACHE_QUANTIZE_MXFP8_BLOCKS,
     TRANSFORMER_CACHE_QUANTIZE_MXFP8_BLOCKS_PRETRANSPOSE,
 )
+TRANSFORMER_CACHE_RESTORE_ATTR = "_transformer_cache_restore_source"
 _ATTENTION_QUANT_PROJECTIONS = (
     "to_q",
     "to_k",
@@ -123,6 +124,44 @@ def _load_cache_weights(cache_file: Path) -> Dict[str, mx.array]:
     for shard in shards:
         merged.update(mx.load(str(shard)))
     return merged
+
+
+def get_transformer_cache_restore_state(model) -> dict:
+    """Return the cache metadata needed to reload this transformer's base weights."""
+    target = getattr(model, "velocity_model", model)
+    source = getattr(target, TRANSFORMER_CACHE_RESTORE_ATTR, None)
+    if source and source.get("valid"):
+        return dict(source)
+    raise RuntimeError(
+        "Transformer cache restore requires a valid cache-backed transformer. "
+        "Reload from cache before temporary or stage-specific in-place mutation."
+    )
+
+
+def restore_transformer_cache_state(model, state: dict) -> None:
+    """Reload transformer weights from a cache restore state."""
+    target = getattr(model, "velocity_model", model)
+    source = dict(state)
+    load_transformer_cache(
+        target,
+        source["cache_path"],
+        transformer_cache_quantize=source["transformer_cache_quantize"],
+        video_ff_quantize_specs=source["video_ff_quantize_specs"],
+        video_ff_quantize_group_size=source["video_ff_quantize_group_size"],
+        video_ff_quantize_bits=source["video_ff_quantize_bits"],
+    )
+    source["valid"] = True
+    setattr(target, TRANSFORMER_CACHE_RESTORE_ATTR, source)
+
+
+def invalidate_transformer_cache_restore_state(model) -> None:
+    """Mark the current cache restore state stale after in-place weight mutation."""
+    target = getattr(model, "velocity_model", model)
+    source = getattr(target, TRANSFORMER_CACHE_RESTORE_ATTR, None)
+    if source:
+        source = dict(source)
+        source["valid"] = False
+        setattr(target, TRANSFORMER_CACHE_RESTORE_ATTR, source)
 
 
 @dataclass(frozen=True)
@@ -1859,15 +1898,18 @@ def load_transformer_weights_cached(
         video_ff_quantize_group_size=video_ff_quantize_group_size,
         video_ff_quantize_bits=video_ff_quantize_bits,
     )
-    model._lora_restore_cache_source = {
-        "valid": True,
-        "cache_path": result.cache_path,
-        "transformer_cache_quantize": transformer_cache_quantize,
-        "video_ff_quantize_specs": tuple(video_ff_quantize_specs),
-        "video_ff_quantize_group_size": video_ff_quantize_group_size,
-        "video_ff_quantize_bits": video_ff_quantize_bits,
-        "persistent_loras": (),
-    }
+    setattr(
+        model,
+        TRANSFORMER_CACHE_RESTORE_ATTR,
+        {
+            "valid": True,
+            "cache_path": result.cache_path,
+            "transformer_cache_quantize": transformer_cache_quantize,
+            "video_ff_quantize_specs": tuple(video_ff_quantize_specs),
+            "video_ff_quantize_group_size": video_ff_quantize_group_size,
+            "video_ff_quantize_bits": video_ff_quantize_bits,
+        },
+    )
     print(
         f"  Loaded transformer cache: {loaded_count} tensors "
         f"({layout_count} layout tensors, {quant_count} quant tensors)"

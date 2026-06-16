@@ -52,13 +52,14 @@ from LTX_2_MLX.loader import (
     TRANSFORMER_CACHE_QUANTIZE_OFF,
     checkpoint_has_fp8_tensors,
     ensure_weight_family_caches,
+    get_transformer_cache_restore_state,
     lora_configs_have_stage_strengths,
     load_av_transformer_weights,
     load_transformer_weights,
     load_transformer_weights_cached,
     load_transformer_weights_cached_streaming,
 )
-from LTX_2_MLX.loader.lora_loader import fuse_loras_into_model, snapshot_lora_base_weights
+from LTX_2_MLX.loader.lora_loader import fuse_loras_into_model
 from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
 from LTX_2_MLX.model.video_vae.native_decoder import (
     NativeConv3dVideoDecoder,
@@ -2653,7 +2654,7 @@ def generate_video(
     lora_strength: float = 1.0,
     lora_configs: "list | None" = None,
     lora_allow_partial: bool = False,
-    stage2_lora_fuse_mode: str = "delta",
+    stage2_lora_fuse_mode: str = "fresh-total",
     tiled_vae: bool = False,
     vae_tiling_mode: str = "auto",
     vae_temporal_tile_frames: int | None = None,
@@ -2786,6 +2787,14 @@ def generate_video(
         transformer_block_compile = True
         if transformer_block_compile_group_size == 0:
             transformer_block_compile_group_size = min(4, transformer_block_resident_blocks)
+
+    lora_requested = bool(lora_configs or lora_path or distilled_lora or ic_lora_weights)
+    if transformer_block_resident_blocks and lora_requested:
+        raise ValueError(
+            "LoRA fusion is not supported with transformer block streaming yet. "
+            "Disable --stream-transformer / --transformer-block-resident-blocks, "
+            "or run without --lora / --distilled-lora / --ic-lora-weights."
+        )
 
     video_ff_layout_layers = normalize_layout_layers(
         video_ff_layout_specs,
@@ -3918,10 +3927,8 @@ def generate_video(
         else:
             print(f"  Warning: Spatial upscaler weights not found at {upscaler_path}")
 
-        # Capture the stage-1 LoRA restore baseline. Cache-backed transformers
-        # keep only a small restore descriptor here; cache-off models fall back
-        # to parameter references.
-        base_weights = snapshot_lora_base_weights(model)
+        # Capture cache metadata for restoring the base transformer after IC-LoRA.
+        transformer_cache_restore_state = get_transformer_cache_restore_state(model)
 
         # Prepare LoRA configs if provided
         lora_configs = None
@@ -3936,7 +3943,7 @@ def generate_video(
             video_encoder=video_encoder,
             video_decoder=vae_decoder,
             spatial_upscaler=spatial_upscaler,
-            base_transformer_weights=base_weights,
+            transformer_cache_restore_state=transformer_cache_restore_state,
             lora_configs=lora_configs,
         )
 
@@ -5587,13 +5594,12 @@ def main():
         "--stage2-lora-fuse-mode",
         "--lora-stage2-fuse-mode",
         choices=("delta", "fresh-total"),
-        default="delta",
+        default="fresh-total",
         help=(
-            "Two-stage LoRA transition strategy. delta (default) applies "
-            "stage2-stage1 strength changes over stage-1 fused weights. "
-            "fresh-total restores the base transformer from the weight cache "
-            "before stage 2 and fuses the full stage-2 LoRA totals; this is "
-            "intended for benchmarking before making it default."
+            "Two-stage LoRA transition strategy. fresh-total (default) "
+            "restores the base transformer from the weight cache before stage "
+            "2 and fuses the full stage-2 LoRA totals. delta applies "
+            "stage2-stage1 strength changes over stage-1 fused weights."
         ),
     )
     parser.add_argument(

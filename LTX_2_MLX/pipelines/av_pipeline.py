@@ -78,8 +78,8 @@ from ..loader import (
     format_lora_stage_scale_lines,
     lora_configs_for_stage,
     lora_configs_for_stage_delta,
-    restore_lora_base_weights,
-    snapshot_lora_base_weights,
+    restore_transformer_cache_state,
+    get_transformer_cache_restore_state,
 )
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
@@ -1229,7 +1229,7 @@ class AVPipeline:
         stage_2_sigmas: Optional[Sequence[float]] = None,
         decode_video: bool = True,
         stage_lora_configs: Optional[List[LoRAConfig]] = None,
-        stage2_lora_fuse_mode: str = "delta",
+        stage2_lora_fuse_mode: str = "fresh-total",
     ) -> Tuple[mx.array, Optional[mx.array]]:
         """
         Generate with the distilled AV checkpoint in two stages.
@@ -1330,7 +1330,7 @@ class AVPipeline:
                 "stage2_lora_fuse_mode must be 'delta' or 'fresh-total', "
                 f"got {stage2_lora_fuse_mode!r}"
             )
-        stage_lora_snapshot = None
+        stage_lora_restore_state = None
         stage_1_lora_elapsed = 0.0
         spatial_upscaler_load_elapsed = 0.0
         stage_2_lora_elapsed = 0.0
@@ -1338,7 +1338,7 @@ class AVPipeline:
         stage_2_lora_label = "stage 2 lora delta fuse"
         lora_restore_elapsed = 0.0
         if stage_1_loras or stage_2_delta_loras:
-            stage_lora_snapshot = snapshot_lora_base_weights(self.transformer)
+            stage_lora_restore_state = get_transformer_cache_restore_state(self.transformer)
         if stage_1_loras:
             stage_lines = format_lora_stage_scale_lines(stage_lora_configs, 1)
             if stage_lines:
@@ -1349,7 +1349,6 @@ class AVPipeline:
             fuse_loras_into_model(
                 self.transformer,
                 stage_1_loras,
-                track_for_restore=False,
             )
             stage_1_lora_elapsed = time.perf_counter() - lora_fuse_start
             emit_progress_message(
@@ -1512,9 +1511,9 @@ class AVPipeline:
         mx.clear_cache()
         upscale_elapsed = time.perf_counter() - upscale_start
 
-        if stage2_lora_fuse_mode == "fresh-total" and stage_lora_snapshot is not None:
+        if stage2_lora_fuse_mode == "fresh-total" and stage_lora_restore_state is not None:
             lora_restore_start = time.perf_counter()
-            restore_lora_base_weights(self.transformer, stage_lora_snapshot)
+            restore_transformer_cache_state(self.transformer, stage_lora_restore_state)
             stage_2_lora_base_restore_elapsed = time.perf_counter() - lora_restore_start
             emit_progress_message(
                 "  Stage 2 LoRA base restore complete in "
@@ -1550,7 +1549,6 @@ class AVPipeline:
             fuse_loras_into_model(
                 self.transformer,
                 stage_2_loras_to_fuse,
-                track_for_restore=False,
             )
             stage_2_lora_elapsed = time.perf_counter() - lora_fuse_start
             emit_progress_message(
@@ -1626,12 +1624,12 @@ class AVPipeline:
             profile_blocks=global_profile_blocks,
         )
         stage_2_elapsed = time.perf_counter() - stage_2_start
-        if stage_lora_snapshot is not None:
+        if stage_lora_restore_state is not None:
             lora_restore_start = time.perf_counter()
-            restore_lora_base_weights(self.transformer, stage_lora_snapshot)
+            restore_transformer_cache_state(self.transformer, stage_lora_restore_state)
             lora_restore_elapsed = time.perf_counter() - lora_restore_start
             emit_progress_message(
-                f"  LoRA restore complete in {lora_restore_elapsed:.1f}s"
+                f"  Transformer cache restore complete in {lora_restore_elapsed:.1f}s"
             )
         post_denoise_start = time.perf_counter()
 
@@ -1891,11 +1889,11 @@ class AVPipeline:
                 print(message)
 
         stage_2_loras = lora_configs_for_stage(stage_lora_configs, 2)
-        stage_lora_snapshot = None
+        stage_lora_restore_state = None
         stage_2_lora_elapsed = 0.0
         lora_restore_elapsed = 0.0
         if stage_2_loras:
-            stage_lora_snapshot = snapshot_lora_base_weights(self.transformer)
+            stage_lora_restore_state = get_transformer_cache_restore_state(self.transformer)
             stage_lines = format_lora_stage_scale_lines(stage_lora_configs, 2)
             if stage_lines:
                 emit_progress_message("  Stage 2 LoRA scales:")
@@ -1905,7 +1903,6 @@ class AVPipeline:
             fuse_loras_into_model(
                 self.transformer,
                 stage_2_loras,
-                track_for_restore=False,
             )
             stage_2_lora_elapsed = time.perf_counter() - lora_fuse_start
             emit_progress_message(
@@ -2018,12 +2015,12 @@ class AVPipeline:
             profile_blocks=profile_blocks,
         )
         stage_2_elapsed = time.perf_counter() - stage_2_start
-        if stage_lora_snapshot is not None:
+        if stage_lora_restore_state is not None:
             lora_restore_start = time.perf_counter()
-            restore_lora_base_weights(self.transformer, stage_lora_snapshot)
+            restore_transformer_cache_state(self.transformer, stage_lora_restore_state)
             lora_restore_elapsed = time.perf_counter() - lora_restore_start
             emit_progress_message(
-                f"  LoRA restore complete in {lora_restore_elapsed:.1f}s"
+                f"  Transformer cache restore complete in {lora_restore_elapsed:.1f}s"
             )
         post_denoise_start = time.perf_counter()
 

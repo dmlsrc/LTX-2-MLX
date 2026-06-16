@@ -20,12 +20,14 @@ from LTX_2_MLX.loader.lora_loader import (
     _lora_key_categories,
     format_lora_stage_scale_lines,
     fuse_loras_into_model,
-    get_lora_target_keys,
     lora_configs_for_stage,
     lora_configs_for_stage_delta,
     lora_configs_have_stage_strengths,
-    restore_lora_base_weights,
-    snapshot_lora_base_weights,
+)
+from LTX_2_MLX.loader.transformer_cache import (
+    TRANSFORMER_CACHE_RESTORE_ATTR,
+    get_transformer_cache_restore_state,
+    restore_transformer_cache_state,
 )
 from LTX_2_MLX.loader.registry import (
     DummyRegistry,
@@ -589,22 +591,20 @@ class TestFuseLorasIntoModel:
             },
         )
         model = TinyLoRAModel()
-        model._lora_restore_cache_source = {
+        setattr(model, TRANSFORMER_CACHE_RESTORE_ATTR, {
             "valid": True,
             "cache_path": tmp_path / "transformer.safetensors",
             "transformer_cache_quantize": "off",
             "video_ff_quantize_specs": (),
             "video_ff_quantize_group_size": None,
             "video_ff_quantize_bits": None,
-            "persistent_loras": (),
-        }
+        })
 
         fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
 
         expected = mx.array([[3.0, 6.0], [4.0, 8.0]], dtype=mx.float32)
         assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
-        assert model._lora_restore_cache_source["valid"] is True
-        assert len(model._lora_restore_cache_source["persistent_loras"]) == 1
+        assert getattr(model, TRANSFORMER_CACHE_RESTORE_ATTR)["valid"] is False
 
     def test_fuses_bfloat16_safetensors_lora(self, tmp_path):
         path = tmp_path / "bf16_lora.safetensors"
@@ -625,7 +625,6 @@ class TestFuseLorasIntoModel:
             model,
             [LoRAConfig(str(path))],
             verbose=False,
-            lora_load_mode="stream",
         )
 
         expected = mx.array([[3.0, 6.0], [4.0, 8.0]], dtype=mx.float32)
@@ -685,29 +684,6 @@ class TestFuseLorasIntoModel:
             expected,
         )
 
-    def test_rejects_invalid_lora_load_mode(self, tmp_path):
-        path = tmp_path / "invalid_mode_lora.safetensors"
-        mx.save_safetensors(
-            str(path),
-            {
-                "transformer_blocks.0.ff.project_out.lora_A.weight": mx.array(
-                    [[1.0, 0.0]], dtype=mx.float32
-                ),
-                "transformer_blocks.0.ff.project_out.lora_B.weight": mx.array(
-                    [[2.0], [3.0]], dtype=mx.float32
-                ),
-            },
-        )
-        model = TinyLoRAModel()
-
-        with pytest.raises(ValueError, match="lora_load_mode"):
-            fuse_loras_into_model(
-                model,
-                [LoRAConfig(str(path))],
-                verbose=False,
-                lora_load_mode="sideways",
-            )
-
     def test_fused_range_guard_is_disabled_by_default(self, tmp_path, monkeypatch):
         monkeypatch.delenv("LTX_LORA_FUSE_RANGE_GUARD", raising=False)
         path = tmp_path / "overflow_lora.safetensors"
@@ -751,61 +727,28 @@ class TestFuseLorasIntoModel:
         with pytest.raises(ValueError, match="LoRA fusion overflows"):
             fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
 
-    def test_snapshot_and_restore_round_trip(self, tmp_path):
-        path = tmp_path / "restore_lora.safetensors"
-        mx.save_safetensors(
-            str(path),
-            {
-                "transformer_blocks.0.ff.project_out.lora_A.weight": mx.array(
-                    [[1.0, 0.0]], dtype=mx.float32
-                ),
-                "transformer_blocks.0.ff.project_out.lora_B.weight": mx.array(
-                    [[2.0], [3.0]], dtype=mx.float32
-                ),
-            },
-        )
+    def test_restore_state_requires_cache_backed_transformer(self):
         model = TinyLoRAModel()
-        private_original = mx.ones((2, 2), dtype=mx.float32)
-        model.transformer_blocks[0].ff._project_out_weight_t = private_original
-        original = snapshot_lora_base_weights(model)
 
-        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
-        assert not mx.allclose(
-            model.transformer_blocks[0].ff.project_out.weight,
-            mx.zeros((2, 2), dtype=mx.float32),
-        )
-        assert not mx.allclose(
-            model.transformer_blocks[0].ff._project_out_weight_t,
-            private_original,
-        )
+        with pytest.raises(RuntimeError, match="cache-backed transformer"):
+            get_transformer_cache_restore_state(model)
 
-        restore_lora_base_weights(model, original)
-        assert mx.allclose(
-            model.transformer_blocks[0].ff.project_out.weight,
-            mx.zeros((2, 2), dtype=mx.float32),
-        )
-        assert mx.allclose(
-            model.transformer_blocks[0].ff._project_out_weight_t,
-            private_original,
-        )
-
-    def test_cache_snapshot_restores_from_cache_source(self, monkeypatch, tmp_path):
+    def test_restore_state_reloads_from_cache_source(self, monkeypatch, tmp_path):
         import LTX_2_MLX.loader.transformer_cache as tc
 
         model = TinyLoRAModel()
         cache_path = tmp_path / "transformer.safetensors"
-        model._lora_restore_cache_source = {
+        setattr(model, TRANSFORMER_CACHE_RESTORE_ATTR, {
             "valid": True,
             "cache_path": cache_path,
             "transformer_cache_quantize": "off",
             "video_ff_quantize_specs": (("project_out", "mxfp8"),),
             "video_ff_quantize_group_size": 32,
             "video_ff_quantize_bits": 8,
-            "persistent_loras": (),
-        }
-        snapshot = snapshot_lora_base_weights(model)
-        assert snapshot["kind"] == "cache"
-        assert "parameters" not in snapshot
+        })
+        state = get_transformer_cache_restore_state(model)
+        assert state["cache_path"] == cache_path
+        assert "parameters" not in state
 
         calls = {}
 
@@ -817,97 +760,14 @@ class TestFuseLorasIntoModel:
 
         monkeypatch.setattr(tc, "load_transformer_cache", fake_load_transformer_cache)
 
-        restore_lora_base_weights(model, snapshot)
+        restore_transformer_cache_state(model, state)
 
         assert calls["target"] is model
         assert calls["path"] == cache_path
         assert calls["kwargs"]["video_ff_quantize_specs"] == (("project_out", "mxfp8"),)
         assert calls["kwargs"]["video_ff_quantize_group_size"] == 32
         assert calls["kwargs"]["video_ff_quantize_bits"] == 8
-        assert model._lora_restore_cache_source["valid"] is True
-
-    def test_cache_snapshot_refuses_persistent_loras_without_weight_snapshot(
-        self, monkeypatch, tmp_path
-    ):
-        import LTX_2_MLX.loader.transformer_cache as tc
-
-        path = tmp_path / "global_lora.safetensors"
-        mx.save_safetensors(
-            str(path),
-            {
-                "diffusion_model.transformer_blocks.0.ff.net.2.lora_A.weight": mx.array(
-                    [[1.0, 2.0]], dtype=mx.float32
-                ),
-                "diffusion_model.transformer_blocks.0.ff.net.2.lora_B.weight": mx.array(
-                    [[3.0], [4.0]], dtype=mx.float32
-                ),
-                "diffusion_model.transformer_blocks.0.ff.net.2.alpha": mx.array(0.5),
-            },
-        )
-        model = TinyLoRAModel()
-        cache_path = tmp_path / "transformer.safetensors"
-        model._lora_restore_cache_source = {
-            "valid": True,
-            "cache_path": cache_path,
-            "transformer_cache_quantize": "off",
-            "video_ff_quantize_specs": (),
-            "video_ff_quantize_group_size": None,
-            "video_ff_quantize_bits": None,
-            "persistent_loras": (),
-        }
-        expected = mx.array([[3.0, 6.0], [4.0, 8.0]], dtype=mx.float32)
-
-        fuse_loras_into_model(model, [LoRAConfig(str(path))], verbose=False)
-        snapshot = snapshot_lora_base_weights(model)
-
-        assert snapshot["kind"] == "cache"
-        assert "parameters" not in snapshot
-        assert len(snapshot["source"]["persistent_loras"]) == 1
-
-        def fake_load_transformer_cache(target, path, **_kwargs):
-            assert path == cache_path
-            target.transformer_blocks[0].ff.project_out.weight = mx.zeros(
-                (2, 2), dtype=mx.float32
-            )
-            return (1, 0, 0)
-
-        monkeypatch.setattr(tc, "load_transformer_cache", fake_load_transformer_cache)
-        restore_lora_base_weights(model, snapshot)
-
-        assert mx.allclose(model.transformer_blocks[0].ff.project_out.weight, expected)
-        assert model._lora_restore_cache_source["valid"] is True
-        assert len(model._lora_restore_cache_source["persistent_loras"]) == 1
-
-
-class TestGetLoraTargetKeys:
-    """Tests for get_lora_target_keys function."""
-
-    def test_finds_common_targets(self):
-        """Test finds common LoRA target modules."""
-        model_weights = {
-            "layer.to_q.weight": mx.array([1]),
-            "layer.to_k.weight": mx.array([2]),
-            "layer.to_v.weight": mx.array([3]),
-            "layer.ff.project_in.weight": mx.array([4]),
-            "other.weight": mx.array([5]),  # Not a target
-        }
-        targets = get_lora_target_keys(model_weights)
-        assert "layer.to_q.weight" in targets
-        assert "layer.to_k.weight" in targets
-        assert "layer.to_v.weight" in targets
-        assert "layer.ff.project_in.weight" in targets
-        assert "other.weight" not in targets
-
-    def test_only_includes_weight_keys(self):
-        """Test only includes .weight keys."""
-        model_weights = {
-            "layer.to_q.weight": mx.array([1]),
-            "layer.to_q.bias": mx.array([2]),  # Not a weight
-        }
-        targets = get_lora_target_keys(model_weights)
-        assert "layer.to_q.weight" in targets
-        assert "layer.to_q.bias" not in targets
-
+        assert getattr(model, TRANSFORMER_CACHE_RESTORE_ATTR)["valid"] is True
 
 # ============================================================================
 # Registry Tests
