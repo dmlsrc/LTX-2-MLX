@@ -4551,7 +4551,7 @@ def generate_video(
     if use_linear_schedule:
         # Linear schedule: evenly spaced from 1.0 to 0.0
         # Better for spatial coherence preservation
-        sigmas = mx.array(np.linspace(1.0, 0.0, num_steps + 1).tolist())
+        sigmas = mx.linspace(1.0, 0.0, num_steps + 1)
         print(f"  Sigma schedule (linear): {[f'{float(s):.3f}' for s in sigmas]}")
     elif model_variant == "distilled":
         sigmas = mx.array(DISTILLED_SIGMA_VALUES[:num_steps + 1])
