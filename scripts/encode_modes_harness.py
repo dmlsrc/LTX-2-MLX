@@ -43,7 +43,7 @@ from typing import Any
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from LTX_2_MLX.video_encoder import (  # noqa: E402
+from LTX_2_MLX.video_encoder import (
     COLOR_TAGS_BT709,
     COLOR_TAGS_RGB,
     NATIVE_FPS,
@@ -55,7 +55,7 @@ from LTX_2_MLX.video_encoder import (  # noqa: E402
     write_wav_float32,
     write_wav_int16,
 )
-from scripts.decode_latent_debug import (  # noqa: E402
+from scripts.decode_latent_debug import (
     RunTimings,
     Timer,
     decode_audio_latent,

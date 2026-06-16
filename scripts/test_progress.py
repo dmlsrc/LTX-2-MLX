@@ -34,11 +34,11 @@ from pathlib import Path
 # Allow running directly from the repo root without an install.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from LTX_2_MLX.progress import (  # noqa: E402
+from LTX_2_MLX.progress import (
     PhaseBar,
     StackedPhaseBars,
 )
-from LTX_2_MLX.progress.bars import _fmt_duration  # noqa: E402
+from LTX_2_MLX.progress.bars import _fmt_duration
 
 # ---------------------------------------------------------------------------
 # Tiny test framework: a failing assert prints a "FAIL" line and bumps the

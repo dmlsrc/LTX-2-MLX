@@ -44,7 +44,7 @@ import numpy as np
 # Allow running directly from the repo root without an install.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from LTX_2_MLX.audio.onset import (  # noqa: E402
+from LTX_2_MLX.audio.onset import (
     DEFAULT_DETECT_THRESHOLD_RATIO,
     DEFAULT_DETECT_WINDOW_MS,
     DEFAULT_SILENCE_END_MS,

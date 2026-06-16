@@ -76,8 +76,8 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
-from LTX_2_MLX.videotoolbox import (  # noqa: E402
+from LTX_2_MLX.progress import StackedPhaseBars
+from LTX_2_MLX.videotoolbox import (
     AudioTrack,
     AVWriter,
     CutDetector,
@@ -86,9 +86,9 @@ from LTX_2_MLX.videotoolbox import (  # noqa: E402
     autorelease_pool,
     require_pyobjc,
 )
-from LTX_2_MLX.videotoolbox import pixel_buffers as _pb  # noqa: E402
-from LTX_2_MLX.videotoolbox.comparison import render_comparison  # noqa: E402
-from LTX_2_MLX.videotoolbox.writer import (  # noqa: E402
+from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
+from LTX_2_MLX.videotoolbox.comparison import render_comparison
+from LTX_2_MLX.videotoolbox.writer import (
     HEVC_PROFILE_MAIN10,
     HEVC_PROFILE_MAIN422_10,
 )

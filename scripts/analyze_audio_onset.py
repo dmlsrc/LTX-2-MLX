@@ -99,7 +99,7 @@ from scipy.io import wavfile
 # use for the mitigation, so the diagnostic and the production gate move
 # together when either is tuned.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from LTX_2_MLX.audio.onset import (  # noqa: E402
+from LTX_2_MLX.audio.onset import (
     DEFAULT_DETECT_THRESHOLD_RATIO,
     DEFAULT_DETECT_WINDOW_MS,
     detect_onset_spike,
