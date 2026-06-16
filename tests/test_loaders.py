@@ -30,114 +30,11 @@ from LTX_2_MLX.loader.weight_converter import (
     _convert_numeric_dicts_to_lists,
     _flatten_to_nested,
     convert_pytorch_key_to_mlx,
-    convert_text_encoder_key,
-    convert_transformer_key,
-    convert_vae_key,
-    transpose_linear_weights,
 )
 
 # ============================================================================
 # Weight Converter Tests
 # ============================================================================
-
-class TestConvertTransformerKey:
-    """Tests for convert_transformer_key function."""
-
-    def test_basic_key_conversion(self):
-        """Test basic transformer key is stripped of prefix."""
-        key = "model.diffusion_model.transformer_blocks.0.attn1.to_q.weight"
-        result = convert_transformer_key(key)
-        assert result == "transformer_blocks.0.attn1.to_q.weight"
-
-    def test_to_out_conversion(self):
-        """Test to_out.0 -> to_out conversion."""
-        key = "model.diffusion_model.attn.to_out.0.weight"
-        result = convert_transformer_key(key)
-        assert result == "attn.to_out.weight"
-
-    def test_ff_net_project_in_conversion(self):
-        """Test ff.net.0.proj -> ff.project_in.proj conversion."""
-        # Note: convert_transformer_key only strips prefix, full key conversion
-        # is done by convert_pytorch_key_to_mlx
-        key = "model.diffusion_model.ff.net.0.proj.weight"
-        result = convert_transformer_key(key)
-        # This function only strips model.diffusion_model. prefix
-        assert result == "ff.net.0.proj.weight"
-
-    def test_ff_net_project_out_conversion(self):
-        """Test ff.net.2 -> ff.project_out conversion."""
-        # Note: convert_transformer_key only strips prefix
-        key = "model.diffusion_model.ff.net.2.weight"
-        result = convert_transformer_key(key)
-        assert result == "ff.net.2.weight"
-
-    def test_skips_audio_keys(self):
-        """Test that audio-related keys are skipped."""
-        audio_keys = [
-            "model.diffusion_model.audio_blocks.0.weight",
-            "model.diffusion_model.Audio_processor.weight",
-            "audio_vae.encoder.weight",
-        ]
-        for key in audio_keys:
-            result = convert_transformer_key(key)
-            assert result is None, f"Audio key {key} should be skipped"
-
-    def test_skips_vocoder_keys(self):
-        """Test that vocoder keys are skipped."""
-        key = "vocoder.generator.weight"
-        result = convert_transformer_key(key)
-        assert result is None
-
-    def test_skips_audio_vae_keys(self):
-        """Test that audio_vae keys are skipped."""
-        key = "audio_vae.encoder.weight"
-        result = convert_transformer_key(key)
-        assert result is None
-
-
-class TestConvertVaeKey:
-    """Tests for convert_vae_key function."""
-
-    def test_vae_encoder_key(self):
-        """Test VAE encoder key conversion."""
-        key = "vae.encoder.layers.0.weight"
-        result = convert_vae_key(key)
-        assert result == "encoder.layers.0.weight"
-
-    def test_vae_decoder_key(self):
-        """Test VAE decoder key conversion."""
-        key = "vae.decoder.layers.0.weight"
-        result = convert_vae_key(key)
-        assert result == "decoder.layers.0.weight"
-
-    def test_skips_non_vae_keys(self):
-        """Test that non-VAE keys are skipped."""
-        key = "model.diffusion_model.transformer.weight"
-        result = convert_vae_key(key)
-        assert result is None
-
-
-class TestConvertTextEncoderKey:
-    """Tests for convert_text_encoder_key function."""
-
-    def test_text_embedding_projection_key(self):
-        """Test text embedding projection key conversion."""
-        key = "text_embedding_projection.aggregate_embed.weight"
-        result = convert_text_encoder_key(key)
-        assert result == "feature_extractor.aggregate_embed.weight"
-
-    def test_embeddings_connector_key(self):
-        """Test embeddings connector key conversion."""
-        key = "model.diffusion_model.embeddings_connector.proj.weight"
-        result = convert_text_encoder_key(key)
-        assert result == "embeddings_connector.proj.weight"
-
-    def test_skips_unrelated_keys(self):
-        """Test that unrelated keys are skipped."""
-        key = "transformer.layers.0.weight"
-        result = convert_text_encoder_key(key)
-        assert result is None
-
 
 class TestConvertPytorchKeyToMlx:
     """Tests for convert_pytorch_key_to_mlx function."""
@@ -172,50 +69,30 @@ class TestConvertPytorchKeyToMlx:
         result = convert_pytorch_key_to_mlx(key)
         assert result == "attn.to_out.weight"
 
+    def test_ff_net_conversions(self):
+        """Test feed-forward module name conversion."""
+        assert (
+            convert_pytorch_key_to_mlx("ff.net.0.proj.weight")
+            == "ff.project_in.proj.weight"
+        )
+        assert convert_pytorch_key_to_mlx("ff.net.2.weight") == "ff.project_out.weight"
 
-class TestTransposeLinearWeights:
-    """Tests for transpose_linear_weights function."""
+    def test_audio_ff_conversions(self):
+        """Test audio feed-forward module name conversion when audio is included."""
+        assert (
+            convert_pytorch_key_to_mlx("audio_ff.net.0.proj.weight", include_audio=True)
+            == "audio_ff.project_in.proj.weight"
+        )
+        assert (
+            convert_pytorch_key_to_mlx("audio_ff.net.2.weight", include_audio=True)
+            == "audio_ff.project_out.weight"
+        )
 
-    def test_transposes_2d_weight(self):
-        """Test that 2D .weight tensors are transposed."""
-        weights = {
-            "layer.weight": mx.array([[1, 2], [3, 4], [5, 6]]),  # (3, 2)
-        }
-        result = transpose_linear_weights(weights)
-        assert result["layer.weight"].shape == (2, 3)
-
-    def test_skips_embedding_weights(self):
-        """Test that embedding weights (without proj) are not transposed."""
-        weights = {
-            "embeddings.weight": mx.array([[1, 2], [3, 4]]),
-        }
-        result = transpose_linear_weights(weights)
-        # Embeddings should not be transposed
-        assert result["embeddings.weight"].shape == (2, 2)
-
-    def test_transposes_embedding_proj(self):
-        """Test that embedding projection weights are transposed."""
-        weights = {
-            "embeddings_proj.weight": mx.array([[1, 2], [3, 4], [5, 6]]),
-        }
-        result = transpose_linear_weights(weights)
-        assert result["embeddings_proj.weight"].shape == (2, 3)
-
-    def test_skips_non_weight_keys(self):
-        """Test that non-.weight keys are not transposed."""
-        weights = {
-            "layer.bias": mx.array([1, 2, 3]),
-        }
-        result = transpose_linear_weights(weights)
-        assert mx.array_equal(result["layer.bias"], weights["layer.bias"])
-
-    def test_skips_non_2d_weights(self):
-        """Test that non-2D weights are not transposed."""
-        weights = {
-            "conv.weight": mx.array([[[1, 2], [3, 4]]]),  # 3D
-        }
-        result = transpose_linear_weights(weights)
-        assert result["conv.weight"].shape == (1, 2, 2)
+    def test_skips_audio_embeddings_connector(self):
+        """Test audio_embeddings_connector keys are skipped."""
+        key = "audio_embeddings_connector.proj.weight"
+        result = convert_pytorch_key_to_mlx(key, include_audio=True)
+        assert result is None
 
 
 class TestFlattenToNested:
@@ -935,9 +812,7 @@ class TestLoaderIntegration:
     """Integration tests requiring actual model weights."""
 
     def test_load_transformer_weights_real(self, weights_dir):
-        """Test loading real transformer weights using the streaming loader."""
-        # Note: load_safetensors has issues with bfloat16, but load_transformer_weights
-        # handles dtype conversion properly. Skip if no weights available.
+        """Check real checkpoint metadata without materializing tensors."""
         weight_files = list(weights_dir.glob("**/*.safetensors"))
         if not weight_files:
             pytest.skip("No weight files found")
