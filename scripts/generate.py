@@ -1642,7 +1642,6 @@ def encode_av_gemma_batch(
                 "label": label,
                 "hidden_states": None,
                 "attention_mask": None,
-                "real_token_count": 0,
             })
             del last_hidden
             continue
@@ -1670,7 +1669,6 @@ def encode_av_gemma_batch(
             "label": label,
             "hidden_states": all_hidden_states,
             "attention_mask": attention_mask,
-            "real_token_count": real_token_count,
         })
 
         del last_hidden
@@ -1696,7 +1694,6 @@ def encode_av_gemma_batch(
         label = gemma_output["label"]
         all_hidden_states = gemma_output["hidden_states"]
         attention_mask = gemma_output["attention_mask"]
-        real_token_count = gemma_output["real_token_count"]
 
         if all_hidden_states is None or attention_mask is None:
             results.append((None, None, None))
@@ -1713,18 +1710,6 @@ def encode_av_gemma_batch(
 
         print(f"  {label.capitalize()} video encoding shape: {av_output.video_encoding.shape}")
         print(f"  {label.capitalize()} audio encoding shape: {av_output.audio_encoding.shape}")
-
-        # Diagnostic: check encoding statistics for anomalies
-        import numpy as _np
-        for name, enc in [("video", av_output.video_encoding), ("audio", av_output.audio_encoding)]:
-            arr = _np.array(enc[0].astype(mx.float32))
-            real_part = arr[:real_token_count]
-            reg_part = arr[real_token_count:]
-            print(f"    {label} {name} real[:{real_token_count}]: mean={real_part.mean():.4f} std={real_part.std():.4f} "
-                  f"min={real_part.min():.4f} max={real_part.max():.4f} nan={_np.isnan(real_part).sum()}")
-            if reg_part.shape[0] > 0:
-                print(f"    {label} {name} regs[{real_token_count}:]: mean={reg_part.mean():.4f} std={reg_part.std():.4f} "
-                      f"min={reg_part.min():.4f} max={reg_part.max():.4f} nan={_np.isnan(reg_part).sum()}")
 
         results.append((av_output.video_encoding, av_output.audio_encoding, av_output.attention_mask))
 
