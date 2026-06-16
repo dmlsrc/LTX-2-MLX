@@ -5,7 +5,6 @@ from functools import lru_cache
 from typing import Protocol
 
 import mlx.core as mx
-import numpy as np
 
 BASE_SHIFT_ANCHOR = 1024
 MAX_SHIFT_ANCHOR = 4096
@@ -194,10 +193,11 @@ class BetaScheduler:
             A tensor of sigmas.
         """
         try:
+            import numpy as np
             import scipy.stats
         except ImportError as exc:
             raise ImportError(
-                "BetaScheduler requires scipy. Install with: pip install scipy"
+                "BetaScheduler requires numpy and scipy. Install with: pip install scipy"
             ) from exc
 
         model_sampling_sigmas = _precalculate_model_sampling_sigmas(
@@ -220,10 +220,12 @@ class BetaScheduler:
 @lru_cache(maxsize=5)
 def _precalculate_model_sampling_sigmas(
     shift: float, timesteps_length: int
-) -> np.ndarray:
+) -> tuple[float, ...]:
     """Precalculate model sampling sigmas with caching."""
-    timesteps = np.arange(1, timesteps_length + 1) / timesteps_length
-    return np.array([flux_time_shift(shift, 1.0, t) for t in timesteps])
+    return tuple(
+        flux_time_shift(shift, 1.0, timestep / timesteps_length)
+        for timestep in range(1, timesteps_length + 1)
+    )
 
 
 def flux_time_shift(mu: float, sigma: float, t: float) -> float:

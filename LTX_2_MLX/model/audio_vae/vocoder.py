@@ -337,6 +337,7 @@ class UpSample1d(nn.Module):
                 np.sin(np.pi * time_axis_rolloff) / safe_denom,
             )
             sinc_filter = (sinc_vals * window * rolloff / ratio).reshape(1, 1, -1)
+            self.filter = mx.array(sinc_filter.astype(np.float32))
         else:
             # Kaiser-windowed sinc filter (BigVGAN default)
             self.kernel_size = (
@@ -354,10 +355,7 @@ class UpSample1d(nn.Module):
                 half_width=0.6 / ratio,
                 kernel_size=self.kernel_size,
             )
-            # kaiser_sinc_filter1d returns mx.array; convert to numpy for consistency
-            sinc_filter = np.array(sinc_filter).reshape(1, 1, -1)
-
-        self.filter = mx.array(sinc_filter.astype(np.float32))
+            self.filter = sinc_filter.reshape(1, 1, -1)
 
     def __call__(self, x: mx.array) -> mx.array:
         x = _replicate_pad_1d(x, self.pad, self.pad)
