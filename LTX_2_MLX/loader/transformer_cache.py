@@ -1199,7 +1199,7 @@ def build_transformer_cache(
 
     def _flush_pending():
         if pending:
-            mx.eval(pending)
+            mx.eval(*pending)
             pending.clear()
             mx.clear_cache()
 

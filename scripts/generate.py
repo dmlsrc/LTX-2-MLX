@@ -1994,10 +1994,10 @@ def _cast_bf16_weights_to(model, target_dtype: mx.Dtype) -> int:
                 pending.append(new_value)
                 count += 1
                 if len(pending) >= 256:
-                    mx.eval(pending)
+                    mx.eval(*pending)
                     pending.clear()
     if pending:
-        mx.eval(pending)
+        mx.eval(*pending)
     return count
 
 

@@ -383,9 +383,9 @@ def load_native_vae_encoder_statistics(
             "No VAE encoder per-channel statistics found in "
             f"{weights_path}"
         )
-    mx.eval(*[
+    mx.eval(*(
         getattr(stats_encoder.per_channel_statistics, attr_name)
         for _aliases, attr_name in _STAT_KEY_ALIASES
-    ])
+    ))
     print(f"  Loaded {loaded_count} native Conv3d VAE encoder statistic tensors")
     return stats_encoder
