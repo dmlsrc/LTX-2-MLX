@@ -1208,7 +1208,7 @@ def build_transformer_cache(
         if not cache_weights:
             return
         _flush_pending()
-        mx.eval(list(cache_weights.values()))
+        mx.eval(*cache_weights.values())
         shard = _cache_shard_path(cache_file, shard_index)
         # mx.save_safetensors requires a .safetensors suffix, so the temp name
         # keeps it (hidden dotfile beside the shard, atomically renamed in).
