@@ -26,14 +26,14 @@ Text Prompt
 │  48-Layer Transformer (19B parameters)                      │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  Video Stream (14B)                                 │    │
-│  │  • 32 attention heads × 128 dim = 4096 hidden       │    │
+│  │  • 32 attention heads x 128 dim = 4096 hidden       │    │
 │  │  • 3D RoPE positional encoding (x, y, t)            │    │
 │  │  • Cross-attention to text embeddings               │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                          ↕                                  │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  Audio Stream (5B) - optional                       │    │
-│  │  • 16 attention heads × 128 dim = 2048 hidden       │    │
+│  │  • 16 attention heads x 128 dim = 2048 hidden       │    │
 │  │  • 1D RoPE positional encoding (temporal)           │    │
 │  │  • Bidirectional cross-attention with video         │    │
 │  └─────────────────────────────────────────────────────┘    │
@@ -43,12 +43,12 @@ Text Prompt
 ┌─────────────────────────────────────────────────────────────┐
 │  Video VAE Decoder                                          │
 │  • 128 latent channels → 3 RGB channels                     │
-│  • 1:192 compression (32× spatial, 8× temporal)             │
+│  • 1:192 compression (32x spatial, 8x temporal)             │
 │  • Timestep conditioning for final denoising                │
 └─────────────────────────────────────────────────────────────┘
     │
     ▼
-  Video Output (up to 768×1024, 24fps)
+  Video Output (up to 768x1024, 24fps)
 ```
 
 ## MLX Package Structure
@@ -78,8 +78,8 @@ LTX_2_MLX/
 │   │   └── encoder.py        # Text encoder projection layers
 │   │
 │   └── upscaler/
-│       ├── spatial.py        # 2× spatial resolution upscaler
-│       └── temporal.py       # 2× framerate interpolation
+│       ├── spatial.py        # 2x spatial resolution upscaler
+│       └── temporal.py       # 2x framerate interpolation
 │
 ├── components/
 │   ├── schedulers.py         # Sigma schedules (distilled, LTX2Scheduler)
@@ -120,9 +120,9 @@ Each of the 48 transformer blocks contains:
 ### Video VAE Decoder
 
 The VAE decoder converts 128-channel latents to RGB video:
-- **Compression ratio**: 32× spatial, 8× temporal
+- **Compression ratio**: 32x spatial, 8x temporal
 - **Input**: `(B, 128, T, H, W)` latents
-- **Output**: `(B, 3, T×8, H×32, W×32)` pixels
+- **Output**: `(B, 3, Tx8, Hx32, Wx32)` pixels
 
 Key feature: **Timestep conditioning** - the decoder performs a final denoising step during decode, using learned scale/shift tables indexed by the current sigma value.
 
@@ -140,8 +140,8 @@ The projection includes:
 ### Patchifier
 
 Converts between spatial latent format and sequence format:
-- **Patchify**: `(B, C, T, H, W)` → `(B, T×H×W, C)` for transformer
-- **Unpatchify**: `(B, T×H×W, C)` → `(B, C, T, H, W)` for VAE
+- **Patchify**: `(B, C, T, H, W)` → `(B, TxHxW, C)` for transformer
+- **Unpatchify**: `(B, TxHxW, C)` → `(B, C, T, H, W)` for VAE
 
 ### 3D RoPE (Rotary Position Embeddings)
 

@@ -263,7 +263,7 @@ def _attention_core_inline_with_mask(
     # (True = attend, False = mask out, equivalent to additive -inf at False).
     # Additive masks (e.g. context_mask with -inf at padding) must match q dtype.
     # An unconditional .astype(q.dtype) here would cast bool → 0/1 BF16, which
-    # MLX SDPA then interprets as a soft additive bias (~2.72× preference
+    # MLX SDPA then interprets as a soft additive bias (~2.72x preference
     # factor) rather than a hard mask — a real bug for any caller passing
     # bool.  Dormant on main today (no bool callers), kept correct preemptively.
     if mask.dtype != mx.bool_:

@@ -42,7 +42,7 @@
 #   PROMPT            Prompt (default the bakery reference).
 #
 # Per-run wall is roughly model load (~30 s) + warmup step (~50 s) +
-# steady steps (~45 s each).  Defaults => ~2 runs × ~2 min ≈ ~12 min total.
+# steady steps (~45 s each).  Defaults => ~2 runs x ~2 min ≈ ~12 min total.
 # Live tqdm output is teed to stdout AND the log so you can watch progress.
 #
 # Usage:

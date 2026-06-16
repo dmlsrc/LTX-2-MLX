@@ -1,6 +1,6 @@
 """Isolation micro-bench: measure pure Python overhead in BasicAVTransformerBlock.
 
-Hypothesis: at stage-1 (small T), our per-block Python overhead is ~30ms × 48
+Hypothesis: at stage-1 (small T), our per-block Python overhead is ~30ms x 48
 blocks = ~1.4 s/step, which would entirely explain the 42% gap with mlx-video
 at small T.  This script simulates the Python work without any MLX ops, so
 the result is a hard upper bound on what refactoring could reclaim.
@@ -158,7 +158,7 @@ def main() -> None:
     per_step_ms = (elapsed / n_steps) * 1000
     per_block_us = per_step_ms / n_blocks * 1000
 
-    print(f"Total: {elapsed:.3f}s for {n_steps} steps × {n_blocks} blocks")
+    print(f"Total: {elapsed:.3f}s for {n_steps} steps x {n_blocks} blocks")
     print(f"Per step: {per_step_ms:.2f} ms")
     print(f"Per block: {per_block_us:.1f} µs")
     print()

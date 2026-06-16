@@ -65,7 +65,7 @@ All recipes:
 - Pick the right `--duration` for the prompt's reference setting.
   `--fps` defaults to 24, so it's omitted.
 
-## Bakery — full quality (`distilled` two-stage, 1024×576, ~25 min)
+## Bakery — full quality (`distilled` two-stage, 1024x576, ~25 min)
 
 ```bash
 caffeinate -di python scripts/generate.py "$BAKERY" \
@@ -77,7 +77,7 @@ caffeinate -di python scripts/generate.py "$BAKERY" \
   --output-prefix bakery
 ```
 
-## Bakery — smoke (`one-stage`, 512×288, ~7-8 min)
+## Bakery — smoke (`one-stage`, 512x288, ~7-8 min)
 
 Single-stage distilled at the half-bakery resolution.  No spatial
 upscaler, no stage-2 refinement.  Same 8-step distilled schedule.
@@ -93,7 +93,7 @@ caffeinate -di python scripts/generate.py "$BAKERY" \
   --output-prefix bakery_smoke
 ```
 
-## Kitten — full quality (`distilled` two-stage, 1024×576, ~45 min)
+## Kitten — full quality (`distilled` two-stage, 1024x576, ~45 min)
 
 ```bash
 caffeinate -di python scripts/generate.py "$KITTEN" \
@@ -105,7 +105,7 @@ caffeinate -di python scripts/generate.py "$KITTEN" \
   --output-prefix kitten
 ```
 
-## Kitten — smoke (`one-stage`, 512×288, ~11-12 min)
+## Kitten — smoke (`one-stage`, 512x288, ~11-12 min)
 
 ```bash
 caffeinate -di python scripts/generate.py "$KITTEN" \
@@ -123,9 +123,9 @@ caffeinate -di python scripts/generate.py "$KITTEN" \
 
 - **`--pipeline distilled` requires `--height` and `--width` divisible
   by 64** (so the half-res stage 1 ends up divisible by 32).  Smallest
-  valid 16:9 for this mode is **1024×576**.
+  valid 16:9 for this mode is **1024x576**.
 - **`--pipeline one-stage` only needs dims divisible by 32**.  The
-  next 16:9 step down is **512×288** (which is also what stage 1 of
+  next 16:9 step down is **512x288** (which is also what stage 1 of
   the full bakery runs at).  Lower than that, you have to drop the
   16:9 constraint.
 - Both modes use the same distilled weights and the fixed 8-step

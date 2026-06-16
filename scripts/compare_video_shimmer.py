@@ -191,7 +191,7 @@ def main() -> None:
     )
 
     print()
-    print(f"=== Shimmer signal: TSD({label_a}) − TSD({label_b}) ===")
+    print(f"=== Shimmer signal: TSD({label_a}) - TSD({label_b}) ===")
     print(f"  mean:    {diff.mean():+.4f}")
     print(f"  median:  {np.median(diff):+.4f}")
     print(f"  p5:      {np.percentile(diff, 5):+.4f}")
@@ -216,7 +216,7 @@ def main() -> None:
 
     diff_patches = patches_a - patches_b
     print()
-    print(f"=== Per-patch shimmer ({label_a} − {label_b}, {args.grid}x{args.grid} grid) ===")
+    print(f"=== Per-patch shimmer ({label_a} - {label_b}, {args.grid}x{args.grid} grid) ===")
     print("  (rows top→bottom, cols left→right)")
     for r in range(args.grid):
         row = "  "
@@ -225,7 +225,7 @@ def main() -> None:
         print(row)
     print(
         "  legend: ##≥0.10  ++≥0.05  + ≥0.02  . ≈0  "
-        "- ≤−0.02  --≤−0.05  @@≤−0.10"
+        "- ≤-0.02  --≤-0.05  @@≤-0.10"
     )
     mx_idx = np.unravel_index(int(diff_patches.argmax()), diff_patches.shape)
     mn_idx = np.unravel_index(int(diff_patches.argmin()), diff_patches.shape)

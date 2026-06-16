@@ -13,13 +13,13 @@ top are most recent; older history is preserved at the bottom for context.
 
 ## TL;DR — current state (2026-05-18)
 
-**Production baseline at bakery (1024×576×481, distilled two-stage,
+**Production baseline at bakery (1024x576x481, distilled two-stage,
 `--fast-mode`, default flags):**
 
 | Metric                       | Current   |
 | ---------------------------- | --------- |
-| Stage 1 (8 steps, 288×512)   | 45.5 s/it = 6m 04s |
-| Stage 2 (3 steps, 576×1024)  | 313.5 s/it = 15m 40s |
+| Stage 1 (8 steps, 288x512)   | 45.5 s/it = 6m 04s |
+| Stage 2 (3 steps, 576x1024)  | 313.5 s/it = 15m 40s |
 | VAE decode (tiled)           | 2m 10s    |
 | **Bakery total**             | **24m 40s** |
 
@@ -51,7 +51,7 @@ The following ship enabled by default:
   "BlockLoader cliff characterization" entry for the mechanism.)
 - Video attention layout: OFF by default.  (The historical default
   was `to_q/to_k/to_v/to_out:pretranspose`; same microbench showed
-  these are tied with naive BF16 within ±1 % at the 4096×4096 shape.)
+  these are tied with naive BF16 within ±1 % at the 4096x4096 shape.)
 - Audio pretranspose (audio attn `to_*`, video→audio attn `to_*`, audio FF).
 - AdaLN/RoPE dtype cast-back (no FP32 leakage into SDPA).
 - Skip negative prompt encoding for distilled mode (cfg=1.0 → no-op).
@@ -87,13 +87,13 @@ Prior negative candidates remain preserved below (full reasoning in
 | Previous candidate | Status | Evidence |
 |---|---|---|
 | **mxfp8 quant on `project_*`** | **DEAD** — +10-45 % SLOWER post-AdaLN-fix | `bench_ff_microbench.py quant_matmul`: `mx.quantized_matmul` is structurally a BF16 matmul with on-the-fly dequant (`fp_quantized.h:139`, `:663`).  Hits 4.7 TFlops/s vs steel_gemm's 7.95.  Will always lose on M1; flips on M3+/M5 hardware.  Empirically verified 2026-05-23 via `scripts/bench_int8_alu.py`: **no INT8 hardware path exists on Apple7**.  Metal has no `dot(char4,char4)` intrinsic, `simdgroup_matrix` accepts only `half/bfloat/float`, and `mpp::tensor_ops::matmul2d` (Metal 4 cooperative-tensor with INT8 inputs) is M5+ only.  Microbench: INT8 4-way unrolled "dot" achieves 0.80 TOps/s vs FP16 scalar fma 0.76 TOps/s — per-MAC tied, no advantage.  The "21 TFlops/s theoretical INT8 peak" claim in prior PERFORMANCE_NOTES was wishful. |
-| **Q+K+V fusion into one matmul** | **DEAD** — −1.2 % regression | `bench_ff_microbench.py qkv`: 3 separate (111.75 ms) is faster than 1 packed (113.10 ms).  Bandwidth saving on input dominated by larger output's tile-alignment + post-split overhead. |
-| **Custom STEEL SDPA tile wrapper** | **DEFAULT WIN** — opt out with `LTX_DISABLE_STEEL_ATTN=1` | Supersedes the earlier D-sweep conclusion.  A literal wrapper around MLX's own STEEL body hits D=128 video self-attn and D=64 no-mask audio/cross-modal attention.  D128 uses `BQ=80, BK=40, q8k2v8` reducer+scalefold.  D64 selects by direction: self `BK=32`, audio-to-video `BK=24, q8k2` reducer+scalefold, video-to-audio `BK=32, q8k4`.  Fresh 576×320×721 distilled AV smoke (`8+3`, seed 42, BF16, audio on): lean D64/D128 stage-2 denoise 294.9s; q8k2 D128 + lean D64 stage-2 denoise 288.1s.  Saved-reference MP4 comparison: PSNR 47.64 dB, SSIM 0.99449, decoded RGB8 mean abs 1.31/255.  Latents are not bit-exact (`stage_2_video_latent` cos 0.99925), and the older stock-vs-lean path already had small BF16/tile-order drift; visual parity is the rollout gate. |
+| **Q+K+V fusion into one matmul** | **DEAD** — -1.2 % regression | `bench_ff_microbench.py qkv`: 3 separate (111.75 ms) is faster than 1 packed (113.10 ms).  Bandwidth saving on input dominated by larger output's tile-alignment + post-split overhead. |
+| **Custom STEEL SDPA tile wrapper** | **DEFAULT WIN** — opt out with `LTX_DISABLE_STEEL_ATTN=1` | Supersedes the earlier D-sweep conclusion.  A literal wrapper around MLX's own STEEL body hits D=128 video self-attn and D=64 no-mask audio/cross-modal attention.  D128 uses `BQ=80, BK=40, q8k2v8` reducer+scalefold.  D64 selects by direction: self `BK=32`, audio-to-video `BK=24, q8k2` reducer+scalefold, video-to-audio `BK=32, q8k4`.  Fresh 576x320x721 distilled AV smoke (`8+3`, seed 42, BF16, audio on): lean D64/D128 stage-2 denoise 294.9s; q8k2 D128 + lean D64 stage-2 denoise 288.1s.  Saved-reference MP4 comparison: PSNR 47.64 dB, SSIM 0.99449, decoded RGB8 mean abs 1.31/255.  Latents are not bit-exact (`stage_2_video_latent` cos 0.99925), and the older stock-vs-lean path already had small BF16/tile-order drift; visual parity is the rollout gate. |
 | **Custom fused / streamed BF16 FFN kernel** | **ABANDONED** — feasibility bench shows 3.8-7.5 % per-call ceiling | `bench_ff_microbench.py fused`: stock FF runs at 91-95 % of `steel_gemm` ceiling.  Conservative recoverable wall (vs both-matmuls-chained-no-GELU floor) = +12 ms = +3.8 % per call.  Optimistic recoverable wall (vs a perfect tiled fused kernel that elides hidden HBM round-trip AND retains GEMM efficiency) = +24 ms = +7.5 %.  Per-step ceiling: +1.3-2.6 % of 45.5 s.  Streamed-FFN sketch (per-chunk inner-dim streaming on top of MLX) additionally pays an output-accumulation tax and many-small-GEMMs efficiency loss; would not clear the bar.  See `PERFORMANCE_NOTES.md` Archive "Custom fused / streamed BF16 FFN kernel". |
-| **Custom AdaLN+residual Metal kernel** | **NOT WORTH IT** — ~0.10 % step headroom | `bench_ff_microbench.py adaln`: production compiled chain runs at 285 GB/s = 84 % of `pointwise_bw` 340 GB/s peak.  Inline-vs-compiled gap is 5.5× (`mx.compile` is already doing the heavy lifting).  A custom Metal kernel can at most recover the 16 % gap from 285→340 GB/s × 0.64 % of step the chain costs = ~0.10 % of step.  Keep `@mx.compile` on `_adaln_inline` / `_residual_gate_inline` — defends the current production default with a number. |
+| **Custom AdaLN+residual Metal kernel** | **NOT WORTH IT** — ~0.10 % step headroom | `bench_ff_microbench.py adaln`: production compiled chain runs at 285 GB/s = 84 % of `pointwise_bw` 340 GB/s peak.  Inline-vs-compiled gap is 5.5x (`mx.compile` is already doing the heavy lifting).  A custom Metal kernel can at most recover the 16 % gap from 285→340 GB/s x 0.64 % of step the chain costs = ~0.10 % of step.  Keep `@mx.compile` on `_adaln_inline` / `_residual_gate_inline` — defends the current production default with a number. |
 | **RoPE BF16 cos/sin (Lever A)** | **DEAD** — tested 2026-05-18, visible output drift | `bench_ff_microbench.py rope` predicted -0.55 % step (-252 ms) if BF16 cos/sin (cast inside `apply_split_rotary_emb`) preserved quality.  Empirical one-stage A/B (288x512x721, seed 42): speed delta within single-sample noise once layout-default change is controlled for; visible same-seed output drift.  RoPE precision change cascades into the render via AdaLN-conditioned attention.  Patch reverted, env var removed.  See `PERFORMANCE_NOTES.md` Archive "Consolidated quiet-machine microbench sweep" → Lever A. |
 | **RoPE merged into QKV matmul epilogue (Lever B)** | **NOT WORTH IT** — up to 0.90 % step, multi-day kernel work | Same `rope` bench: even a perfect kernel that eliminates RoPE entirely (folded into Q/K projection) caps at the 0.90 % step that production RoPE costs.  Multi-day Metal effort for sub-1 % return.  See `PERFORMANCE_NOTES.md` Archive "Consolidated quiet-machine microbench sweep". |
-| **VAE Conv3d (upstream `mx.conv_general` int-overflow fix)** | **BLOCKED upstream** — 2.4-3.5 % end-to-end ceiling | `bench_ff_microbench.py vae`: `nn.Conv3d` achieves 56-72 % of `steel_gemm` ceiling across three decoder shapes; dominates resnet-block time at ~80-95 %.  If upstream fix lifts Conv3d to GEMM ceiling: ~1.5-2x on Conv3d × ~7 % VAE share of total wall = ~2.4-3.5 % end-to-end ceiling.  Re-run `vae_ops` after fix lands to confirm.  Pointwise norm/silu inside the block are negligible. |
+| **VAE Conv3d (upstream `mx.conv_general` int-overflow fix)** | **BLOCKED upstream** — 2.4-3.5 % end-to-end ceiling | `bench_ff_microbench.py vae`: `nn.Conv3d` achieves 56-72 % of `steel_gemm` ceiling across three decoder shapes; dominates resnet-block time at ~80-95 %.  If upstream fix lifts Conv3d to GEMM ceiling: ~1.5-2x on Conv3d x ~7 % VAE share of total wall = ~2.4-3.5 % end-to-end ceiling.  Re-run `vae_ops` after fix lands to confirm.  Pointwise norm/silu inside the block are negligible. |
 
 **Achievement summary:** stock MLX BF16 remains hard to beat on M1 Max,
 but the STEEL wrapper found one narrow default software win.
@@ -180,38 +180,38 @@ from the default stack when running A/Bs.
 | Experiment | Status | Memory risk | Speed impact | Notes |
 | --- | --- | --- | --- | --- |
 | **--- shipped defaults ---** | | | | |
-| `--internal-audio auto` | default | none | -35 % wall on video-only (256×256×25) | Resolves to `on` iff `--generate-audio`.  Legacy `LTX_DISABLE_INTERNAL_AUDIO=1` is honored but the new flag is preferred.  Matches mlx-video. |
-| Audio module pretranspose | **partial default** (trimmed 2026-05-17) | none | -11 % AV (256×256×25) historical, neutral at bakery T=502 | The audio cache build inherits from `DEFAULT_VIDEO_FF_LAYOUT_SPECS` and `DEFAULT_VIDEO_ATTN_LAYOUT_SPECS`.  When those were trimmed (project_out:pretranspose only for FF, attn fully off), audio inherited the trimming.  `bf16_layout_audio` microbench at T=502 (bakery scale) confirmed all audio projections are tied with naive within ±1 % so the trimming is safe at bakery scale.  Historical −11 % at small T (256×256×25) is NOT re-verified — small-T workloads may regress.  Opt out the broader mechanism: `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`.  See `PERFORMANCE_NOTES.md`. |
+| `--internal-audio auto` | default | none | -35 % wall on video-only (256x256x25) | Resolves to `on` iff `--generate-audio`.  Legacy `LTX_DISABLE_INTERNAL_AUDIO=1` is honored but the new flag is preferred.  Matches mlx-video. |
+| Audio module pretranspose | **partial default** (trimmed 2026-05-17) | none | -11 % AV (256x256x25) historical, neutral at bakery T=502 | The audio cache build inherits from `DEFAULT_VIDEO_FF_LAYOUT_SPECS` and `DEFAULT_VIDEO_ATTN_LAYOUT_SPECS`.  When those were trimmed (project_out:pretranspose only for FF, attn fully off), audio inherited the trimming.  `bf16_layout_audio` microbench at T=502 (bakery scale) confirmed all audio projections are tied with naive within ±1 % so the trimming is safe at bakery scale.  Historical -11 % at small T (256x256x25) is NOT re-verified — small-T workloads may regress.  Opt out the broader mechanism: `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`.  See `PERFORMANCE_NOTES.md`. |
 | QKV pretranspose | **opt-in (was default pre-2026-05-17)** | medium | -4 % additional AV at small T (256x256x25) | `to_q/to_k/to_v` were in the default attention layout, but `scripts/bench_ff_microbench.py bf16_layout` clean run showed they're tied with naive BF16 at the LTX-2.3 4096x4096 attention shape (within ±1 %).  The -4 % win was likely small-T-specific.  Re-enable via `--video-attn-layout to_q:pretranspose,to_k:pretranspose,to_v:pretranspose,to_out:pretranspose`. |
 | `--video-ff-layout project_out:pretranspose` | default | none | -28 % bakery vs no-layout (77 → 55 s/it) | Same-math.  ONLY `project_out` is enabled by default: per `scripts/bench_ff_microbench.py bf16_layout`, project_out alone is a 35 % isolated-matmul win (rescues a kernel-selection cliff at K=16384,N=4096 where naive falls to 5.17 TFlops/s vs 7.95 with pretranspose).  `project_in` was the historical default but is +2.5 % in isolation and neutral end-to-end; opt back in via `--video-ff-layout project_in:pretranspose,project_out:pretranspose`.  Implementation drops the original weight after transposing (memory-neutral steady state).  See `PERFORMANCE_NOTES.md` "Pretranspose default cleanup" entry. |
 | `--video-attn-layout` (default OFF, `()` empty) | default | none | none | Pre-2026-05-17 default was `to_out,to_q,to_k,to_v:pretranspose`.  Microbench (`bench_ff_microbench.py bf16_layout`) shows all four attention projections at the 4096x4096 shape are tied with naive BF16 (within ±1 %, all at ~7.9 TFlops/s).  Default flipped to OFF.  Opt back in via `--video-attn-layout to_out:pretranspose,to_q:pretranspose,to_k:pretranspose,to_v:pretranspose`.  End-to-end A/B with the old default still to be measured. |
-| AdaLN/RoPE dtype cast-back | default | none | **-16.8 % bakery total** | The `scale_shift_table` tensors are FP32 (sincos precision).  Inline math `normed * (1 + scale) + shift` and `x + residual * gate` was promoting BF16 → FP32, forcing SDPA to compile `steel_attention_float32_*_maskfloat32_*` kernels (~2× the data movement of BF16).  Fixed at 5 sites in `transformer.py` + `rope.py`.  Bakery 29m 38s → 24m 40s.  See [2026-05-17 AdaLN/RoPE fix](#2026-05-17-adalnrope-dtype-promotion-fix). |
-| Skip negative prompt encoding (distilled, cfg=1.0) | default | none | -10 % AV (256×256×25) + ~7 s/run on prompt encode | Distilled pipelines never use the negative encoding (cfg=1.0 makes it a no-op).  Both two-stage and one-stage now skip it.  Re-enable: `LTX_ENCODE_UNUSED_NEGATIVE=1`. |
-| AVPipeline CFG short-circuit | default | none | ~2× denoise vs CFG-on | When `cfg_scale==1.0 and audio_cfg_scale==1.0 and rescale_scale==0.0` for euler+no-STG runs, `AVPipeline.__call__` routes to `_denoise_loop_simple_av` — one transformer pass per step instead of two.  Log line "CFG disabled (scale 1.0) - Running optimized single-pass inference" confirms the short-circuit fired. |
-| Tokenize without max-length padding | default | none | -5 % AV (256×256×25) | Tokenizer was padding 2 real tokens to 1024 before Gemma forward.  Re-enable: `LTX_PAD_PROMPT_TO_MAX=1`. |
+| AdaLN/RoPE dtype cast-back | default | none | **-16.8 % bakery total** | The `scale_shift_table` tensors are FP32 (sincos precision).  Inline math `normed * (1 + scale) + shift` and `x + residual * gate` was promoting BF16 → FP32, forcing SDPA to compile `steel_attention_float32_*_maskfloat32_*` kernels (~2x the data movement of BF16).  Fixed at 5 sites in `transformer.py` + `rope.py`.  Bakery 29m 38s → 24m 40s.  See [2026-05-17 AdaLN/RoPE fix](#2026-05-17-adalnrope-dtype-promotion-fix). |
+| Skip negative prompt encoding (distilled, cfg=1.0) | default | none | -10 % AV (256x256x25) + ~7 s/run on prompt encode | Distilled pipelines never use the negative encoding (cfg=1.0 makes it a no-op).  Both two-stage and one-stage now skip it.  Re-enable: `LTX_ENCODE_UNUSED_NEGATIVE=1`. |
+| AVPipeline CFG short-circuit | default | none | ~2x denoise vs CFG-on | When `cfg_scale==1.0 and audio_cfg_scale==1.0 and rescale_scale==0.0` for euler+no-STG runs, `AVPipeline.__call__` routes to `_denoise_loop_simple_av` — one transformer pass per step instead of two.  Log line "CFG disabled (scale 1.0) - Running optimized single-pass inference" confirms the short-circuit fired. |
+| Tokenize without max-length padding | default | none | -5 % AV (256x256x25) | Tokenizer was padding 2 real tokens to 1024 before Gemma forward.  Re-enable: `LTX_PAD_PROMPT_TO_MAX=1`. |
 | `--mlx-cache-limit-gb 1` | default | low | neutral | Same-math allocator-cache cap.  Bakery AV process RAM 44 GB → 40 GB with no time penalty.  `0` returns freed buffers immediately. |
 | Defer AV text encoder load until after Gemma | default | low | neutral; -6 GB prompt-encode peak | Trim Gemma hidden states, materialize, free Gemma, then load AV connector. |
-| `--vae-decoder native` | only option | medium | none for denoise | The historical `legacy` (`SimpleVideoDecoder`, PyTorch-layout slice-conv) backend was removed 2026-05-23 after the native Conv3d decoder had been the production default for an extended bake-in period; the old source remains available in git history.  The matching `SimpleVideoEncoder` was removed at the same time and replaced by `NativeConv3dVideoEncoder` (parity cos sim 0.99965 FP32; ~2-3× per-call speedup). |
+| `--vae-decoder native` | only option | medium | none for denoise | The historical `legacy` (`SimpleVideoDecoder`, PyTorch-layout slice-conv) backend was removed 2026-05-23 after the native Conv3d decoder had been the production default for an extended bake-in period; the old source remains available in git history.  The matching `SimpleVideoEncoder` was removed at the same time and replaced by `NativeConv3dVideoEncoder` (parity cos sim 0.99965 FP32; ~2-3x per-call speedup). |
 | Terminal redraw throttling | default | none | -5.9 % bakery total on macOS | `DenoiseProgress` no longer spawns a heartbeat thread; `tqdm` uses `ascii=True + mininterval=1-2s`.  Bakery 31m 28s → 29m 38s.  Stage 2 alone -8 %.  See [Terminal redraw throttling](#terminal-redraw-throttling) for the full story. |
 | **--- compute-precision opt-ins ---** | | | | |
-| `--video-ff-dtype float16` | opt-in | none | **-4.6 % bakery 384x640x20s (8m 00s → 7m 38s)** | Cache-baked: cast project_in and project_out weights to FP16 at cache-build time, run the FF interior in FP16 (silu+geglu+matmuls), cast the residual back to BF16 at FF exit.  Attention/RMSNorm/RoPE/SDPA stay BF16.  ~15 % per-matmul FP16 win at production FF shapes (BF16/FP16 ratio 1.17–1.18×) translates to 4.6 % wall savings because FF is ~22 % of total compute and the FF-block win includes boundary casts.  Cosine sim ~0.71 vs BF16 — perceptually close, not bit-equivalent.  **Auto-pairs** with `project_in:pretranspose,project_out:pretranspose` (enforced in `scripts/generate.py:_ensure_ff_layout_for_dtype`).  FP16 *requires* pretranspose: at project_out (K=16384) the FP16 naive kernel falls off a deeper kernel-selection cliff than BF16 (4.95 vs 5.86 TFlops/s, then both recover to >8 TFlops/s with pretranspose).  Disabling pretranspose with FP16 on would be -18 % regression vs BF16 baseline.  Tried `--video-attn-dtype float16` too: net regression (+0.6 % wall) because the SDPA boundary's projection casts outweigh the matmul win; flag dropped.  See "FF FP16 + FP16 cliff" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
-| `--audio-ff-dtype float16` | opt-in (curiosity) | none | **none measurable** (real-world A/B: +4.6 s within noise on bakery) | Mirror of `--video-ff-dtype` for the audio branch.  Per-matmul FP16 win at audio shapes is real (~10–13 % on audio.FF.project_in K=2048 N=8192 and audio.FF.project_out K=8192 N=2048) but per-call wall is ~2 ms vs video's 200+ ms.  Microbench predicted ~0.32 s savings (0.07 %); bakery A/B (video+audio-FF-FP16 7m 42.2s vs video-only-FF-FP16 7m 37.6s = +4.6s) is fully within single-run noise — output save phase alone varied by +2.6 s between the two runs.  Audio latent cos sim ≥0.997 vs the video-only-FP16 reference; perceptually unchanged by listening test on bakery dialogue.  **No kernel cliff at audio K=8192** — unlike video K=16384, FP16 naive is actually FASTER than BF16 naive there.  Auto-pairs audio FF pretranspose (avoids FP16 × BF16 → FP32 mixed-dtype promotion, not because of a cliff).  Kept as a documented opt-in for future hardware / workload shifts that might change the math.  See "Audio FF FP16" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
+| `--video-ff-dtype float16` | opt-in | none | **-4.6 % bakery 384x640x20s (8m 00s → 7m 38s)** | Cache-baked: cast project_in and project_out weights to FP16 at cache-build time, run the FF interior in FP16 (silu+geglu+matmuls), cast the residual back to BF16 at FF exit.  Attention/RMSNorm/RoPE/SDPA stay BF16.  ~15 % per-matmul FP16 win at production FF shapes (BF16/FP16 ratio 1.17–1.18x) translates to 4.6 % wall savings because FF is ~22 % of total compute and the FF-block win includes boundary casts.  Cosine sim ~0.71 vs BF16 — perceptually close, not bit-equivalent.  **Auto-pairs** with `project_in:pretranspose,project_out:pretranspose` (enforced in `scripts/generate.py:_ensure_ff_layout_for_dtype`).  FP16 *requires* pretranspose: at project_out (K=16384) the FP16 naive kernel falls off a deeper kernel-selection cliff than BF16 (4.95 vs 5.86 TFlops/s, then both recover to >8 TFlops/s with pretranspose).  Disabling pretranspose with FP16 on would be -18 % regression vs BF16 baseline.  Tried `--video-attn-dtype float16` too: net regression (+0.6 % wall) because the SDPA boundary's projection casts outweigh the matmul win; flag dropped.  See "FF FP16 + FP16 cliff" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
+| `--audio-ff-dtype float16` | opt-in (curiosity) | none | **none measurable** (real-world A/B: +4.6 s within noise on bakery) | Mirror of `--video-ff-dtype` for the audio branch.  Per-matmul FP16 win at audio shapes is real (~10–13 % on audio.FF.project_in K=2048 N=8192 and audio.FF.project_out K=8192 N=2048) but per-call wall is ~2 ms vs video's 200+ ms.  Microbench predicted ~0.32 s savings (0.07 %); bakery A/B (video+audio-FF-FP16 7m 42.2s vs video-only-FF-FP16 7m 37.6s = +4.6s) is fully within single-run noise — output save phase alone varied by +2.6 s between the two runs.  Audio latent cos sim ≥0.997 vs the video-only-FP16 reference; perceptually unchanged by listening test on bakery dialogue.  **No kernel cliff at audio K=8192** — unlike video K=16384, FP16 naive is actually FASTER than BF16 naive there.  Auto-pairs audio FF pretranspose (avoids FP16 x BF16 → FP32 mixed-dtype promotion, not because of a cliff).  Kept as a documented opt-in for future hardware / workload shifts that might change the math.  See "Audio FF FP16" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
 | **--- env-toggle opt-ins ---** | | | | |
 | `LTX_VELOCITY_MODE=1` | opt-in | low | neutral | Inline velocity-form Euler update in `_denoise_loop_simple_av`.  Same math.  Kept env-gated for future MLX versions. |
 | `LTX_ROPE_PRECOMPUTE=1` | opt-in | none | neutral | mlx-video pattern: per-stage RoPE precompute via `Modality.positional_embeddings`.  MLX's lazy graph already dedupes per-step RoPE calls. |
 | `LTX_ADALN_PRETRANSPOSE=1` | opt-in | low | slight regression at small T | Cache-integrated pretranspose for the 8 `AdaLayerNormSingle.linear` projections.  Too few per step to amortize per-tensor dispatch overhead. |
-| `to_gate_logits` pretranspose | opt-in | low | slight regression | Weight (4096×32 / 2048×32) too small for the implicit transpose to matter.  Enable: `--video-attn-layout to_out:pretranspose,...,to_gate_logits:pretranspose`. |
+| `to_gate_logits` pretranspose | opt-in | low | slight regression | Weight (4096x32 / 2048x32) too small for the implicit transpose to matter.  Enable: `--video-attn-layout to_out:pretranspose,...,to_gate_logits:pretranspose`. |
 | `LTX_COMPILE_BLOCK_GROUPS=N` | opt-in | medium | neutral at tested scales | Eager-path `mx.compile` over N-block groups.  `N=4` at small T neutral; `N=48` at bakery neutral (18m 29s vs 18m 41s).  Compile-trace cost paid up front. |
 | `LTX_MONO_INLINED=1` (stage2_harness only) | opt-in | none | neutral | Inlined 48-block forward + AdaLN preprocess + output projection.  Latent diff vs modular: cosine sim 0.999+.  Same math.  Confirms `nn.Module` dispatch is free at the MLX-graph level.  See [Monolithic-inlined transformer](#monolithic-inlined-transformer-experiment-negative-result). |
 | **--- quantization opt-ins ---** | | | | |
-| `--video-ff-quantize project_out:mxfp8` (+ `--video-ff-quantize-layers RANGE`) | **regression post-AdaLN-fix** | medium | **+10-45% SLOWER than baseline** | Pre-AdaLN-fix the 352×192 smoke saw -10% (vs broken 77.8 s/it BF16 baseline).  Post-fix at the bakery shape: variant B (project_out only, no layout) is +10.2% slower.  Per-matmul microbench (`scripts/bench_ff_microbench.py quant_matmul`) shows `mx.quantized_matmul` is consistently ~66% slower than `steel_gemm` at our shapes (4.7 vs 7.95 TFlops/s).  Quant pays bandwidth-savings cost but we're compute-bound on weights at our matmul shapes.  Flag still works for future MLX/hardware where quant kernel improves; see `PERFORMANCE_NOTES.md` Archive "mxfp8 draft mode is DEAD". |
+| `--video-ff-quantize project_out:mxfp8` (+ `--video-ff-quantize-layers RANGE`) | **regression post-AdaLN-fix** | medium | **+10-45% SLOWER than baseline** | Pre-AdaLN-fix the 352x192 smoke saw -10% (vs broken 77.8 s/it BF16 baseline).  Post-fix at the bakery shape: variant B (project_out only, no layout) is +10.2% slower.  Per-matmul microbench (`scripts/bench_ff_microbench.py quant_matmul`) shows `mx.quantized_matmul` is consistently ~66% slower than `steel_gemm` at our shapes (4.7 vs 7.95 TFlops/s).  Quant pays bandwidth-savings cost but we're compute-bound on weights at our matmul shapes.  Flag still works for future MLX/hardware where quant kernel improves; see `PERFORMANCE_NOTES.md` Archive "mxfp8 draft mode is DEAD". |
 | `--transformer-cache-quantize mxfp8-blocks` | **regression post-AdaLN-fix** | medium-high | **+43% SLOWER than baseline** | Pre-AdaLN-fix at stage 2 was 460 s/it vs 425 s/it for streaming-pretranspose (better than alternatives at the time).  Post-fix at stage 1: 65.0 s/it vs 45.5 s/it baseline (+42.9%).  Auto-disables same-math layouts.  Broader scope than `--video-ff-quantize` (attention + both FF) so the +66% per-matmul quant penalty compounds across more of the step.  Non-parity.  See `PERFORMANCE_NOTES.md` Archive. |
 | `--transformer-cache-quantize mxfp8-blocks-pretranspose` | **regression post-AdaLN-fix** | medium-high | **+45% SLOWER than baseline** | Pre-AdaLN-fix matched `mxfp8-blocks` speed.  Post-fix at stage 1: 66.0 s/it vs 45.5 baseline (+45.0%).  Packing `weight.T` before quantizing does NOT recover the layout win on top of quantized matmul.  See `PERFORMANCE_NOTES.md` Archive. |
 | **--- memory-constrained ---** | | | | |
 | `--stream-transformer` | opt-in | low-medium | constrained-memory preset | Expands to `--transformer-block-resident-blocks 16 --transformer-block-compile --transformer-block-compile-group-size 4`.  Preferred user-facing switch.  See [Block streaming](#block-streaming-constrained-memory-mode). |
 | `--transformer-block-resident-blocks` | opt-in | low | slower | Cache-backed streaming.  `r4` ~8 GB process RAM but ~70.5 s/it on bakery.  Constrained-memory mode, not fast path. |
 | `--transformer-block-compile` | opt-in | low-medium | mixed | Resident-group compile r8 completed at ~61.2 s/it after one prior Metal watchdog abort.  Cache/watchdog-sensitive. |
-| `--transformer-block-compile-group-size` | opt-in | low-medium | stabilizes larger shapes | Splits compiled/eval command-buffer groups.  1024×576 with r16/group-4 completes without watchdog abort (~425 s/it). |
+| `--transformer-block-compile-group-size` | opt-in | low-medium | stabilizes larger shapes | Splits compiled/eval command-buffer groups.  1024x576 with r16/group-4 completes without watchdog abort (~425 s/it). |
 | `MLX_MAX_OPS_PER_BUFFER=1 MLX_MAX_MB_PER_BUFFER=10` | opt-in | low | unknown | Must be set before Python starts.  Real MLX command-buffer split knobs for watchdog-pressure A/B.  Cannot split inside a single huge op. |
 | **--- diagnostic / profiling ---** | | | | |
 | `--profile-transformer-steps N[,M,...]` | diagnostic | low | perturbs measurement | Forces eval checkpoints on selected denoise steps. |
@@ -223,10 +223,10 @@ from the default stack when running A/Bs.
 | `LTX_PROFILE_SIGNPOST_LOG=/path` | diagnostic | none | none | Writes `<monotonic_ns> <begin\|end> <phase>` per line.  Ground-truth source for attribution when the trace's `os-signpost` table drops events under buffer pressure. |
 | `LTX_DISABLE_COMPILED_ATTN=1`, `LTX_DISABLE_COMPILED_HELPERS=1` | diagnostic | none | regression | Strips the default `mx.compile` wrappers — needed for `scripts/sdpa_dtype_probe.py` to break the compiled regions with `mx.eval` barriers.  Production: -1.5 s neutral, -0.6 s neutral.  Apples-to-apples trace: leaving them ON saves ~3 s in 2-step window. |
 | **--- tested neutral or removed ---** | | | | |
-| `MLX_METAL_FAST_SYNCH=1` | tested | low | none | Slightly slower on 352×192 15s AV smoke. |
-| Remove `--low-memory` | tested | medium | none in small run | 352×192 15s AV smoke slightly slower. |
-| `--fast-mode` (AV `fast_mode`) | opt-in user flag | high | none in small run; material at bakery | Wired through the AV transformer path; sets the transformer's intermediate eval cadence to 0.  User passes the flag explicitly — not auto-enabled.  Tied low-memory baseline at 352×192; real win shows up at bakery scale (post-AdaLN-fix bakery numbers in the TL;DR were captured with `--fast-mode`).  Higher peak unified-memory pressure is the cost. |
-| Per-run RoPE precompute | tested | low | none | Removed after slightly slower 352×192 smoke. |
+| `MLX_METAL_FAST_SYNCH=1` | tested | low | none | Slightly slower on 352x192 15s AV smoke. |
+| Remove `--low-memory` | tested | medium | none in small run | 352x192 15s AV smoke slightly slower. |
+| `--fast-mode` (AV `fast_mode`) | opt-in user flag | high | none in small run; material at bakery | Wired through the AV transformer path; sets the transformer's intermediate eval cadence to 0.  User passes the flag explicitly — not auto-enabled.  Tied low-memory baseline at 352x192; real win shows up at bakery scale (post-AdaLN-fix bakery numbers in the TL;DR were captured with `--fast-mode`).  Higher peak unified-memory pressure is the cost. |
+| Per-run RoPE precompute | tested | low | none | Removed after slightly slower 352x192 smoke. |
 | No-op cast/allocation cleanup | tested | low | low | Good hygiene after larger wins. |
 | Fast GELU approximation | not pursued | low | unlikely | FFN sub-profile showed GELU at 0.7 % of clean block. |
 | Historical full-transformer compile experiments | removed | medium-high | none | Bakery AV smokes tied baseline while adding complexity. |
@@ -240,7 +240,7 @@ from the default stack when running A/Bs.
 | `mx.fast.rope` / custom split-RoPE kernel | candidate | low-medium | unknown | Only after proving exact RoPE parity. |
 | Distributed tensor parallelism | separate project | high | unknown | Multi-machine, out of scope. |
 | FP8 conversion primitives | research | high | unknown | `mx.to_fp8` / `mx.from_fp8` are storage/compute research items. |
-| `MLX_SDPA_BLOCKS` (MLX PR #3455) | inapplicable | none | none | Controls `sdpa_vector_2pass` (T ≤ 8) only.  LTX uses `sdpa_full` (T = 35,136 at 1024×576). |
+| `MLX_SDPA_BLOCKS` (MLX PR #3455) | inapplicable | none | none | Controls `sdpa_vector_2pass` (T ≤ 8) only.  LTX uses `sdpa_full` (T = 35,136 at 1024x576). |
 
 ---
 
@@ -281,9 +281,9 @@ Microbench at production shapes (M=14640, K=4096, N=16384 / 16384→4096):
 | FF.project_out  (K=16384 N=4096) | 8.10 TFlops/s | 9.51 TFlops/s | +14.9 %    |
 | attn.QKV/O      (K=N=4096)       | 8.09 TFlops/s | 9.53 TFlops/s | +15.0 %    |
 
-Wall savings ≈ (per-matmul FP16 win) × (FF compute share).  FF is ~22 % of
-stage-2 compute (attention is ~3.6× more compute per layer at T=14640), so
-~15 % × 22 % ≈ 3.3 % expected; observed denoise savings ~12 s out of
+Wall savings ≈ (per-matmul FP16 win) x (FF compute share).  FF is ~22 % of
+stage-2 compute (attention is ~3.6x more compute per layer at T=14640), so
+~15 % x 22 % ≈ 3.3 % expected; observed denoise savings ~12 s out of
 ~6m 27s = 3.1 %.  Microbench prediction lines up to within 1 s.  The
 remaining ~10 s of the headline 22 s "total wall" delta is noise in
 pre/post phases (audio decode, save, encode) that aren't dtype-sensitive.
@@ -325,20 +325,20 @@ disproved the gap and reframed the brutal-efficiency hunt.
 
 Extended `scripts/sdpa_dtype_probe.py` with `LTX_PROBE_TIME_SDPA=1` to wrap
 every `mx.fast.scaled_dot_product_attention` call in `mx.eval` barriers
-+ timer.  Ran both projects at distilled stage 1, 1024×576 → 288×512
++ timer.  Ran both projects at distilled stage 1, 1024x576 → 288x512
 latent, 2 steps, identical seed/prompt.  Required
 `LTX_DISABLE_COMPILED_ATTN=1 LTX_DISABLE_COMPILED_HELPERS=1` on the
 LTX side so `mx.eval` could break MLX's compiled regions.
 
 | Phase (shape)                                          | LTX total | mlxv total | Δ          |
 | ------------------------------------------------------ | --------- | ---------- | ---------- |
-| video_self_attn  q/k/v=(1,32,8784,128), mask=None      | 22,287 ms | 22,743 ms  | **−456**   |
-| video_text_ca    q=(1,32,8784,128), kv=(1,32,1024,128) | 2,696 ms  | 2,791 ms   | **−96**    |
-| v2a_cross        q=(1,32,501,64), kv=(1,32,8784,64)    | 660 ms    | 703 ms     | **−43**    |
-| a2v_cross        q=(1,32,8784,64), kv=(1,32,501,64)    | 640 ms    | 650 ms     | **−10**    |
-| audio_text_ca    q=(1,32,501,64), kv=(1,32,1024,64)    | 108 ms    | 119 ms     | **−11**    |
+| video_self_attn  q/k/v=(1,32,8784,128), mask=None      | 22,287 ms | 22,743 ms  | **-456**   |
+| video_text_ca    q=(1,32,8784,128), kv=(1,32,1024,128) | 2,696 ms  | 2,791 ms   | **-96**    |
+| v2a_cross        q=(1,32,501,64), kv=(1,32,8784,64)    | 660 ms    | 703 ms     | **-43**    |
+| a2v_cross        q=(1,32,8784,64), kv=(1,32,501,64)    | 640 ms    | 650 ms     | **-10**    |
+| audio_text_ca    q=(1,32,501,64), kv=(1,32,1024,64)    | 108 ms    | 119 ms     | **-11**    |
 | audio_self_attn  (1,32,501,64)                         | 80 ms     | 82 ms      | tied       |
-| **SDPA TOTAL**                                         | **26,470** | **27,088** | **−618 (LTX +2.3 %)** |
+| **SDPA TOTAL**                                         | **26,470** | **27,088** | **-618 (LTX +2.3 %)** |
 
 Both projects produce **identical SDPA shapes** and **identical kernel
 selection** (every call BF16, no mask, same dims).  The "180 ms vs 133 ms" gap
@@ -368,7 +368,7 @@ workload.  Results in TL;DR above; per-step trajectory:
 LTX is consistent; mlxv drifts upward after step 4.  The prior section's
 "+5.3 s residual" was the cost of:
 
-- 384 signpost emit pairs per step (8 phases × 48 blocks).
+- 384 signpost emit pairs per step (8 phases x 48 blocks).
 - Per-phase `mx.eval` barriers in sync mode (lazy graph fully broken).
 - Profile/event overhead specific to the LTX trace protocol.
 
@@ -383,7 +383,7 @@ the existing 8 parent phases.  Wired into `attention.py`
 Nest cleanly inside parent signposts; aggregate across all attention call
 sites.
 
-Validated via 2-step sync-mode capture, 1024×576 stage 1:
+Validated via 2-step sync-mode capture, 1024x576 stage 1:
 
 - All 13 phases emit with matched begin/end pairs.
 - Sums reconcile with parent phase walls within 1 %.
@@ -484,7 +484,7 @@ combined is < 10 s/step.
 
 Silent BF16 → FP32 dtype promotion through the AdaLN modulation path was
 forcing SDPA to compile and dispatch pure `steel_attention_float32_*` kernels
-— roughly 2× the data movement and compute of the BF16 equivalents.
+— roughly 2x the data movement and compute of the BF16 equivalents.
 
 **Note:** the 05-17 follow-up above showed we were never actually behind
 mlx-video in non-sync production mode.  The AdaLN fix is real and valuable
@@ -496,7 +496,7 @@ section above.
 
 The 2026-05-16 traces had two competing analyses:
 
-- Mine: "video_text_ca is 5.2× more expensive in LTX, the
+- Mine: "video_text_ca is 5.2x more expensive in LTX, the
   `_apply_text_cross_attention` helper is fragmenting dispatch."
 - Codex's correction: my "GPU time per phase" wasn't elapsed wall time
   (it summed dispatch durations across parallel GPU channels and exceeded
@@ -507,7 +507,7 @@ phase, not just one — distributed overhead, not a single hotspot.  Three
 env-toggle experiments ruled out obvious causes:
 
 - `LTX_DISABLE_COMPILED_ATTN=1`: neutral (+1.5 s)
-- `LTX_DISABLE_COMPILED_HELPERS=1`: neutral (−0.6 s)
+- `LTX_DISABLE_COMPILED_HELPERS=1`: neutral (-0.6 s)
 - `--video-attn-layout off`: regression (+3.1 s — pretranspose IS a win)
 
 Then Codex spotted the actual signal in the trace's shader **inventory**
@@ -577,20 +577,20 @@ video and audio.  No more pure FP32 paths.
 
 #### Numbers
 
-**2-step sync-mode capture (288×512 stage 1, signposts on, mx.eval
+**2-step sync-mode capture (288x512 stage 1, signposts on, mx.eval
 barriers):**
 
 | Phase            | baseline | +rope-only | +adaln (fix) | Δ baseline | mlxv r2 |
 | ---------------- | -------- | ---------- | ------------ | ---------- | ------- |
-| video_self_attn  | 46.01 s  | 46.12 s    | **40.80 s**  | **−5.21**  | 39.04 s |
-| video_ff         | 38.19 s  | 38.71 s    | **33.98 s**  | **−4.21**  | 35.58 s |
-| video_text_ca    | 14.46 s  | 14.79 s    | **12.98 s**  | **−1.48**  | 11.40 s |
-| audio_self_attn  |  1.40 s  |  1.52 s    |   1.24 s     |  −0.16     |  0.65 s |
+| video_self_attn  | 46.01 s  | 46.12 s    | **40.80 s**  | **-5.21**  | 39.04 s |
+| video_ff         | 38.19 s  | 38.71 s    | **33.98 s**  | **-4.21**  | 35.58 s |
+| video_text_ca    | 14.46 s  | 14.79 s    | **12.98 s**  | **-1.48**  | 11.40 s |
+| audio_self_attn  |  1.40 s  |  1.52 s    |   1.24 s     |  -0.16     |  0.65 s |
 | audio_text_ca    |  1.04 s  |  1.18 s    |   1.19 s     |  +0.14     |  0.67 s |
-| a2v_cross        |  5.82 s  |  5.88 s    |   5.76 s     |  −0.06     |  5.07 s |
+| a2v_cross        |  5.82 s  |  5.88 s    |   5.76 s     |  -0.06     |  5.07 s |
 | v2a_cross        |  5.24 s  |  5.33 s    |   5.39 s     |  +0.15     |  4.87 s |
-| audio_ff         |  2.52 s  |  2.86 s    |   2.23 s     |  −0.28     |  0.97 s |
-| **TOTAL**        | **114.69** | 116.37   | **103.58 s** | **−11.11** | 98.26 s |
+| audio_ff         |  2.52 s  |  2.86 s    |   2.23 s     |  -0.28     |  0.97 s |
+| **TOTAL**        | **114.69** | 116.37   | **103.58 s** | **-11.11** | 98.26 s |
 
 (The remaining +5.3 s vs mlxv in this sync-mode capture is signpost-emit
 overhead — see [follow-up section above](#2026-05-17-follow-up-probe--non-sync-ab--sub-phase-signposts-gap-closed).)
@@ -598,14 +598,14 @@ overhead — see [follow-up section above](#2026-05-17-follow-up-probe--non-sync
 Shader inventory: pure-FP32 steel kernels **20 → 0**, pure FP32 attention
 kernels **6 → 0**.
 
-**Full bakery 1024×576×481 distilled (fast mode, end-to-end, non-sync):**
+**Full bakery 1024x576x481 distilled (fast mode, end-to-end, non-sync):**
 
 |                          | baseline (per prior PERFORMANCE.md) | post-fix       | Δ      |
 | ------------------------ | ----------------------------------- | -------------- | ------ |
-| Stage 1 (8 steps, 288×512) | n/a (was ~10 s/it pre-fast-mode)  | 45.3 s/it = 6m 02s | |
-| Stage 2 (3 steps, 576×1024) | ~50 s/it baseline → ~26 m stage 2 | 313.5 s/it = 15m 40s | |
+| Stage 1 (8 steps, 288x512) | n/a (was ~10 s/it pre-fast-mode)  | 45.3 s/it = 6m 02s | |
+| Stage 2 (3 steps, 576x1024) | ~50 s/it baseline → ~26 m stage 2 | 313.5 s/it = 15m 40s | |
 | VAE decode (tiled)       |                                     | 2m 10s         |        |
-| **Total**                | **29m 38s**                         | **24m 40.6s**  | **−4m 58s, −16.8 %** |
+| **Total**                | **29m 38s**                         | **24m 40.6s**  | **-4m 58s, -16.8 %** |
 
 The win scales *better* at full bakery than the sync-mode-stage-1
 measurement predicted (9.7 % → 16.8 %) because stage-2 token counts
@@ -625,21 +625,21 @@ If a stricter quality check is needed: `--save-latents` writes the stage-1
 and stage-2 latents; compare cosine sim against a known-good pre-fix `.npz`.
 Expect ~0.999 with BF16-rounding-noise scale of 1e-3 in p99 abs diff.
 
-#### Scaling validation: 30-second 1024×576 (721 frames)
+#### Scaling validation: 30-second 1024x576 (721 frames)
 
 Same fix applied, different prompt + seed, longer duration to confirm the
 win holds at higher token counts:
 
 | Stage                          | Bakery (481 frames) | Kitten (721 frames) | Ratio        |
 | ------------------------------ | ------------------- | ------------------- | ------------ |
-| Frames                         | 481                 | 721                 | 1.50×        |
-| Latent shape                   | 61×18×32            | 91×18×32            | 1.49× tokens |
-| Stage 1 s/it (288×512)         | 45.3 s              | 75.9 s              | 1.68×        |
-| Stage 2 s/it (576×1024)        | 313.5 s             | 602.1 s             | 1.92×        |
-| Total wall                     | 24m 40s             | 44m 41s             | 1.81×        |
-| Per-token-step cost (stage 2)  | ~8.9 ms             | ~11.5 ms            | 1.29×        |
+| Frames                         | 481                 | 721                 | 1.50x        |
+| Latent shape                   | 61x18x32            | 91x18x32            | 1.49x tokens |
+| Stage 1 s/it (288x512)         | 45.3 s              | 75.9 s              | 1.68x        |
+| Stage 2 s/it (576x1024)        | 313.5 s             | 602.1 s             | 1.92x        |
+| Total wall                     | 24m 40s             | 44m 41s             | 1.81x        |
+| Per-token-step cost (stage 2)  | ~8.9 ms             | ~11.5 ms            | 1.29x        |
 
-Stage 2 scales 1.92× for 1.49× tokens — expected attention quadratic
+Stage 2 scales 1.92x for 1.49x tokens — expected attention quadratic
 dilution.  Memory: **43 GB peak process RAM** during stage 2 (Activity
 Monitor).  No memory pressure on a 64 GB M1 Max with nothing else running.
 
@@ -670,7 +670,7 @@ Two env-gated helpers added to `AVPipeline.generate_distilled_two_stage`:
 Both zero-cost when unset.  Identical-name hooks were added to `mlx-video`
 so the same shell incantation produces directly comparable captures.
 
-#### 3-way apples-to-apples results (bakery 1024×576×481, distilled AV)
+#### 3-way apples-to-apples results (bakery 1024x576x481, distilled AV)
 
 | Metric                          | mlx-video | LTX w/ compile | LTX no-compile |
 | ------------------------------- | --------- | -------------- | -------------- |
@@ -693,7 +693,7 @@ LTX_DISABLE_COMPILED_HELPERS=1 LTX_DISABLE_FUSED_ROPE=1`.
 
 **`mx.compile` is not a no-op.**  Earlier bench tables marked compile-vs-no
 neutral.  Apples-to-apples 2-step window: compile shaves **3.3 s (–3.1 %)**
-off wall, cuts p99 tail **3×** (187 ms → 62 ms), drops largest dispatch gap
+off wall, cuts p99 tail **3x** (187 ms → 62 ms), drops largest dispatch gap
 from 2.28 s to 0.10 s.  Default to compile on.
 
 **"mlx-video has more fused kernels" is backwards.**  In steady state
@@ -748,7 +748,7 @@ reverted.
 **Real fix: capture via the `xctrace record` CLI** (see [Trace capture
 recipes](#trace-capture-recipes)).  Captures every signpost reliably.
 
-#### Per-phase attribution results (stage 1, 288×512, 2-step sync capture)
+#### Per-phase attribution results (stage 1, 288x512, 2-step sync capture)
 
 Pre-AdaLN-fix data.  See 05-17 follow-up for post-fix numbers.
 
@@ -781,7 +781,7 @@ as a speed lever.
 ### 2026-05-15: Audio pretranspose, skip-negative, bakery parity
 
 Investigation kicked off from a measured per-step gap to mlx-video at small T
-(distilled `--generate-audio` at 256×256×25).  Starting baseline 46.85 s
+(distilled `--generate-audio` at 256x256x25).  Starting baseline 46.85 s
 end-to-end (8+3 step distilled two-stage); bakery 28-30 min total, stage 2
 alone 18m 41s (~373 s/it).
 
@@ -793,7 +793,7 @@ alone 18m 41s (~373 s/it).
 `--generate-audio` was set.  Without `--generate-audio` the AV transformer
 was still running the full audio branch every denoise step and discarding
 the result.  Fix: new `--internal-audio auto|on|off` flag; `auto` (default)
-resolves to `on` only when `--generate-audio` is set.  Impact on 256×256×25:
+resolves to `on` only when `--generate-audio` is set.  Impact on 256x256x25:
 **47.50s → 30.91s (-34.9 %)**.
 
 **Audio module pretranspose (cache-integrated)** — the existing same-math
@@ -801,7 +801,7 @@ layout pipeline only walked video-Q attention modules and `block.ff`.
 Audio-side modules (`audio_attn1`, `audio_attn2`, `video_to_audio_attn`,
 `audio_ff`) were running `mx.addmm(bias, x, weight.T)` with implicit
 transpose on every per-step call.  Wired into the cache; hash bumps.  Opt
-out: `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`.  Impact 256×256×25:
+out: `LTX_DISABLE_AUDIO_PRETRANSPOSE=1`.  Impact 256x256x25:
 **46.85s → 41.61s (-11.2 %)**.
 
 **QKV pretranspose** — extended the attention layout machinery to
@@ -825,7 +825,7 @@ encoding 8.25s → 6.24s, total 36.21s → 34.30s (-5 %).  Re-enable:
 
 Cumulative on the small-T AV bench: **46.85s → 34.30s (-26.8 %)**.
 
-#### Bakery (1024×576×481)
+#### Bakery (1024x576x481)
 
 Re-run with cumulative defaults: **28m 24s total**.  Reference mlx-video
 bakery: 28m 20s.  At parity at bakery scale.
@@ -843,7 +843,7 @@ Implemented in `scripts/mono_pipeline.py` (`InlinedAVModel` +
 `transformer_step`).  `stage2_harness.py` swaps the pipeline's transformer
 when `LTX_MONO_INLINED=1` is set.
 
-Result on bakery 704×384 (3-step stage-2):
+Result on bakery 704x384 (3-step stage-2):
 
 - **Math is equivalent.**  Source modular `stage_2_video_latent` vs
   inlined `final_video_latent`: cosine similarity 0.99922 video, 0.99977
@@ -1147,10 +1147,10 @@ No env var or runtime flag changes tile sizes for `sdpa_full` in MLX
 0.31.2.  MLX PR #3455 adds `MLX_SDPA_BLOCKS` but it only controls
 `sdpa_vector_2pass` (T ≤ 8) — irrelevant to LTX.
 
-At 1024×576×481, video token count is `18 × 32 × 61 = 35,136` before
-audio tokens.  At 512×288 the same model runs at ~55s/it.  At 1024×576 the
-4× token count produces ~425s/it stage-2 — attention scaling dominates and
-there is no software knob to recover the 4× token overhead.
+At 1024x576x481, video token count is `18 x 32 x 61 = 35,136` before
+audio tokens.  At 512x288 the same model runs at ~55s/it.  At 1024x576 the
+4x token count produces ~425s/it stage-2 — attention scaling dominates and
+there is no software knob to recover the 4x token overhead.
 
 **Implications:**
 
@@ -1170,12 +1170,12 @@ there is no software knob to recover the 4× token overhead.
   tiles without rebuilding MLX.  The current local wrapper does exactly
   that with lean MLX-derived Metal resources loaded by the Python launcher.
 - Python-level chunked or tiled SDPA does not change the Metal tile width;
-  prior experiments showed no runtime win at 1024×576.
+  prior experiments showed no runtime win at 1024x576.
 
 **Negative result: SDPA chunking from MLX issue #3302 / PR #3307.**  The
 closed PR adds `MLX_SDPA_CHUNK_THRESHOLD` / `MLX_SDPA_CHUNK_SIZE` with a
 default `65536` key threshold — which would not trigger for the
-1024×576 LTX latent grid (35,136 tokens) anyway.  Local SDPA-query and
+1024x576 LTX latent grid (35,136 tokens) anyway.  Local SDPA-query and
 FF-token chunking experiments matched baseline math on tiny tests but
 showed no useful runtime win at our scale; they added hot-path branches
 without earning their keep and were removed.  Don't reintroduce chunking
@@ -1258,15 +1258,15 @@ removed 2026-05-23; see git history for the legacy source.
 
 ### Native Conv3d output-size limit on MLX 0.31.2
 
-Direct 1024×576 full-volume native Conv3d decode hits a tail failure: the
-final spatial upsample's `07_upsample_conv` output is `481×72×128×512`;
+Direct 1024x576 full-volume native Conv3d decode hits a tail failure: the
+final spatial upsample's `07_upsample_conv` output is `481x72x128x512`;
 one frame is `4,718,592` elements, and `2^31 / 4,718,592 = 455.11`.  The
 last fully good frame is `454`; frame `455` is a transition; frame `456+`
 collapses (white tail).  MLX PR `ml-explore/mlx#3524` appears to fix this
 implicit Conv3d pointer-offset overflow; once a local MLX release includes
-that PR, retest 1024×576 native Conv3d with `--vae-tiling off`.
+that PR, retest 1024x576 native Conv3d with `--vae-tiling off`.
 
-Temporal-only multi-tile native Conv3d decode avoids the tail at 1024×576:
+Temporal-only multi-tile native Conv3d decode avoids the tail at 1024x576:
 
 | Tile / overlap | Time   | Peak    | Tail  |
 | -------------- | ------ | ------- | ----- |
@@ -1279,7 +1279,7 @@ Temporal-only multi-tile native Conv3d decode avoids the tail at 1024×576:
 The default `--vae-tiling auto` for native Conv3d uses a small RAM-derived
 planner that prefers the fastest temporal-only tile under both the MLX
 `2^31` Conv3d output boundary and an estimated decode budget.  On a 64 GB
-machine, direct 1024×576×481 auto-selects `128/8`.
+machine, direct 1024x576x481 auto-selects `128/8`.
 
 Custom controls for middle-ground tests:
 
@@ -1304,7 +1304,7 @@ why a particular path was abandoned, recipe details).
 
 - **`--video-ff-layout`** — `nn.Linear` computes `x @ weight.T`.  Caches
   contiguous `weight.T` after loading stock BF16 weights and calls
-  `mx.addmm` against the cached layout.  Same-math.  Bakery 1024×576
+  `mx.addmm` against the cached layout.  Same-math.  Bakery 1024x576
   smoke: 77 → 55 s/it.  Original duplicate-cache implementation was
   slower and more memory hungry; current path materializes each
   transposed weight layer by layer and drops the original.  **Default
@@ -1320,7 +1320,7 @@ why a particular path was abandoned, recipe details).
   text-attention, audio-to-video attention; skips audio-only output
   projections (those are covered by audio pretranspose).  **Default as
   of 2026-05-17 is OFF (empty)** — the `bf16_layout` microbench
-  showed all four projections at the 4096×4096 attention shape are
+  showed all four projections at the 4096x4096 attention shape are
   tied with naive BF16 within ±1 % noise.  End-to-end "marginal
   positive" observation in earlier sessions was likely measurement
   noise.  Opt back in per-target via
@@ -1342,7 +1342,7 @@ the one-time weights-cache build, streaming reuses read-only safetensors
 pages and can lean on the macOS file cache.
 
 Measured bakery AV results with `project_out:pretranspose`,
-`to_out:pretranspose`, `--mlx-cache-limit-gb 1`, 512×288, 20s, 8 steps,
+`to_out:pretranspose`, `--mlx-cache-limit-gb 1`, 512x288, 20s, 8 steps,
 seed 124:
 
 | Variant                                  | Process RAM | Per-step  | Total      |
@@ -1351,9 +1351,9 @@ seed 124:
 | `r4 + --transformer-block-compile`       | ~8 GB       | 67.6 s/it | 10m 10s    |
 | `r8` (no `--low-memory`)                 | ~14 GB      | 61.2 s/it | 9m 08s     |
 | `r16` (quiet system)                     | ~16 GB      | 55 s/it   | 8m 57s     |
-| `r16 + compile + group-4` @ 1024×576     | ~?          | 424.8 s/it| 62m 22s    |
+| `r16 + compile + group-4` @ 1024x576     | ~?          | 424.8 s/it| 62m 22s    |
 
-1024×576 with r16 resident blocks and `--transformer-block-compile-group-size 4`
+1024x576 with r16 resident blocks and `--transformer-block-compile-group-size 4`
 completed without watchdog abort but remained visibly laggy.  Direct 1024
 is a premium walk-away mode.  See
 [MLX #3267](https://github.com/ml-explore/mlx/issues/3267) for the
@@ -1361,7 +1361,7 @@ active-display contention pattern.
 
 ### Quantization opt-ins
 
-**`--video-ff-quantize`** layer-range results on 352×192×15s AV smoke:
+**`--video-ff-quantize`** layer-range results on 352x192x15s AV smoke:
 
 | Quantized layers | Per-step  | Visual read                          |
 | ---------------- | --------- | ------------------------------------ |
@@ -1371,7 +1371,7 @@ active-display contention pattern.
 | 0-23             | 22.1 s/it | visibly different; all-layer level   |
 | 0-47             | 17.6 s/it | visibly different; not parity        |
 
-Bakery 512×288 all-layer comparison:
+Bakery 512x288 all-layer comparison:
 
 | Mode             | Per-step  | Visual                                       |
 | ---------------- | --------- | -------------------------------------------- |
@@ -1388,7 +1388,7 @@ Conservative candidate: `project_out:mxfp8 layers 32-47`.  Fast/draft mode:
 ### Decode-time options
 
 See [Decode-time notes](#decode-time-notes-not-denoise-speed) above.  Brief
-results on bakery 512×288×481:
+results on bakery 512x288x481:
 
 | Tiling mode             | Simple decoder | Native Conv3d |
 | ----------------------- | -------------- | ------------- |
@@ -1398,7 +1398,7 @@ results on bakery 512×288×481:
 End-to-end bakery AV smoke with warm caches, `r16` resident-group compile,
 FF pretranspose, attn pretranspose, `--vae-decoder native`,
 `--vae-tiling off`: denoise RUN 7m08s avg 53.4 s/it; total 8m07s.  Native
-Conv3d at 512×288 with no tiling is the fastest decode mode measured.
+Conv3d at 512x288 with no tiling is the fastest decode mode measured.
 
 ### Terminal redraw throttling
 
@@ -1406,7 +1406,7 @@ The old `DenoiseProgress` class ran a daemon thread that called `_render`
 every `0.12s` (~8 Hz).  Each render printed a ~120-char line with eight
 ANSI color escapes and a `\033[2K` full-line clear, then `flush=True`.
 Terminal.app and WindowServer are GPU-accelerated on macOS — they were
-contending with MLX for GPU.  Activity Monitor on bakery 1024×576
+contending with MLX for GPU.  Activity Monitor on bakery 1024x576
 distilled showed Terminal ~15 % GPU and WindowServer ~15 % during stage 2;
 both dropped to zero when the denoise loop ended and VAE decode started.
 
@@ -1422,7 +1422,7 @@ Changes:
   unicode block chars) plus `mininterval=2.0` for hot paths during MLX GPU
   work and `mininterval=1.0` for cold paths.
 
-Measured bakery 1024×576×481 distilled AV (same prompt/seed/weights/flags;
+Measured bakery 1024x576x481 distilled AV (same prompt/seed/weights/flags;
 only diff is redraw policy):
 
 | Phase                     | Before    | After     | Δ         |
@@ -1453,7 +1453,7 @@ most of the cost was Terminal.app's Metal repaint, not syscall overhead.
 - `to_gate_logits` pretranspose — slight regression (weight too small for
   implicit transpose to matter).
 - Per-run RoPE precompute (one-entry cache patch) — removed after slightly
-  slower 352×192 smoke.
+  slower 352x192 smoke.
 
 ### Experiments tried and removed
 

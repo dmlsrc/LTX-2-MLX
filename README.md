@@ -41,7 +41,7 @@ https://github.com/user-attachments/assets/a508dc05-6d02-453e-9ee9-07878613a137
 </tr>
 </table>
 
-*768×512, 65 frames (~2.7s at 24fps), 8 steps on Apple Silicon*
+*768x512, 65 frames (~2.7s at 24fps), 8 steps on Apple Silicon*
 
 ## Quick Start
 

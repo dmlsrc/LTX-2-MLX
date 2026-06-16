@@ -6,7 +6,7 @@ This document describes the parity testing methodology and results for verifying
 
 **V1 (19B) Overall Parity: 97%+** (historical, see [Stage-by-Stage Results](#stage-by-stage-results))
 **V2.3 (22B) Text Encoder Parity: 0.9996 video / 0.9931 audio** (May 21, 2026 audit)
-**V2.3 (22B) Transformer Step-0 Parity: 0.9991** (May 21, 2026, 512×512×33)
+**V2.3 (22B) Transformer Step-0 Parity: 0.9991** (May 21, 2026, 512x512x33)
 
 The MLX implementation has been verified to produce outputs statistically equivalent to PyTorch across all pipeline stages.  The V2.3 hot path (distilled two-stage AV) has additionally been line-by-line audited against the canonical Lightricks `TI2VidTwoStagesPipeline` — see [Known Divergences (V2.3 Audit)](#known-divergences-v23-audit-may-21-2026) for the resolution of each finding.
 
@@ -54,7 +54,7 @@ Phase 2: MLX Comparison
 
 ```
 Prompt: "A golden retriever running through a meadow"
-Resolution: 128×128 (for fast testing)
+Resolution: 128x128 (for fast testing)
 Frames: 17 (3 latent frames)
 Steps: 8 (distilled)
 Seed: 42
@@ -80,7 +80,7 @@ Seed: 42
 
 ### Visual Comparison
 
-Frame-by-frame comparison at higher resolution (768×512, 65 frames):
+Frame-by-frame comparison at higher resolution (768x512, 65 frames):
 
 | Frame | Correlation |
 |-------|-------------|
@@ -101,7 +101,7 @@ The V2.3 distilled-1.1 hot path was re-audited end-to-end against the canonical 
 ```
 Model: ltx-2.3-22b-distilled-1.1.safetensors
 Prompt: "a cat sitting on a windowsill watching rain"
-Resolution: 512×512 (transformer probe)
+Resolution: 512x512 (transformer probe)
 Frames: 33 (5 latent frames)
 Steps: 1 (isolated step-0 forward)
 Seed: 42
@@ -124,7 +124,7 @@ Stage-by-stage cosine similarity of Gemma3 hidden states on the real-token slice
 | **Final video encoding** | (1, 1024, 4096) | **0.9995924** | 3.07e-3 | Connector smooths the drift |
 | **Final audio encoding** | (1, 1024, 2048) | **0.9931221** | 1.50e-2 | Smaller head_dim (64 vs 128) |
 
-**Note on the 0.92 dip at hs[48]**: this is bf16 noise compounding across 48 transformer layers — not an implementation bug.  The V2 feature extractor's per-token RMSnorm + linear projection wipes magnitude differences and the connector attention averages across the 49 stacked hidden states, recovering to 0.9996 at the final video encoding.  Audio is slightly looser because the audio path has half the per-head capacity (32 heads × 64 dim vs video's 32 × 128) — same algorithm, less bf16 headroom.
+**Note on the 0.92 dip at hs[48]**: this is bf16 noise compounding across 48 transformer layers — not an implementation bug.  The V2 feature extractor's per-token RMSnorm + linear projection wipes magnitude differences and the connector attention averages across the 49 stacked hidden states, recovering to 0.9996 at the final video encoding.  Audio is slightly looser because the audio path has half the per-head capacity (32 heads x 64 dim vs video's 32 x 128) — same algorithm, less bf16 headroom.
 
 ### Transformer Step-0 Parity
 
@@ -136,7 +136,7 @@ Single forward pass through the full 22B V2.3 AudioVideo transformer, feeding id
 | Input latent (patchified) | (1, 1280, 128) | **1.0000000** | 0 | 0 |
 | **x0_video (transformer step-0 output)** | (1, 1280, 128) | **0.9991481** | 1.30e-2 | 1.17e-1 |
 
-Reading: input alignment is bit-identical (positions and patchified latent cos sim = 1.0), so the 0.9991 cos sim on the output is **purely the transformer's contribution** — 48 transformer layers + AdaLN + cross-attention + per-head gated attention + the X0Model `latent - sigma*velocity` step add up to about 0.0009 of cross-impl drift.  Roughly **8× tighter** than the V1 PARITY.md historical baseline of 0.982 at step 0.
+Reading: input alignment is bit-identical (positions and patchified latent cos sim = 1.0), so the 0.9991 cos sim on the output is **purely the transformer's contribution** — 48 transformer layers + AdaLN + cross-attention + per-head gated attention + the X0Model `latent - sigma*velocity` step add up to about 0.0009 of cross-impl drift.  Roughly **8x tighter** than the V1 PARITY.md historical baseline of 0.982 at step 0.
 
 ### bf16 Noise Floor
 
@@ -150,7 +150,7 @@ To rule out "bf16 alone is causing the drift," ran MLX Gemma3 forward in bf16 vs
 | hs[36] | 0.9999986 | — |
 | **hs[48]** | **0.9997602** | Final post-norm |
 
-MLX bf16 vs MLX fp32 is **0.9998** at hs[48].  Compared to MLX bf16 vs PyTorch bf16 at hs[48] (0.9200), the cross-backend gap is **~250× larger** than the within-MLX bf16-vs-fp32 noise.  This means **bf16 is not the dominant source of cross-impl drift** — it's the kernel-implementation differences between MPS and Metal (different tile shapes, different reduction orders).  Going to fp32 in MLX alone would not close the gap with bf16 PyTorch; both backends would need to be fp32 (3.5× slower per forward, 2× memory) for cross-impl drift to drop to ~0.9999.
+MLX bf16 vs MLX fp32 is **0.9998** at hs[48].  Compared to MLX bf16 vs PyTorch bf16 at hs[48] (0.9200), the cross-backend gap is **~250x larger** than the within-MLX bf16-vs-fp32 noise.  This means **bf16 is not the dominant source of cross-impl drift** — it's the kernel-implementation differences between MPS and Metal (different tile shapes, different reduction orders).  Going to fp32 in MLX alone would not close the gap with bf16 PyTorch; both backends would need to be fp32 (3.5x slower per forward, 2x memory) for cross-impl drift to drop to ~0.9999.
 
 The 0.9996/0.9931 V2.3 cos sims **are roughly the floor** of "two different bf16 backends agreeing on the same algorithm on the same hardware family."  Probe scripts and saved sidecar tensors live under `$SHARED_TEMP_DIR/trace_analysis/` (or `${TMPDIR}/trace_analysis/` if `SHARED_TEMP_DIR` isn't set in your environment).
 
@@ -181,13 +181,13 @@ x0 = latent - sigma * velocity
 
 **Issue**: Debug scripts used `dim=128` (head_dim) instead of `dim=4096` (inner_dim).
 
-**Fix**: Corrected to `dim = num_heads × head_dim = 32 × 128 = 4096`.
+**Fix**: Corrected to `dim = num_heads x head_dim = 32 x 128 = 4096`.
 
 ### 5. Gemma3 RoPE Multiply Precision (V2.3 — May 21, 2026)
 
 **Issue**: Our `apply_rotary_pos_emb` for the Gemma3 text encoder was downcasting cos/sin to bf16 before the multiply, while HF Gemma3 keeps cos/sin in fp32 and lets the multiply promote Q/K to fp32 (then downcasts before SDPA).  Mathematically lossier per layer of accumulated drift.
 
-**Fix**: [`LTX_2_MLX/model/text_encoder/gemma3.py:117-141`](../LTX_2_MLX/model/text_encoder/gemma3.py) — cos/sin stay fp32, multiply runs in fp32, result downcasts back to bf16 before SDPA (so SDPA still picks its bf16 kernel — propagating fp32 to attention compiles a pure-fp32 steel kernel that's ~2× slower).  Mirrors the LTX connector RoPE pattern.  No measurable perf cost; the downcast happens once per attention block on a tiny tensor.
+**Fix**: [`LTX_2_MLX/model/text_encoder/gemma3.py:117-141`](../LTX_2_MLX/model/text_encoder/gemma3.py) — cos/sin stay fp32, multiply runs in fp32, result downcasts back to bf16 before SDPA (so SDPA still picks its bf16 kernel — propagating fp32 to attention compiles a pure-fp32 steel kernel that's ~2x slower).  Mirrors the LTX connector RoPE pattern.  No measurable perf cost; the downcast happens once per attention block on a tiny tensor.
 
 ### 6. Tokenizer Whitespace Strip (V2.3 — May 21, 2026)
 
@@ -360,4 +360,4 @@ If correlation drops significantly at a specific step:
 
 **V1 (19B)**: MLX achieves **97%+ correlation** with PyTorch across all pipeline stages, confirming functional parity.  The small differences (~3%) are within expected numerical precision tolerances and do not affect visual output quality.
 
-**V2.3 (22B)**: MLX achieves **0.9996 video / 0.9931 audio** text-encoder cross-impl cos sim and **0.9991** transformer step-0 cos sim against canonical Lightricks PyTorch.  These numbers are at the bf16 cross-kernel noise floor — MPS-PyTorch and Metal-MLX cannot agree more tightly without both being upgraded to fp32 (3.5× slower per forward, 2× memory).  All four substantive divergences from the May 2026 audit are resolved in `c431b7b`; remaining gaps are net-new upstream features (HDR IC-LoRA, color conversion), not parity bugs.
+**V2.3 (22B)**: MLX achieves **0.9996 video / 0.9931 audio** text-encoder cross-impl cos sim and **0.9991** transformer step-0 cos sim against canonical Lightricks PyTorch.  These numbers are at the bf16 cross-kernel noise floor — MPS-PyTorch and Metal-MLX cannot agree more tightly without both being upgraded to fp32 (3.5x slower per forward, 2x memory).  All four substantive divergences from the May 2026 audit are resolved in `c431b7b`; remaining gaps are net-new upstream features (HDR IC-LoRA, color conversion), not parity bugs.

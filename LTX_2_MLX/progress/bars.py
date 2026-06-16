@@ -23,8 +23,8 @@ PhaseBar features beyond generate.py's DenoiseProgress:
   work had reported yet); that warmup amortizes over the first ~30
   ticks and pace converges to its steady-state value.
 * **Math-consistent rate** — pace = `n / elapsed_from_origin`, so the
-  displayed pace, RUN time and count multiply out cleanly: `pace × RUN
-  == n_so_far`. ETA uses the same per-unit time, so `ETA × pace ≈
+  displayed pace, RUN time and count multiply out cleanly: `pace x RUN
+  == n_so_far`. ETA uses the same per-unit time, so `ETA x pace ≈
   remaining`. Cross-phase outliers drag the average briefly then it
   recovers as more ticks roll in — no median sleight-of-hand.
 * **Fixed-width columns** — count uses `max(3, digits(total))` per side,
@@ -307,12 +307,12 @@ class PhaseBar:
         # the value is `--:--:07` or `24:00:00`.
         elapsed = (self._t_last - self._t_origin) if self._t_last is not None else 0.0
         if self._n > 0 and elapsed > 0:
-            # Math-consistent triplet: pace × elapsed = work_done, and
-            # eta × pace ≈ remaining. The median-of-window approach was
+            # Math-consistent triplet: pace x elapsed = work_done, and
+            # eta x pace ≈ remaining. The median-of-window approach was
             # arithmetically dishonest — it showed an "instantaneous"
             # pace that didn't multiply out to the frames already done.
             # Using `n / elapsed` for both pace and ETA makes the three
-            # numbers add up: at the end of a run, `pace × RUN == count`.
+            # numbers add up: at the end of a run, `pace x RUN == count`.
             sec_per_unit = elapsed / self._n
             run_str = f"{_fmt_duration(elapsed):>8}"
             if total:

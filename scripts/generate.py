@@ -711,7 +711,7 @@ def _ensure_audio_ff_layout_for_dtype(
     layout_specs: tuple[tuple[str, str], ...],
     audio_ff_dtype: str | None,
 ) -> tuple[tuple[str, str], ...]:
-    """Auto-add audio FF pretranspose when FP16, avoiding FP16 × BF16 → FP32
+    """Auto-add audio FF pretranspose when FP16, avoiding FP16 x BF16 → FP32
     mixed-dtype promotion.  Mirror of ``_ensure_ff_layout_for_dtype`` minus
     the kernel-cliff motivation (audio K=8192 doesn't hit it).
     """
@@ -733,7 +733,7 @@ def _ensure_ff_layout_for_dtype(
 ) -> tuple[tuple[str, str], ...]:
     """Auto-add ``project_in/project_out:pretranspose`` when --video-ff-dtype
     is FP16.  Mandatory for two reasons: (1) without a pretransposed dtype-
-    baked cache, project_in's nn.Linear promotes FP16 × BF16 → FP32; (2)
+    baked cache, project_in's nn.Linear promotes FP16 x BF16 → FP32; (2)
     naive FP16 at K=16384 hits a deeper BlockLoader cliff than BF16 (4.95
     vs 9.51 TFlops/s with vs without pretranspose).  See
     PERFORMANCE_NOTES.md "BlockLoader cliff characterization" entry.
@@ -3461,7 +3461,7 @@ def generate_video(
             # If --audio-ff-dtype is FP16, enforce both project_in and
             # project_out pretranspose on the audio side too (independent
             # of whether video FF is also FP16).  Otherwise the audio
-            # project_in matmul would do FP16 × BF16 → FP32 promotion.
+            # project_in matmul would do FP16 x BF16 → FP32 promotion.
             _audio_ff_layout_specs = _ensure_audio_ff_layout_for_dtype(
                 _audio_ff_layout_specs,
                 audio_ff_dtype
@@ -5427,7 +5427,7 @@ def main():
             "but the per-matmul FP16 win is real (~10-13%%) so exposed for "
             "real-world A/B testing.  No kernel cliff at audio K=8192 (unlike "
             "video K=16384), but auto-pairs with audio FF pretranspose to "
-            "avoid the FP16 × BF16 → FP32 mixed-dtype promotion fallback.  "
+            "avoid the FP16 x BF16 → FP32 mixed-dtype promotion fallback.  "
             "Default (omit flag): keep audio FF at the loaded checkpoint dtype."
         ),
     )

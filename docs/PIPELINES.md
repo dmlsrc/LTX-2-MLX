@@ -227,7 +227,7 @@ disk round-trip, no ffmpeg.
 
 - **`--vsr-spatial-mode {fast,balanced,image}`** — VideoToolbox Super
   Resolution. `fast` uses `VTLowLatencySuperResolutionScaler` (2x,
-  input ≤ 960×960, NV12 source). `balanced` and `image` use
+  input ≤ 960x960, NV12 source). `balanced` and `image` use
   `VTSuperResolutionScaler` (4x, RGBAHalf source, downloadable model
   fetched once on first use); `balanced` chains prev-frame state for
   crisper motion, `image` is per-frame deterministic with measurably
@@ -249,7 +249,7 @@ disk round-trip, no ffmpeg.
 These are independent of `--upscale-spatial` / `--upscale-temporal`
 (transformer LoRA upscalers). The model-based path stays available
 for cases where its quality profile is preferred; the VT path is
-typically 100×+ faster for the same scale factor.
+typically 100x+ faster for the same scale factor.
 
 ## Frame Count
 

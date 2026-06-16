@@ -154,7 +154,7 @@ longer present and the workaround is no longer needed:
 | Historical-bug 10s clip (April)             | 1137       | 9899  | —       | mumble level     |
 
 Both modes produce healthy 20-second audio with proper dialog levels, no
-"5× quieter from second 0" pattern.  The per-second RMS trajectories show
+"5x quieter from second 0" pattern.  The per-second RMS trajectories show
 normal silence floors (40-80 RMS) and proper speech bursts (>1000 RMS)
 throughout the clip in both modes — no inverse-duration amplitude scaling.
 
@@ -249,13 +249,13 @@ frame per 40 ms):
 
 | lat_t | Time     | RMS   | max-abs | vs. median |
 |------:|---------:|------:|--------:|-----------:|
-| 0     | 0-40 ms  | 1.475 | 5.34    | 1.31×      |
-| 1     | 40-80 ms | 2.042 | 3.88    | **1.81×**  |
-| 2     | 80-120 ms| 1.787 | 3.42    | 1.59×      |
+| 0     | 0-40 ms  | 1.475 | 5.34    | 1.31x      |
+| 1     | 40-80 ms | 2.042 | 3.88    | **1.81x**  |
+| 2     | 80-120 ms| 1.787 | 3.42    | 1.59x      |
 | 3+    | 120+ ms  | ≤0.93 | ≤2.98   | settled    |
-| median| —        | 1.127 | —       | 1.00×      |
+| median| —        | 1.127 | —       | 1.00x      |
 
-The first three latent frames carry 1.3-1.8× typical energy, peaking
+The first three latent frames carry 1.3-1.8x typical energy, peaking
 at lat_t=1.  After lat_t=3 the latent energy is normal.
 
 **The spike is already present in stage 1**, before the spatial

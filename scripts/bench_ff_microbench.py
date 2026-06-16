@@ -64,7 +64,7 @@ Available benches:
                           @mx.compile (production default) for AdaLN alone,
                           residual_gate alone, and the full attention-side
                           chain.  Quantifies compile-fusion headroom and
-                          per-step extrapolation (4 chains/block × 96 calls
+                          per-step extrapolation (4 chains/block x 96 calls
                           per stage-1 run).
     rope                - `apply_split_rotary_emb` at LTX video Q/K shape
                           (B=1, H=32, T=8784, D=128).  Compares production
@@ -106,11 +106,11 @@ import mlx.nn as nn
 
 # --- shapes (from LTX-2.3 distilled at 1024x576x481, stage 1 latent) ---
 B = 1
-T = 8784            # latent tokens (61 frames × 9 × 16 spatial)
+T = 8784            # latent tokens (61 frames x 9 x 16 spatial)
 D = 4096            # hidden dim
 H = 32              # attention heads
-D_HEAD = 128        # head dim (H × D_HEAD = D)
-FF_INNER = 16384    # FF intermediate (4× D)
+D_HEAD = 128        # head dim (H x D_HEAD = D)
+FF_INNER = 16384    # FF intermediate (4x D)
 DTYPE = mx.bfloat16
 
 # --- timing helpers ---
@@ -246,7 +246,7 @@ def bench_gelu(warmup: int, iters: int) -> None:
 
     Shape: (1, 8784, 16384) BF16 = 288 MB.  Read+write = 576 MB.  At
     ~300 GB/s effective M1 Max HBM bandwidth: ~1.9 ms theoretical floor
-    per call.  Per stage-1 run (96 calls = 48 blocks × 2 steps for our
+    per call.  Per stage-1 run (96 calls = 48 blocks x 2 steps for our
     sync-mode capture): ~180 ms theoretical floor.
     """
     print()
@@ -266,11 +266,11 @@ def bench_gelu(warmup: int, iters: int) -> None:
             notes="lower bound: pure read+write through pointwise kernel")
 
     # Scale-to-run estimate
-    per_run_total = (sum(durs) / iters) * 96  # 48 blocks × 2 steps
+    per_run_total = (sum(durs) / iters) * 96  # 48 blocks x 2 steps
     per_step_total = per_run_total / 2
     print()
-    print(f"  Extrapolation: {sum(durs)/iters:.2f} ms × 96 calls "
-          f"(48 blocks × 2 steps) = {per_run_total:.0f} ms / 2-step run = "
+    print(f"  Extrapolation: {sum(durs)/iters:.2f} ms x 96 calls "
+          f"(48 blocks x 2 steps) = {per_run_total:.0f} ms / 2-step run = "
           f"{per_step_total:.0f} ms / step")
     print(f"  => GELU-pass elimination upper bound on per-step savings: "
           f"~{per_step_total:.0f} ms ({100*per_step_total/45500:.2f} % of 45.5 s/step)")
@@ -330,9 +330,9 @@ def bench_qkv_separate_vs_packed(warmup: int, iters: int) -> None:
     print(f"  Delta: separate {sep_mean:.3f} ms → packed {pack_mean:.3f} ms "
           f"= {delta_ms:+.3f} ms ({delta_pct:+.1f} %)")
     if delta_ms > 0:
-        per_run = delta_ms * 96  # 48 blocks × 2 steps
-        print(f"  Per-run savings: {delta_ms:.3f} ms × 96 attention calls "
-              f"(48 blocks × 2 steps) = {per_run:.0f} ms = "
+        per_run = delta_ms * 96  # 48 blocks x 2 steps
+        print(f"  Per-run savings: {delta_ms:.3f} ms x 96 attention calls "
+              f"(48 blocks x 2 steps) = {per_run:.0f} ms = "
               f"{per_run/2:.0f} ms / step ({100*per_run/2/45500:.2f} % of 45.5 s/step)")
     else:
         print("  Packed is SLOWER — not worth pursuing.")
@@ -461,16 +461,16 @@ def bench_quant_matmul(warmup: int, iters: int) -> None:
     3. **mxfp8 quantized** -- nn.QuantizedLinear(mode="mxfp8"), what
        --video-ff-quantize / --transformer-cache-quantize produces
 
-    Reports per-call mean ms + effective TFlops/s (assuming 2 × M × K × N
+    Reports per-call mean ms + effective TFlops/s (assuming 2 x M x K x N
     FMAs).  M1 Max BF16 theoretical peak is ~10.4 TFlops/s; INT8 is
     nominally ~21 TFlops/s, but the dequant overhead in mx.quantized_matmul
     typically lands well below that.
 
     Shapes (M = T tokens, K = input dim, N = output dim):
-    - FF.project_in  : 8784 × 4096 × 16384  (BF16 weight ~128 MB)
-    - FF.project_out : 8784 × 16384 × 4096  (BF16 weight ~128 MB)
-    - attn.to_q/k/v  : 8784 × 4096 × 4096   (BF16 weight ~32 MB)
-    - attn.to_out    : 8784 × 4096 × 4096   (BF16 weight ~32 MB)
+    - FF.project_in  : 8784 x 4096 x 16384  (BF16 weight ~128 MB)
+    - FF.project_out : 8784 x 16384 x 4096  (BF16 weight ~128 MB)
+    - attn.to_q/k/v  : 8784 x 4096 x 4096   (BF16 weight ~32 MB)
+    - attn.to_out    : 8784 x 4096 x 4096   (BF16 weight ~32 MB)
     """
     print()
     print("=" * 100)
@@ -566,7 +566,7 @@ def bench_bf16_layout(warmup: int, iters: int) -> None:
       W.T transpose moves a lot of bytes.
     - "wide output" matmuls (K small, N large, like FF project_in 4096→16384):
       pretranspose is essentially neutral.
-    - Square 4096×4096 attention matmuls: tied within noise.
+    - Square 4096x4096 attention matmuls: tied within noise.
 
     Reports per-call mean + TFlops/s achieved.  Compare across shapes to
     see where pretranspose actually earns its keep.
@@ -658,10 +658,10 @@ def bench_bf16_layout_audio(warmup: int, iters: int) -> None:
     different treatment.
 
     Shapes tested (M = T=502, K = input dim, N = output dim):
-    - audio.FF.project_in  : 502 × 2048 × 8192   (BF16 weight ~32 MB)
-    - audio.FF.project_out : 502 × 8192 × 2048   (BF16 weight ~32 MB)
-    - audio.attn.to_q/k/v  : 502 × 2048 × 2048   (BF16 weight ~8 MB)
-    - audio.attn.to_out    : 502 × 2048 × 2048   (BF16 weight ~8 MB)
+    - audio.FF.project_in  : 502 x 2048 x 8192   (BF16 weight ~32 MB)
+    - audio.FF.project_out : 502 x 8192 x 2048   (BF16 weight ~32 MB)
+    - audio.attn.to_q/k/v  : 502 x 2048 x 2048   (BF16 weight ~8 MB)
+    - audio.attn.to_out    : 502 x 2048 x 2048   (BF16 weight ~8 MB)
     """
     print()
     print("=" * 100)
@@ -735,8 +735,8 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
     Question: T=8784 is only 16-aligned (8784/16=549, 8784/32=274.5).
     MLX's sdpa_full uses bq=32 bk=16 on M1 Max non-NAX.  A T that's not
     a multiple of 32 forces a partial tile on the Q axis.  Is padding to
-    a friendlier alignment (e.g. 8832 = 64×138 = 128×69, or 9216 =
-    128×72) actually faster, despite the extra tokens?
+    a friendlier alignment (e.g. 8832 = 64x138 = 128x69, or 9216 =
+    128x72) actually faster, despite the extra tokens?
 
     If a friendlier T runs faster despite more FLOPs, padding becomes a
     free lever via input zero-padding + output slicing.
@@ -829,11 +829,11 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
         delta = best_mean - actual_mean
         if delta < 0:
             savings_per_call = -delta
-            # video_self_attn fires 48 blocks × 8 steps = 384 calls per stage 1
+            # video_self_attn fires 48 blocks x 8 steps = 384 calls per stage 1
             per_stage1 = savings_per_call * 384
             print(f"  WIN: padding T=8784 → T={best_T} (aligned {best_align}) "
                   f"saves {savings_per_call:.2f} ms/call.")
-            print(f"  Stage-1 extrapolation: × 384 calls = {per_stage1:.0f} ms saved "
+            print(f"  Stage-1 extrapolation: x 384 calls = {per_stage1:.0f} ms saved "
                   f"({100*per_stage1/364400:.2f}% of 364 s stage-1 wall).")
         else:
             print(f"  No padding-up target beats T=8784.  Best pad candidate "
@@ -1028,7 +1028,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
     A real fused FFN kernel can NOT beat the irreducible work: it must still
     do both BF16 GEMMs in series (project_out depends on project_in's output).
     Everything else is on the table to eliminate:
-      * GELU pass over the full ``T × inner_dim`` hidden (read+write).
+      * GELU pass over the full ``T x inner_dim`` hidden (read+write).
       * Kernel dispatch between the two GEMMs.
       * Materializing the hidden tensor in HBM (if the kernel keeps it in
         registers/threadgroup memory).
@@ -1151,18 +1151,18 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
     print(f"    floor B: both matmuls chained, no GELU   = {floor_chained:>7.3f} ms  "
           f"(upper bound on fused-kernel floor; still writes/reads hidden via HBM)")
     print(f"    GELU-pass cost (hidden read+write)       = {mean_gelu:>7.3f} ms")
-    print(f"    recoverable (stock − floor B)            = {recoverable_chained:>+7.3f} ms  "
+    print(f"    recoverable (stock - floor B)            = {recoverable_chained:>+7.3f} ms  "
           f"({recoverable_pct:+.1f}% of stock)")
     # A truly tiled fused kernel could also elide the hidden HBM round-trip
     # embedded in floor B.  Estimate that bandwidth cost from the GELU row:
-    # achieved GB/s × 2 (read+write of the hidden tensor) ≈ same as mean_gelu.
+    # achieved GB/s x 2 (read+write of the hidden tensor) ≈ same as mean_gelu.
     # So a perfect tiled fused floor is roughly floor B - mean_gelu.
     fused_floor_estimate = max(floor_chained - mean_gelu, 0.0)
     fused_recoverable = mean_stock - fused_floor_estimate
     fused_recoverable_pct = 100 * fused_recoverable / mean_stock if mean_stock else 0.0
     print(f"    floor C: B minus hidden HBM round-trip   = {fused_floor_estimate:>7.3f} ms  "
           f"(perfect tiled fused-kernel floor; loses if tiling drops GEMM efficiency)")
-    print(f"    recoverable (stock − floor C)            = {fused_recoverable:>+7.3f} ms  "
+    print(f"    recoverable (stock - floor C)            = {fused_recoverable:>+7.3f} ms  "
           f"({fused_recoverable_pct:+.1f}% of stock)")
 
     print()
@@ -1190,14 +1190,14 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
         pct_gemm = 100 * tflops / 7.95
         print(f"    {label:<38s}  {tflops:>5.2f} TFlops/s   {pct_gemm:>5.0f}% of GEMM ceiling")
 
-    # Per-run extrapolation: 48 blocks × 2 steps = 96 FF calls per 2-step run.
+    # Per-run extrapolation: 48 blocks x 2 steps = 96 FF calls per 2-step run.
     # Report both the conservative (floor B) and optimistic (floor C) savings.
     print()
     per_run_b = recoverable_chained * 96
     per_step_b = per_run_b / 2
     per_run_c = fused_recoverable * 96
     per_step_c = per_run_c / 2
-    print("  EXTRAPOLATION (48 blocks × 2 steps = 96 FF calls per 2-step run)")
+    print("  EXTRAPOLATION (48 blocks x 2 steps = 96 FF calls per 2-step run)")
     print(f"    vs floor B (conservative)  per step = {per_step_b:>+6.0f} ms  "
           f"({100*per_step_b/45500:+.2f}% of 45.5 s/step)")
     print(f"    vs floor C (optimistic)    per step = {per_step_c:>+6.0f} ms  "
@@ -1310,7 +1310,7 @@ def bench_adaln_residual(warmup: int, iters: int) -> None:
     Per transformer block:
       * 2 AdaLN modulations (attention prelude + FF prelude)
       * 2 gated residual adds (attention post-add + FF post-add)
-    => ~4 pointwise chains per block × 48 blocks × 2 steps = ~384 calls
+    => ~4 pointwise chains per block x 48 blocks x 2 steps = ~384 calls
        per stage-1 2-step run.
 
     The AdaLN/RoPE dtype-cast fix (commit 2026-05-17) already saved
@@ -1456,12 +1456,12 @@ def bench_adaln_residual(warmup: int, iters: int) -> None:
         sign = "FASTER" if savings_ms > 0 else "SLOWER"
         print(f"    {label:<28s}  compile vs inline: {savings_ms:+.3f} ms ({sign})")
 
-    # Per-run extrapolation: 4 pointwise chains per block × 48 blocks × 2 steps
+    # Per-run extrapolation: 4 pointwise chains per block x 48 blocks x 2 steps
     per_run_chains = 4 * 48 * 2
     print()
     print(f"  EXTRAPOLATION ({per_run_chains} chain-equivalent calls per stage-1 2-step run)")
     chain_compiled_mean = results["chain compiled (adaln+resid)"]
-    print(f"    chain compiled @ {chain_compiled_mean:.3f} ms × {per_run_chains}"
+    print(f"    chain compiled @ {chain_compiled_mean:.3f} ms x {per_run_chains}"
           f" = {chain_compiled_mean * per_run_chains / 1000:.2f} s / run "
           f"({100*chain_compiled_mean*per_run_chains/2/45500:.2f}% of 45.5 s/step)")
     if chain_savings > 0:
@@ -1492,7 +1492,7 @@ def bench_rope(warmup: int, iters: int) -> None:
     the result back to BF16 to avoid promoting downstream SDPA to FP32 (the
     fix that landed the -16.8% AdaLN/RoPE win on 2026-05-17).
 
-    Per stage-1 run: 48 blocks × 2 steps × 2 (Q and K) = 192 RoPE calls.
+    Per stage-1 run: 48 blocks x 2 steps x 2 (Q and K) = 192 RoPE calls.
 
     Modes:
       * production: BF16 input, FP32 cos/sin, cast back to BF16
@@ -1604,7 +1604,7 @@ def bench_rope(warmup: int, iters: int) -> None:
     delta = prod_mean - bf16_mean
     delta_pct = 100 * delta / prod_mean if prod_mean else 0.0
 
-    # Per-stage extrapolation: 48 blocks × 2 steps × 2 (Q + K) = 192 RoPE calls
+    # Per-stage extrapolation: 48 blocks x 2 steps x 2 (Q + K) = 192 RoPE calls
     per_run_calls = 48 * 2 * 2
     print()
     print(f"  PRODUCTION vs ALL-BF16 FREQS: {delta:+.3f} ms ({delta_pct:+.1f}% of production)")
@@ -1620,7 +1620,7 @@ def bench_rope(warmup: int, iters: int) -> None:
 
     print()
     print(f"  EXTRAPOLATION ({per_run_calls} RoPE calls per stage-1 2-step run)")
-    print(f"    production @ {prod_mean:.3f} ms × {per_run_calls}"
+    print(f"    production @ {prod_mean:.3f} ms x {per_run_calls}"
           f" = {prod_mean * per_run_calls / 1000:.2f} s / run "
           f"({100*prod_mean*per_run_calls/2/45500:.2f}% of 45.5 s/step)")
 

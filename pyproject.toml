@@ -102,6 +102,11 @@ select = [
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
+    "RUF001",  # ambiguous Unicode in string literals
+    "RUF002",  # ambiguous Unicode in docstrings
+    "RUF003",  # ambiguous Unicode in comments
+    "PLC2401", # non-ASCII variable names
+    "PLC2403", # non-ASCII import names
 ]
 ignore = [
     "E501",  # line length is configured for readability; avoid churn.

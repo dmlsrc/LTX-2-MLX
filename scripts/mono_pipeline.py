@@ -330,7 +330,7 @@ def av_block_forward(
     a2v_k = mx.fast.rms_norm(a2v_k, w["audio_to_video_attn.k_norm.weight"], NORM_EPS)
     a2v_q = apply_rotary_emb(a2v_q, v_cross_pe, ROPE_TYPE)
     a2v_k = apply_rotary_emb(a2v_k, a_cross_pe, ROPE_TYPE)
-    # Note: audio_to_video_attn uses audio_heads × audio_head_dim per the modular path
+    # Note: audio_to_video_attn uses audio_heads x audio_head_dim per the modular path
     attn_out = attention(a2v_q, a2v_k, a2v_v, AUDIO_HEADS, AUDIO_HEAD_DIM)
     Bs, T, _ = attn_out.shape
     attn_out = attn_out.reshape(Bs, T, AUDIO_HEADS, AUDIO_HEAD_DIM)

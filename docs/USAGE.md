@@ -93,11 +93,11 @@ Height and width must be divisible by 32:
 
 | Resolution | Aspect Ratio | Use Case |
 |------------|--------------|----------|
-| 256×384 | 2:3 | Fast testing |
-| 288×512 | 16:9 | Default fast preview |
-| 480×704 | ~2:3 | Taller balanced quality/speed |
-| 512×768 | 2:3 | High quality |
-| 768×1024 | 3:4 | Maximum quality |
+| 256x384 | 2:3 | Fast testing |
+| 288x512 | 16:9 | Default fast preview |
+| 480x704 | ~2:3 | Taller balanced quality/speed |
+| 512x768 | 2:3 | High quality |
+| 768x1024 | 3:4 | Maximum quality |
 
 ```bash
 python scripts/generate.py "Your prompt" --height 512 --width 768
@@ -160,7 +160,7 @@ python scripts/generate.py "A cat walking through a garden" \
 **Characteristics:**
 - No CFG (classifier-free guidance)
 - 8 distilled steps at half resolution, then 3 refinement steps after spatial upscaling
-- Fast generation (~2 minutes for 65 frames at 512×768)
+- Fast generation (~2 minutes for 65 frames at 512x768)
 - Good quality for most use cases
 
 ### Stage-2 Harness
@@ -217,7 +217,7 @@ python scripts/generate.py "A waterfall in a tropical forest" \
 
 **Characteristics:**
 - Stage 1: Generate at half resolution with CFG
-- Stage 2: 2× spatial upscale + refinement
+- Stage 2: 2x spatial upscale + refinement
 - Best for high-resolution output
 
 ## Memory Optimization
@@ -247,7 +247,7 @@ Historical retirements (2026-05-23):
   removed from the working tree and remains available in git history; the
   `--vae-decoder` CLI flag now only accepts `native`.
 - The `SimpleVideoEncoder` was removed from the working tree and replaced by
-  `NativeConv3dVideoEncoder` (parity verified at cos sim 0.99965 FP32; ~2-3×
+  `NativeConv3dVideoEncoder` (parity verified at cos sim 0.99965 FP32; ~2-3x
   faster).
 - The `--vae-spatial-padding` flag was removed entirely.  A/B testing
   showed `reflect` produced worse boundary artifacts than `zero` in
@@ -600,9 +600,9 @@ Measured on M3 Max with 128GB unified memory:
 
 | Resolution | Frames | Steps | Time |
 |------------|--------|-------|------|
-| 512×768 | 65 | 8 | ~2 min |
-| 768×1024 | 65 | 8 | ~4 min |
-| 512×768 | 97 | 8 | ~3 min |
+| 512x768 | 65 | 8 | ~2 min |
+| 768x1024 | 65 | 8 | ~4 min |
+| 512x768 | 97 | 8 | ~3 min |
 
 VAE decoding adds ~10-15 seconds regardless of resolution.
 
@@ -644,8 +644,8 @@ uv run scripts/download_weights.py --weights gemma
 
 | Configuration | RAM Required |
 |--------------|--------------|
-| Text-to-Video (512×288, 97 frames) | Depends on transformer residency; use `--stream-transformer` for constrained-memory runs |
-| Two-Stage (960×1408, 97 frames) | ~44GB (sequential), ~59GB (parallel) |
+| Text-to-Video (512x288, 97 frames) | Depends on transformer residency; use `--stream-transformer` for constrained-memory runs |
+| Two-Stage (960x1408, 97 frames) | ~44GB (sequential), ~59GB (parallel) |
 | With Audio Generation | Add ~6GB |
 
 **Recommendation**: Try `--stream-transformer` first on constrained systems. Use

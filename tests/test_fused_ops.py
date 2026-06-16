@@ -29,7 +29,7 @@ from LTX_2_MLX.kernels.fused_ops import (
 
 
 # Production T2V video shape: B=1, T=14640, C=4096.  C derives from
-# num_attention_heads (32) × attention_head_dim (128) in
+# num_attention_heads (32) x attention_head_dim (128) in
 # LTX_2_MLX/model/transformer/model.py.
 PROD_T = 14640
 PROD_C = 4096

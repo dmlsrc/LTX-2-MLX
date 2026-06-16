@@ -58,7 +58,7 @@ to dispatch on both video and audio FF prefixes.
 Auto-pair: when `--audio-ff-dtype float16` is set,
 `project_in:pretranspose,project_out:pretranspose` is added to the
 audio FF layout regardless of what video FF layout is doing.  Primary
-motivation is the FP16 × BF16 → FP32 mixed-dtype promotion fallback,
+motivation is the FP16 x BF16 → FP32 mixed-dtype promotion fallback,
 not the kernel cliff (which doesn't exist at audio K=8192).
 
 Bench evidence: `scripts/bench_pretranspose_dtype.py` audio rows.
@@ -124,12 +124,12 @@ difference between cliff and fast paths is the `transpose_b` template
 flag selecting between two kernel-name suffixes:
 
 - **`_nt_` (naive `x @ w.T`)** — `BlockLoader` (`kernels/steel/gemm/loader.h:14-80`)
-  puts 128 threads in a **2-across × 64-down** layout in B's (N, K)
+  puts 128 threads in a **2-across x 64-down** layout in B's (N, K)
   view, touching 64 distinct B-rows per warp-cycle, each row separated
-  by `ldb=K` elements.  As K grows, the **64-row × ldb-byte span grows
+  by `ldb=K` elements.  As K grows, the **64-row x ldb-byte span grows
   linearly** and coalescing within a SIMD group breaks.
 - **`_nn_` (pretranspose `x @ w_pt`)** — same template family, but
-  with `transpose_b=false` the loader flips to **8-across × 16-down**
+  with `transpose_b=false` the loader flips to **8-across x 16-down**
   along contiguous memory.  Eight adjacent threads read 8 adjacent
   BF16 elements = full 128-bit coalesced burst, and only 16 B-rows
   are touched per warp-cycle, K-independent.
@@ -176,7 +176,7 @@ TF/s
 ```
 
 Reading: each step is one cache-residency tier being crossed by the
-64-row × ldb-byte working set.  Plateaus are "this many rows still
+64-row x ldb-byte working set.  Plateaus are "this many rows still
 fit, drop happens when one more falls out."  Largest single drop is
 K=12288 → 13312 (-0.60 TF/s BF16, span 1.50 → 1.63 MB) — one specific
 cache tier exhausted there.
@@ -194,10 +194,10 @@ pretranspose; the K-loop slope affects both paths equally.
 
 | dtype | "production meaningful" cliff (≥5 % pretrans Δ) starts at |
 |-------|-------------------------------------------------------------|
-| BF16  | K ≈ 13312 (3.3× hidden_size 4096)                          |
-| FP16  | K ≈ 10240 already (2.5× hidden_size 4096) — visible at every K tested |
+| BF16  | K ≈ 13312 (3.3x hidden_size 4096)                          |
+| FP16  | K ≈ 10240 already (2.5x hidden_size 4096) — visible at every K tested |
 
-Pretranspose-vs-naive Δ scales by roughly 2× FP16-over-BF16 across the
+Pretranspose-vs-naive Δ scales by roughly 2x FP16-over-BF16 across the
 sweep (BF16 +11.7 % vs FP16 +28.4 % at K=13312; BF16 +17.8 % vs FP16
 +33.6 % at K=16384).  Hypothesis (un-confirmed in source): same
 absolute byte penalty (coalescing breaks identically since ldb_bytes
@@ -209,7 +209,7 @@ naive/pretrans ratio at K=16384 is 5.84/7.10 = 82 %; FP16 is 5.67/8.54
 
 **Audio (K=8192, M=502) escape clause.**  Audio matmuls don't hit the
 cliff because (a) K=8192 = 16 KB stride is below the cliff onset
-even for video M, AND (b) audio runs at M=502, ~29× fewer warp
+even for video M, AND (b) audio runs at M=502, ~29x fewer warp
 launches than video M=14640 → far less L2 contention pressure even at
 the same per-warp footprint.  Audio FP16 naive is faster than BF16
 naive at K=8192 — the matmul is firmly on the upside of the cliff.
@@ -264,7 +264,7 @@ of K, dtype, or transpose flag.  No L1/L2/SLC/page-size constants in
 the dispatcher.  No `ldb`-based heuristic.  `BlockLoader` at
 `kernels/steel/gemm/loader.h:25-134` walks K via `src += tile_stride`
 with no L2-blocking logic.  The cliff is therefore **structurally
-unavoidable** for any (large-M × strided-large-K) matmul on M1 Max in
+unavoidable** for any (large-M x strided-large-K) matmul on M1 Max in
 current MLX; pretranspose at the LTX-2-MLX cache layer is the
 load-bearing mitigation.  No upstream MLX change is in flight that
 would address this — the structural cause is "the tile selector
@@ -339,7 +339,7 @@ new layer.
 2. **Reduce video M via M-chunking.**  M=14640 → two M=7320 launches
    would halve L2 contention per launch and might escape the cliff
    entirely.
-   - **Costs:** ~2× kernel launch overhead, transformer-block surgery
+   - **Costs:** ~2x kernel launch overhead, transformer-block surgery
      to chunk attention/FF/residual cleanly.  Cross-attention can't
      be cleanly chunked (mixes M dimensions).
    - **Verdict:** not worth pursuing.  Architecturally invasive for
@@ -395,7 +395,7 @@ pre/post phases (audio decode, save, encode).
 `_ensure_audio_ff_layout_for_dtype` in `scripts/generate.py` force
 `project_in:pretranspose,project_out:pretranspose` whenever the
 corresponding FF dtype is FP16.  Two reasons stack: (a) without
-dtype-baked pretransposed cache, project_in does FP16 × BF16 → FP32
+dtype-baked pretransposed cache, project_in does FP16 x BF16 → FP32
 mixed-dtype promotion fallback; (b) FP16 has a deeper BlockLoader
 cliff than BF16 (see characterization entry above) — the same K=16384
 naive path runs 4.95 TFlops/s in FP16 vs 5.86 TFlops/s in BF16, so
@@ -408,7 +408,7 @@ contributing factors: (a) 4 BF16↔FP16 boundary casts per attention block
 (~500 attention calls / generation) dominate the per-matmul win;
 (b) `mx.fast.scaled_dot_product_attention` doesn't accept FP16 inputs
 cleanly, forcing additional cast at the SDPA boundary.  Per-projection
-matmul savings exist (1.18× per the bench) but they don't compose into
+matmul savings exist (1.18x per the bench) but they don't compose into
 a wall-time win once the SDPA boundary tax is paid.  Flag removed in
 2026-05-23 cleanup.
 
@@ -560,7 +560,7 @@ exploratory ITERS=10 run):
 - Conv3d dominates the resnet block (~80-95 % of its time).
 - Pixel-norm + silu are negligible (<0.42 ms even at the late stage).
 - Headroom IF the pending `mx.conv_general` int-overflow fix lifts
-  Conv3d to GEMM ceiling: ~1.5-2x on Conv3d × ~7 % VAE share of total
+  Conv3d to GEMM ceiling: ~1.5-2x on Conv3d x ~7 % VAE share of total
   wall = **~2.4-3.5 % end-to-end ceiling**.
 - **Blocked on upstream MLX.**  Re-run `vae_ops` after the fix lands
   to confirm the lift; numbers above set the upper bound.
@@ -627,7 +627,7 @@ a tiled kernel match `steel_gemm` GEMM efficiency (which tiling typically
 loses), this is a clear pass.
 
 **Trigger:** offline patch sketch for a "streamed BF16 FFN" (per-chunk
-streaming over the inner dim to avoid the full `T × inner_dim`
+streaming over the inner dim to avoid the full `T x inner_dim`
 intermediate) circulated for review.  Rather than build the prototype, we
 wrote `bench_fused_ffn_feasibility` to bound the maximum possible win
 first.
@@ -653,10 +653,10 @@ first.
 - floor C is an upper bound and assumes tiling does NOT drop GEMM
   efficiency below the 95 % `steel_gemm` ceiling currently observed.
 
-**Extrapolation** (48 blocks × 2 steps = 96 FF calls per stage-1 2-step run):
+**Extrapolation** (48 blocks x 2 steps = 96 FF calls per stage-1 2-step run):
 - conservative (vs floor B): +585 ms / step = +1.29 % of 45.5 s
 - optimistic   (vs floor C): +1173 ms / step = +2.58 % of 45.5 s
-- 30 s clip (~91 / 61 = 1.49× tokens, both stages): ~15-30 s total wall ceiling
+- 30 s clip (~91 / 61 = 1.49x tokens, both stages): ~15-30 s total wall ceiling
 
 **Why the streamed-FFN sketch specifically does NOT clear that bar:**
 
@@ -665,7 +665,7 @@ dimension as N smaller MLX GEMMs with output-tensor accumulation
 (`out = out + (hidden_chunk @ w_out_chunk)` per chunk).  Concretely:
 
 1. **Output accumulation kills the memory story.**  Each chunk reads and
-   writes the full `tokens × dim_out` output (~72 MB).  At 16 chunks
+   writes the full `tokens x dim_out` output (~72 MB).  At 16 chunks
    that's ~1.1 GB of extra output traffic the stock path doesn't have.
 2. **N small GEMMs vs 1 well-tuned `steel_gemm`** -- empirically the
    matmuls are already at 91-96 % of ceiling; chunking can only lose.
@@ -773,11 +773,11 @@ future hardware or with future MLX kernel improvements):
 **Tile choices across three projects** (head_dim=128, M1 Max / Apple7
 / Max tier):
 
-| Project | bq × bk | Source |
+| Project | bq x bk | Source |
 |---|---|---|
-| **MLX** `sdpa_full` non-NAX | **32 × 16** | `mlx/backend/metal/scaled_dot_product_attention.cpp:198` |
-| **pmetal** FlashAttention | **32 × 32** (NOT 64×32 as their docs claim) | `crates/pmetal-metal/src/kernels/metal/flash_attention.metal:271-272` |
-| **MFA** AttentionKernel | **96 × 32** | `kernels/AttentionDescriptor.cpp:522-630` Apple7 fork |
+| **MLX** `sdpa_full` non-NAX | **32 x 16** | `mlx/backend/metal/scaled_dot_product_attention.cpp:198` |
+| **pmetal** FlashAttention | **32 x 32** (NOT 64x32 as their docs claim) | `crates/pmetal-metal/src/kernels/metal/flash_attention.metal:271-272` |
+| **MFA** AttentionKernel | **96 x 32** | `kernels/AttentionDescriptor.cpp:522-630` Apple7 fork |
 
 **TGSM strategy comparison** (head_dim=128, half precision):
 
@@ -817,10 +817,10 @@ investigation finds reason to retry.
 **Three-phase investigation arc** (preserved for honesty about how
 the understanding evolved):
 
-1. **Phase 1 -- pmetal docs read:** Looked like MLX picked 32×16 vs
-   pmetal's 64×32 vs MFA's 96×32.  Hypothesis: "MLX is leaving
+1. **Phase 1 -- pmetal docs read:** Looked like MLX picked 32x16 vs
+   pmetal's 64x32 vs MFA's 96x32.  Hypothesis: "MLX is leaving
    headroom."  (Later: pmetal docs were misleading -- their actual
-   code is 32×32, not 64×32.)
+   code is 32x32, not 64x32.)
 2. **Phase 2 -- kernel-build experiment:** Background agent built a
    naive BQ=64 BK=32 kernel via `mx.fast.metal_kernel`, hit TGSM
    budget concerns (~47 KB vs 32 KB limit without aliasing).
@@ -1395,12 +1395,12 @@ video.project_out where naive falls to 5.17 TFlops/s vs pretranspose
 were trimmed (see "Pretranspose default cleanup" above), audio
 inherited the same trimming via the shared cache-build path: audio FF
 is now `project_out:pretranspose` only, audio attn is OFF.  Kitten
-smoke (one-stage 288×512, 721 frames, 8 steps) confirms this is safe
-at bakery scale: 75.4 s/it vs 75.9 s/it baseline = **−0.7 %** (within
+smoke (one-stage 288x512, 721 frames, 8 steps) confirms this is safe
+at bakery scale: 75.4 s/it vs 75.9 s/it baseline = **-0.7 %** (within
 noise but at minimum no regression).
 
-The historical 2026-05-15 −11.2 % small-T audio-pretranspose win is
-NOT re-verified.  At 256×256×25, audio T is much smaller (~25 tokens)
+The historical 2026-05-15 -11.2 % small-T audio-pretranspose win is
+NOT re-verified.  At 256x256x25, audio T is much smaller (~25 tokens)
 and per-call dispatch overhead approaches per-call matmul time —
 pretranspose may genuinely save dispatch cost there.  Users running
 small-T workloads who notice a regression can restore the audio
@@ -1436,8 +1436,8 @@ at every LTX matmul shape we tested:
 | attn.to_out (4096→4096) | 37.6 ms | 63.0 ms | +67.4% | 7.84 → 4.68 |
 
 End-to-end math closes perfectly:
-- B quantizes only project_out (~16% of step) → 66% × 16% = +10.6% (measured +10.2%)
-- C/D quantize attn + both FF (~60% of step) → 66% × 60% = +40% (measured +43-45%)
+- B quantizes only project_out (~16% of step) → 66% x 16% = +10.6% (measured +10.2%)
+- C/D quantize attn + both FF (~60% of step) → 66% x 60% = +40% (measured +43-45%)
 
 **The "22% of INT8 peak" framing earlier was a category error -- there
 is no INT8 matmul on M1 Max in MLX.**  Direct source read of
@@ -1459,7 +1459,7 @@ mma_op.mma(Xs, Ws);                              // Ws is dequantized BF16
 `U` is the activation dtype (BF16 for us).  `BlockMMA` is the same
 `simdgroup_matrix`-based MMA primitive that `steel_gemm` uses.  So the
 pipeline is: read packed FP8 weight → read per-block scale → multiply
-scale × dequantized byte → write BF16 into threadgroup memory → run
+scale x dequantized byte → write BF16 into threadgroup memory → run
 BF16 MMA over the dequantized tile.  **The matmul itself runs at the
 BF16 ceiling minus dequant overhead -- M1's INT8 instruction throughput
 (`dot4I8Packed`, ~21 TFlops/s theoretical) is never reached because
@@ -1489,11 +1489,11 @@ weight-read bandwidth by ~50% vs BF16:
 
 | Shape | BF16 weight | mxfp8 weight + scales | Saving |
 |---|---|---|---|
-| project_out (16384×4096) | 128 MB | ~68 MB | ~150 µs at 400 GB/s |
+| project_out (16384x4096) | 128 MB | ~68 MB | ~150 µs at 400 GB/s |
 
 But `project_out` runs in **151 ms BF16 vs 251 ms mxfp8** -- the entire
 weight read is only ~0.3 ms in either case.  At our matmul shapes we
-are **compute-bound by a factor of ~500×**, not bandwidth-bound.
+are **compute-bound by a factor of ~500x**, not bandwidth-bound.
 Saving 150 µs of bandwidth is invisible when the compute regression is
 100 ms.
 
@@ -1523,9 +1523,9 @@ fixable by tuning, only by either:
   * **`simdgroup_matrix<T>` (M1's tensor accelerator) accepts only
     `half`/`bfloat`/`float`, not `char`** — per Apple's MSL spec section
     2.4.  No INT8 path through the GEMM accelerator.
-  * **Microbench result** (32k threads × 1M MACs each on M1 Max):
+  * **Microbench result** (32k threads x 1M MACs each on M1 Max):
     FP16 scalar fma = 0.76 TOps/s, INT8 scalar mac = 0.63 TOps/s, INT8
-    4-way unrolled "dot" = 0.80 TOps/s (which is 4 ops/iter at 3.8×
+    4-way unrolled "dot" = 0.80 TOps/s (which is 4 ops/iter at 3.8x
     slower per iter than FP16 single MAC — per-MAC throughput equal,
     no advantage).
   * **`mpp::tensor_ops::matmul2d` (Metal 4 cooperative-tensor with
@@ -1535,7 +1535,7 @@ fixable by tuning, only by either:
   Net: M1's INT8 lives on the same scalar ALU as FP16/INT32.  No path
   to INT8 > BF16 throughput exists on Apple7 silicon.
 - (b) M3+ hardware where Apple-tuned INT8 kernels start to beat BF16
-  (Draw Things' Int8 attention claims 1.19-1.76× e2e on M3+, which
+  (Draw Things' Int8 attention claims 1.19-1.76x e2e on M3+, which
   arithmetically requires INT8 GEMM > BF16 GEMM).
 - (c) M5+ NAX hardware where the `mpp::tensor_ops::matmul2d`
   cooperative-tensor path delivers tensor-core-class INT8 throughput

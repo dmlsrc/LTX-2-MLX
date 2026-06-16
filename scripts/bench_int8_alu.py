@@ -10,7 +10,7 @@ We compare 5 kernels, each running a tight MAC loop with all threads:
   4. INT8 packed dp4a: `acc += dot(char4 a, char4 b)` per iter (4 MACs / iter)
   5. BF16 scalar MAC for completeness (Metal 3.1+)
 
-Hypothesis: if M1 has dedicated INT8 hardware, kernel 4 yields ~4× the
+Hypothesis: if M1 has dedicated INT8 hardware, kernel 4 yields ~4x the
 MAC/sec of kernel 2.  If not, all kernels run at the same per-iteration
 rate and INT8 has no throughput advantage.
 

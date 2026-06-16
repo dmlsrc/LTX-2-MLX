@@ -160,7 +160,7 @@ def test_eta_uses_post_update_count() -> None:
     buf = io.StringIO()
     with redirect_stderr(buf):
         # 1.0 s/tick so ETA differences survive HH:MM:SS rounding:
-        # 3 remaining × 1.0 → 00:00:03 (fixed) vs 4 × 1.0 → 00:00:04 (bug).
+        # 3 remaining x 1.0 → 00:00:03 (fixed) vs 4 x 1.0 → 00:00:04 (bug).
         b = PhaseBar(total=4, desc="t", unit="it", mininterval=0.0)
         time.sleep(1.0)
         b.update(1)
@@ -174,7 +174,7 @@ def test_eta_uses_post_update_count() -> None:
             check("ETA field is parseable", eta is not None, f"got {m.group(1)!r}")
             if eta is not None:
                 check(
-                    "eta ≈ remaining × median (not (remaining+1) × median)",
+                    "eta ≈ remaining x median (not (remaining+1) x median)",
                     near(eta, 3.0, 1.0),
                     f"got eta={eta}s (expected ~3s, would be ~4s on the bug)",
                 )
@@ -182,22 +182,22 @@ def test_eta_uses_post_update_count() -> None:
 
 
 def test_pace_elapsed_count_are_math_consistent() -> None:
-    """The OCD invariant: at any moment, `pace × elapsed ≈ n_so_far` and
-    `eta × pace ≈ total - n_so_far` (within rounding noise).
+    """The OCD invariant: at any moment, `pace x elapsed ≈ n_so_far` and
+    `eta x pace ≈ total - n_so_far` (within rounding noise).
 
     Regression: an earlier median-of-window implementation displayed an
     "instantaneous" pace that didn't multiply out to the work actually
     done — fine for a stable phase but dishonest across cross-phase
-    waits (e.g. VSR pace × RUN underestimated frames done by ~30%).
+    waits (e.g. VSR pace x RUN underestimated frames done by ~30%).
     """
-    print("\n[5] pace × elapsed ≈ n; eta × pace ≈ remaining")
+    print("\n[5] pace x elapsed ≈ n; eta x pace ≈ remaining")
     buf = io.StringIO()
     with redirect_stderr(buf):
         b = PhaseBar(total=30, desc="t", unit="it", mininterval=0.0)
         for _ in range(8):
             time.sleep(0.005)
             b.update(1)
-        # Inject one outlier (~100 ms, 20× the normal interval).
+        # Inject one outlier (~100 ms, 20x the normal interval).
         time.sleep(0.1)
         b.update(1)
         for _ in range(8):
@@ -205,19 +205,19 @@ def test_pace_elapsed_count_are_math_consistent() -> None:
             b.update(1)
         elapsed = (b._t_last or 0) - b._t_origin
         sec_per_unit = elapsed / b._n
-        # pace × elapsed must equal n exactly (no slop — same arithmetic).
+        # pace x elapsed must equal n exactly (no slop — same arithmetic).
         check(
-            "pace × elapsed == n_so_far (exact)",
+            "pace x elapsed == n_so_far (exact)",
             abs(sec_per_unit * b._n - elapsed) < 1e-9,
             f"pace*elapsed={sec_per_unit * b._n}, elapsed={elapsed}",
         )
-        # ETA × pace ≈ remaining (within rounding from int-second display).
+        # ETA x pace ≈ remaining (within rounding from int-second display).
         # The displayed ETA = remaining * sec_per_unit (same math), so
         # exact at the model layer; rounding happens in _fmt_duration.
         remaining = 30 - b._n
         eta_seconds = remaining * sec_per_unit
         check(
-            "model eta ≈ remaining × sec_per_unit",
+            "model eta ≈ remaining x sec_per_unit",
             near(eta_seconds, remaining * sec_per_unit, 1e-9),
             f"eta={eta_seconds}, remaining={remaining}, spu={sec_per_unit}",
         )
