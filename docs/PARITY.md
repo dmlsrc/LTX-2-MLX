@@ -224,7 +224,7 @@ Subagent line-by-line audit of `AVPipeline.generate_distilled_two_stage` vs cano
 | 1 | Audio noise normalization (unconditional → env-gated, default OFF) | ✅ Fixed |
 | 2 | Multi-image conditioning routing (always latent → keyframe for non-zero frame_index) | ✅ Fixed |
 | 3 | Missing `stage_1_sigmas` / `stage_2_sigmas` override kwargs | ✅ Fixed |
-| 4 | `distilled.py` dormant code retired (moved to `archive/`) | ✅ Fixed |
+| 4 | `distilled.py` dormant code retired (removed from working tree) | ✅ Fixed |
 
 ### Structural observations (no action — informational)
 

@@ -244,11 +244,11 @@ nothing extra to use the production default.
 
 Historical retirements (2026-05-23):
 - The `SimpleVideoDecoder` (PyTorch-layout slice-conv decoder) was
-  archived to `archive/simple_decoder.py.bak`; the `--vae-decoder` CLI
-  flag now only accepts `native`.
-- The `SimpleVideoEncoder` was archived to `archive/simple_encoder.py.bak`
-  and replaced by `NativeConv3dVideoEncoder` (parity verified at cos
-  sim 0.99965 FP32; ~2-3× faster).
+  removed from the working tree and remains available in git history; the
+  `--vae-decoder` CLI flag now only accepts `native`.
+- The `SimpleVideoEncoder` was removed from the working tree and replaced by
+  `NativeConv3dVideoEncoder` (parity verified at cos sim 0.99965 FP32; ~2-3×
+  faster).
 - The `--vae-spatial-padding` flag was removed entirely.  A/B testing
   showed `reflect` produced worse boundary artifacts than `zero` in
   every workflow tested (motion-heavy bakery, talking-subject clips,

@@ -99,18 +99,7 @@ LTX_2_MLX/
 ├── loader/
 │   └── weight_converter.py   # PyTorch → MLX weight conversion
 │
-├── types.py                  # VideoLatentShape, SpatioTemporalScaleFactors
-
-archive/                      # documentation-only; not imported.  source for
-├── distilled.py.bak          # archived legacy distilled pipeline API
-├── simple_decoder.py.bak     # per-temporal-slice VAE decoder
-├── simple_encoder.py.bak     # per-temporal-slice VAE encoder
-├── encoder.py.bak            # configurable-blocks VideoEncoder (PyTorch-style)
-├── decoder.py.bak            # configurable-blocks VideoDecoder
-├── resnet.py.bak             # ResnetBlock3D, UNetMidBlock3D, PixelNorm
-├── sampling.py.bak           # SpaceToDepthDownsample, DepthToSpaceUpsample
-├── convolution.py.bak        # DualConv3d, CausalConv3d, PaddingModeType, ...
-└── text_to_video.py.bak      # legacy TextToVideoPipeline + GenerationConfig
+└── types.py                  # VideoLatentShape, SpatioTemporalScaleFactors
 ```
 
 ## Key Components

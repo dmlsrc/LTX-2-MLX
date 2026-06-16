@@ -858,7 +858,8 @@ Implementation:
 - The default path now uses LTX-specific STEEL subsets in
   `LTX_2_MLX/kernels/metal/` (no mask, no causal, no sinks, B=1/H=32,
   D=64/128).  The older compact subset and full vendored MLX snapshot have
-  been moved to `archive/steel_attention/` as historical parity references.
+  been removed from the working tree and remain available in git history as
+  historical parity references.
 - Apple's MIT license notice is preserved in
   `LTX_2_MLX/kernels/STEEL_ATTENTION_LICENSE.md`; the Metal resources also
   carry SPDX license comments.
@@ -985,8 +986,7 @@ Live-path simplification follow-up (2026-06-01):
 
 - Removed `LTX_STEEL_ATTN_IMPL` from the runtime dispatcher and archived the
   compact/vendor resources outside the package.  The live kernel path is now
-  lean-only; use git history or `archive/steel_attention/` for old parity
-  archaeology.
+  lean-only; use git history for old parity archaeology.
 
 Lean-kernel shave probes (2026-06-01):
 
@@ -1566,7 +1566,7 @@ tile alignment + the post-matmul split.  MLX's existing 3-separate-matmul
 dispatch is already at or near optimal for our shape.
 
 This also explains the earlier `self_qkv:pack` / `kv:pack` "neutral-to-tiny"
-results in `PERFORMANCE.md`'s archive.  Same underlying outcome,
+results in the historical notes in `PERFORMANCE.md`.  Same underlying outcome,
 measured directly this time.
 
 ### 2026-05-17: `mx.compile` around FF chain `[ABANDONED]`
