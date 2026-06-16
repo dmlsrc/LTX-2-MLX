@@ -335,16 +335,15 @@ def test_stacked_bars_share_count_column() -> None:
     9-char slot (the max of their natural widths)."""
     print("\n[7a] stacked bars share count column across disparate totals")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            small = bars.add(total=4, desc="small", unit="it", mininterval=0.0)
-            huge = bars.add(total=9999, desc="huger", unit="it", mininterval=0.0)
-            small._n = 4
-            huge._n = 9999
-            small._t_last = small._t_origin + 0.1
-            huge._t_last = huge._t_origin + 0.1
-            small_line = small._build_line()
-            huge_line = huge._build_line()
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        small = bars.add(total=4, desc="small", unit="it", mininterval=0.0)
+        huge = bars.add(total=9999, desc="huger", unit="it", mininterval=0.0)
+        small._n = 4
+        huge._n = 9999
+        small._t_last = small._t_origin + 0.1
+        huge._t_last = huge._t_origin + 0.1
+        small_line = small._build_line()
+        huge_line = huge._build_line()
     # The "| " after the count column must be at the same string index
     # in both lines (label is same length, bar is fixed-width, so the
     # only thing that could shift the divider is the count slot width).
@@ -368,22 +367,21 @@ def test_stacked_bars_share_visual_width() -> None:
     of the same visual width - driven by the same `bar_width` parameter."""
     print("\n[7] stacked bars share visual width across line lengths")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            short = bars.add(total=3, desc="short", unit="it", mininterval=0.0)
-            wide = bars.add(total=999, desc="wider", unit="frame", mininterval=0.0)
-            time.sleep(0.05)
-            short.update(1)
-            for _ in range(50):
-                time.sleep(0.001)
-                wide.update(1)
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        short = bars.add(total=3, desc="short", unit="it", mininterval=0.0)
+        wide = bars.add(total=999, desc="wider", unit="frame", mininterval=0.0)
+        time.sleep(0.05)
+        short.update(1)
+        for _ in range(50):
+            time.sleep(0.001)
+            wide.update(1)
 
-            def bar_seg(line: str) -> int:
-                m = re.search(r"\[([#-]+)\]", line)
-                return len(m.group(1)) if m else -1
+        def bar_seg(line: str) -> int:
+            m = re.search(r"\[([#-]+)\]", line)
+            return len(m.group(1)) if m else -1
 
-            ws = bar_seg(short._build_line())
-            ww = bar_seg(wide._build_line())
+        ws = bar_seg(short._build_line())
+        ww = bar_seg(wide._build_line())
     check(
         "both bars produced a [####----] segment",
         ws > 0 and ww > 0,
@@ -404,12 +402,11 @@ def test_stacked_bars_share_label_column() -> None:
     label padded to 10 chars + space + `[`)."""
     print("\n[8] stacked bars share label column across disparate desc lengths")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            short = bars.add(total=1, desc="x", unit="it", mininterval=0.0)
-            wide = bars.add(total=1, desc="much longer label", unit="it", mininterval=0.0)
-            short_line = short._build_line()
-            wide_line = wide._build_line()
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        short = bars.add(total=1, desc="x", unit="it", mininterval=0.0)
+        wide = bars.add(total=1, desc="much longer label", unit="it", mininterval=0.0)
+        short_line = short._build_line()
+        wide_line = wide._build_line()
 
     short_bracket = short_line.find("[")
     wide_bracket = wide_line.find("[")
@@ -440,18 +437,17 @@ def test_stacked_bars_share_pace_number_column() -> None:
     right edge at the same column)."""
     print("\n[9] stacked bars share pace-number column across magnitudes")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            fast = bars.add(total=1, desc="fast", unit="chunk", mininterval=0.0)
-            slow = bars.add(total=361, desc="slow", unit="frame", mininterval=0.0)
-            # Synthesize timings directly - avoid wall-clock variance.
-            fast._n = 1
-            fast._t_last = fast._t_origin + 0.00002    # ~50000 chunk/s
-            slow._n = 1
-            slow._t_last = slow._t_origin + 0.01       # ~100 frame/s
-            fast_line = fast._build_line()
-            # `slow_line` was rendered against the now-grown pace_number_width.
-            slow_line = slow._build_line()
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        fast = bars.add(total=1, desc="fast", unit="chunk", mininterval=0.0)
+        slow = bars.add(total=361, desc="slow", unit="frame", mininterval=0.0)
+        # Synthesize timings directly - avoid wall-clock variance.
+        fast._n = 1
+        fast._t_last = fast._t_origin + 0.00002    # ~50000 chunk/s
+        slow._n = 1
+        slow._t_last = slow._t_origin + 0.01       # ~100 frame/s
+        fast_line = fast._build_line()
+        # `slow_line` was rendered against the now-grown pace_number_width.
+        slow_line = slow._build_line()
 
     # Both lines should have a single pace number, right-justified in
     # the same column. The number's right edge sits immediately before
@@ -559,14 +555,13 @@ def test_write_above_bars_does_not_duplicate_bar_rows() -> None:
     """
     print("\n[11] bars.write() does not place bars on adjacent file lines")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            vae = bars.add(total=1, desc="VAE chunks", unit="chunk", mininterval=0.0)
-            vt = bars.add(total=10, desc="VT encode", unit="frame", mininterval=0.0)
-            vae.update(1)
-            for _ in range(10):
-                vt.update(1)
-            bars.write("INTERRUPTING MESSAGE")
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        vae = bars.add(total=1, desc="VAE chunks", unit="chunk", mininterval=0.0)
+        vt = bars.add(total=10, desc="VT encode", unit="frame", mininterval=0.0)
+        vae.update(1)
+        for _ in range(10):
+            vt.update(1)
+        bars.write("INTERRUPTING MESSAGE")
 
     # Strip ANSI escapes and apply `\r`-overwrite semantics:
     # within each newline-delimited file line, anything before the
@@ -624,11 +619,10 @@ def test_write_handles_multiline_messages() -> None:
     on its own row above the bars."""
     print("\n[12] bars.write() handles multi-line messages")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            bars.add(total=1, desc="bar", unit="it", mininterval=0.0)
-            bars.write("first line\nsecond line\nthird line")
-            bars.write("after\nmore")
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        bars.add(total=1, desc="bar", unit="it", mininterval=0.0)
+        bars.write("first line\nsecond line\nthird line")
+        bars.write("after\nmore")
 
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
     raw = ansi.sub("", buf.getvalue())
@@ -655,28 +649,27 @@ def test_lazy_bar_add_after_write() -> None:
     """
     print("\n[15] lazy bar add after bars.write(position='below')")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            s1 = bars.add(
-                total=4, desc="Stage 1", unit="step",
-                mininterval=0.0, show_step1=True,
-            )
-            for _ in range(4):
-                s1.update(1)
-            bars.write(
-                "  Upsampling latent 2x with spatial upscaler...",
-                position="below",
-            )
-            bars.write(
-                "  Distilled stage 2: 3 steps at 192x192",
-                position="below",
-            )
-            s2 = bars.add(
-                total=3, desc="Stage 2", unit="step",
-                mininterval=0.0, show_step1=True,
-            )
-            for _ in range(3):
-                s2.update(1)
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        s1 = bars.add(
+            total=4, desc="Stage 1", unit="step",
+            mininterval=0.0, show_step1=True,
+        )
+        for _ in range(4):
+            s1.update(1)
+        bars.write(
+            "  Upsampling latent 2x with spatial upscaler...",
+            position="below",
+        )
+        bars.write(
+            "  Distilled stage 2: 3 steps at 192x192",
+            position="below",
+        )
+        s2 = bars.add(
+            total=3, desc="Stage 2", unit="step",
+            mininterval=0.0, show_step1=True,
+        )
+        for _ in range(3):
+            s2.update(1)
 
     check(
         "stage 1 reached its total",
@@ -760,20 +753,19 @@ def test_raw_print_between_bar_updates_breaks_layout() -> None:
     print("\n[16] raw print() during bar lifetime corrupts layout (canary)")
 
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            bar = bars.add(
-                total=3, desc="bar", unit="step", mininterval=0.0,
-            )
-            bar.update(1)
-            bar.update(1)
-            bar.update(1)
-            # Simulate the pipeline-internal raw print bug: a print()
-            # lands on stderr while the bar is still alive.  Goes to
-            # the same stream as the bars' renders (we redirected
-            # stderr for the test), shifting the cursor's parked row.
-            sys.stderr.write("  Saved distilled stage latents: /tmp/x.npz\n")
-            # context-manager exit force-renders the bar one more time
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        bar = bars.add(
+            total=3, desc="bar", unit="step", mininterval=0.0,
+        )
+        bar.update(1)
+        bar.update(1)
+        bar.update(1)
+        # Simulate the pipeline-internal raw print bug: a print()
+        # lands on stderr while the bar is still alive.  Goes to
+        # the same stream as the bars' renders (we redirected
+        # stderr for the test), shifting the cursor's parked row.
+        sys.stderr.write("  Saved distilled stage latents: /tmp/x.npz\n")
+        # context-manager exit force-renders the bar one more time
 
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
     stripped = ansi.sub("", buf.getvalue())
@@ -816,21 +808,20 @@ def test_progress_message_routes_through_bars_write() -> None:
     print("\n[17] progress_message through bars.write() preserves layout")
 
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            bar = bars.add(
-                total=3, desc="bar", unit="step", mininterval=0.0,
-            )
-            bar.update(1)
-            bar.update(1)
-            bar.update(1)
-            # Pipeline-style: emit confirmation via bars.write() -
-            # this is what the fixed _save_distilled_two_stage_latents
-            # does when `progress_message` is supplied.
-            bars.write(
-                "  Saved distilled stage latents: /tmp/x.npz",
-                position="below",
-            )
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        bar = bars.add(
+            total=3, desc="bar", unit="step", mininterval=0.0,
+        )
+        bar.update(1)
+        bar.update(1)
+        bar.update(1)
+        # Pipeline-style: emit confirmation via bars.write() -
+        # this is what the fixed _save_distilled_two_stage_latents
+        # does when `progress_message` is supplied.
+        bars.write(
+            "  Saved distilled stage latents: /tmp/x.npz",
+            position="below",
+        )
 
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
     stripped = ansi.sub("", buf.getvalue())
@@ -1053,10 +1044,9 @@ def test_close_emits_carriage_return() -> None:
     """
     print("\n[13] close() resets cursor to column 0")
     buf = io.StringIO()
-    with redirect_stderr(buf):
-        with StackedPhaseBars() as bars:
-            bar = bars.add(total=1, desc="b", unit="it", mininterval=0.0)
-            bar.update(1)
+    with redirect_stderr(buf), StackedPhaseBars() as bars:
+        bar = bars.add(total=1, desc="b", unit="it", mininterval=0.0)
+        bar.update(1)
 
     raw = buf.getvalue()
     # The final character written by close() should be `\r` (the
