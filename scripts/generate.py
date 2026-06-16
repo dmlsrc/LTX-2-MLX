@@ -101,7 +101,7 @@ def resolve_output_backend(
       - tier in VT_AUTO_TIERS (HEVC Main10)      -> videotoolbox
       - everything else                          -> ffmpeg
 
-    Explicit `videotoolbox` is validated against the tier — non-HEVC
+    Explicit `videotoolbox` is validated against the tier - non-HEVC
     tiers raise here rather than failing deep inside AVAssetWriter.
     """
     vsr_on = _vsr_active(vsr_spatial_mode, vsr_target_fps)
@@ -220,16 +220,16 @@ ATTN_LAYOUT_SPECS = {
     "to_k": ("pretranspose",),
     "to_v": ("pretranspose",),
     # to_gate_logits is supported but measured neutral-to-slight-regression
-    # (weights too tiny — 4096*32 / 2048*32 — for the implicit transpose to
+    # (weights too tiny - 4096*32 / 2048*32 - for the implicit transpose to
     # matter).  Opt-in via explicit --video-attn-layout if you want to A/B.
     "to_gate_logits": ("pretranspose",),
 }
-# Default to ONLY project_out pretranspose for video FF — that's the single
+# Default to ONLY project_out pretranspose for video FF - that's the single
 # matmul where pretranspose rescues a kernel-selection cliff (35 % win,
-# 5.17 → 7.95 TFlops/s at (T=8784, K=16384, N=4096) BF16 per
+# 5.17 -> 7.95 TFlops/s at (T=8784, K=16384, N=4096) BF16 per
 # scripts/bench_ff_microbench.py bf16_layout).  project_in pretranspose was a
 # 2.5 % regression in isolated microbench and neutral end-to-end per the older
-# PERFORMANCE.md observation — dropped from default but the flag still
+# PERFORMANCE.md observation - dropped from default but the flag still
 # supports it (--video-ff-layout project_in:pretranspose,project_out:pretranspose
 # to A/B against this default).  See docs/PERFORMANCE_NOTES.md for the
 # microbench data and reasoning.
@@ -711,7 +711,7 @@ def _ensure_audio_ff_layout_for_dtype(
     layout_specs: tuple[tuple[str, str], ...],
     audio_ff_dtype: str | None,
 ) -> tuple[tuple[str, str], ...]:
-    """Auto-add audio FF pretranspose when FP16, avoiding FP16 x BF16 → FP32
+    """Auto-add audio FF pretranspose when FP16, avoiding FP16 x BF16 -> FP32
     mixed-dtype promotion.  Mirror of ``_ensure_ff_layout_for_dtype`` minus
     the kernel-cliff motivation (audio K=8192 doesn't hit it).
     """
@@ -733,7 +733,7 @@ def _ensure_ff_layout_for_dtype(
 ) -> tuple[tuple[str, str], ...]:
     """Auto-add ``project_in/project_out:pretranspose`` when --video-ff-dtype
     is FP16.  Mandatory for two reasons: (1) without a pretransposed dtype-
-    baked cache, project_in's nn.Linear promotes FP16 x BF16 → FP32; (2)
+    baked cache, project_in's nn.Linear promotes FP16 x BF16 -> FP32; (2)
     naive FP16 at K=16384 hits a deeper BlockLoader cliff than BF16 (4.95
     vs 9.51 TFlops/s with vs without pretranspose).  See
     PERFORMANCE_NOTES.md "BlockLoader cliff characterization" entry.
@@ -1047,7 +1047,6 @@ def batched_cfg_forward(
     # Stack along batch dimension: [1, T, C] -> [2, T, C]
     batched_latent = mx.concatenate([latent_patchified, latent_patchified], axis=0)
     batched_context = mx.concatenate([text_encoding, null_encoding], axis=0)
-    batched_mask = mx.concatenate([text_mask, null_mask], axis=0)
     batched_positions = mx.concatenate([positions, positions], axis=0)
     batched_timesteps = mx.array([sigma, sigma])
 
@@ -1324,7 +1323,7 @@ def _simple_progress(iterable, desc, total):
 T2V_SYSTEM_PROMPT = """Describe the video in extreme detail, focusing on the visual content, without any introductory phrases."""
 
 # System prompt for prompt enhancement (used to expand short prompts into detailed descriptions)
-ENHANCE_SYSTEM_PROMPT = """You enhance short video descriptions into detailed prompts for a video generation model. You MUST preserve the exact subject, characters, and scene from the original — never replace or reinterpret them.
+ENHANCE_SYSTEM_PROMPT = """You enhance short video descriptions into detailed prompts for a video generation model. You MUST preserve the exact subject, characters, and scene from the original - never replace or reinterpret them.
 
 Write a single flowing paragraph (4-8 sentences, present tense) covering these elements in order:
 
@@ -1368,7 +1367,7 @@ def enhance_prompt(
     temperature: float = 0.7,
 ) -> str:
     """
-    Enhance prompt is not available — the Gemma QAT model used for encoding
+    Enhance prompt is not available - the Gemma QAT model used for encoding
     cannot do text generation. Returns the original prompt unchanged.
     """
     print("  Prompt enhancement not available (Gemma QAT model cannot generate text)")
@@ -1598,7 +1597,7 @@ def encode_av_gemma_batch(
     # hidden states after the forward pass, but running Gemma on the padded
     # 1024-token sequence reproduces stock numerics exactly.  Set
     # LTX_PAD_PROMPT_TO_MAX=0 to skip padding (faster on short prompts, but
-    # introduces small bf16 drift relative to stock — see docs).
+    # introduces small bf16 drift relative to stock - see docs).
     pad_to_max = os.environ.get("LTX_PAD_PROMPT_TO_MAX", "1") != "0"
 
     gemma_outputs = []
@@ -1686,7 +1685,7 @@ def encode_av_gemma_batch(
     print("  Loading AV text encoder projection...")
     config_path = ltx_config_path or ltx_weights_path
     if is_v2_model(config_path):
-        print("  Detected LTX-2.3 (V2) model — using V2 text encoder")
+        print("  Detected LTX-2.3 (V2) model - using V2 text encoder")
         text_encoder = create_av_text_encoder_v2_from_checkpoint(config_path)
         load_av_text_encoder_v2_weights(text_encoder, ltx_weights_path)
     else:
@@ -2589,7 +2588,7 @@ def generate_video(
     prompt: str,
     height: int = 288,
     width: int = 512,
-    num_frames: int = 97,  # ~32s at 24fps (97 latent frames → 769 pixel frames via 8x VAE temporal compression)
+    num_frames: int = 97,  # ~32s at 24fps (97 latent frames -> 769 pixel frames via 8x VAE temporal compression)
     num_steps: int | None = None,
     cfg_scale: float | None = None,
     guidance_rescale: float = 0.7,  # Rescale CFG output to prevent variance explosion
@@ -3091,7 +3090,7 @@ def generate_video(
         print("Audio generation: ENABLED (stereo 24kHz)")
 
     # Resolve and report internal-audio state.  Validation: --internal-audio off
-    # with --generate-audio is incoherent — the audio branch produces what the
+    # with --generate-audio is incoherent - the audio branch produces what the
     # decoder needs.  Reject it loudly rather than silently turning off audio.
     if internal_audio == "off" and generate_audio:
         raise SystemExit(
@@ -3343,7 +3342,7 @@ def generate_video(
             #
             # We still write the text-conditioning sidecar when requested,
             # just without the negative fields (the loader and replay path
-            # both tolerate missing negative — they fall back to zeros).
+            # both tolerate missing negative - they fall back to zeros).
             # Re-enable with LTX_ENCODE_UNUSED_NEGATIVE=1 for debugging.
             skip_negative = (
                 (distilled_two_stage_requested or distilled_single_pass_requested)
@@ -3428,7 +3427,7 @@ def generate_video(
             print("  WARNING: Text conditioning sidecar requested, but positive text encoding is unavailable")
         else:
             # null_encoding/null_mask are None when distilled cfg=1.0
-            # skipped the negative encoding — sidecar writer handles
+            # skipped the negative encoding - sidecar writer handles
             # that by omitting the negative fields.
             save_text_conditioning_sidecar(
                 text_sidecar_path(output_path),
@@ -3448,7 +3447,7 @@ def generate_video(
     if use_av_encoder:
         print("\n[2/5] Loading AudioVideo transformer...")
         if not use_placeholder and transformer_weights_path:
-            # Audio pretranspose mirrors video by default for AV models — the
+            # Audio pretranspose mirrors video by default for AV models - the
             # audio modules see the same per-step dispatch pattern, so the
             # same weight.T contiguity helps.  Disable with
             # LTX_DISABLE_AUDIO_PRETRANSPOSE=1.
@@ -3461,7 +3460,7 @@ def generate_video(
             # If --audio-ff-dtype is FP16, enforce both project_in and
             # project_out pretranspose on the audio side too (independent
             # of whether video FF is also FP16).  Otherwise the audio
-            # project_in matmul would do FP16 x BF16 → FP32 promotion.
+            # project_in matmul would do FP16 x BF16 -> FP32 promotion.
             _audio_ff_layout_specs = _ensure_audio_ff_layout_for_dtype(
                 _audio_ff_layout_specs,
                 audio_ff_dtype
@@ -4235,7 +4234,7 @@ def generate_video(
         #
         # Internal-audio resolution.  By default V2/AV models always run the
         # internal audio branch (audio self-attn + A2V/V2A cross-modal) even
-        # when --generate-audio is off, and discard the result — wasted compute.
+        # when --generate-audio is off, and discard the result - wasted compute.
         # --internal-audio gives users control:
         #   auto (default): on iff --generate-audio
         #   on            : always on
@@ -4361,7 +4360,7 @@ def generate_video(
                 def progress_message(message: str) -> None:
                     # Pipeline status lines ("Saved final latents:",
                     # "VAE decode started", etc.) land BELOW the
-                    # denoise bar via position="below" — bar stays
+                    # denoise bar via position="below" - bar stays
                     # frozen at its row, messages stack permanently
                     # under it as scrollback.
                     denoise_bars.write(message, position="below")
@@ -4393,7 +4392,7 @@ def generate_video(
             #
             # The bar stack is owned here (not by the encoder) so we can
             # stack a "VAE chunks" bar above the encoder's "VT encode"
-            # frames bar — same UX as scripts/vsr_harness.py.
+            # frames bar - same UX as scripts/vsr_harness.py.
             from LTX_2_MLX.pipelines.streaming import (
                 iter_decoded_chunks, latent_dims, plan_vae_tiling,
             )
@@ -4486,7 +4485,7 @@ def generate_video(
             print(f"  Raw video shape: {video_np.shape}, dtype: {video_np.dtype}")
             # Squeeze any singleton dimensions
             video_np = np.squeeze(video_np)
-            # Handle (C, T, H, W) format — C=3 is always smallest dim
+            # Handle (C, T, H, W) format - C=3 is always smallest dim
             if video_np.ndim == 4 and video_np.shape[0] == 3:
                 video_np = np.transpose(video_np, (1, 2, 3, 0))  # (T, H, W, C)
             # Convert float32 [-1,1] to uint8 [0,255] (VAE output range is [-1, 1])
@@ -4957,7 +4956,7 @@ def generate_video(
 # save_video / save_video_with_audio moved to LTX_2_MLX.video_encoder
 # (encode_video, called above from each pipeline). The legacy bodies took
 # a `speed` multiplier and re-encoded via PNG round-tripping; both have
-# been dropped — speed adjustment belongs in an editor, and the new
+# been dropped - speed adjustment belongs in an editor, and the new
 # encoder pipes raw frames directly into ffmpeg.
 
 
@@ -5020,8 +5019,8 @@ def main():
         help=(
             "VideoToolbox spatial upscale, applied after VAE decode and "
             "before AVAssetWriter.  Scale is implied by the mode "
-            "(fast=2x VTLowLatency; balanced=4x HQ Video — temporal "
-            "feedback; image=4x HQ Image — per-frame deterministic).  "
+            "(fast=2x VTLowLatency; balanced=4x HQ Video - temporal "
+            "feedback; image=4x HQ Image - per-frame deterministic).  "
             "off (default) skips the upscale entirely.  Engaging any "
             "non-off mode forces --output-backend=videotoolbox.  This "
             "is independent from the model-based --upscale-spatial; "
@@ -5427,7 +5426,7 @@ def main():
             "but the per-matmul FP16 win is real (~10-13%%) so exposed for "
             "real-world A/B testing.  No kernel cliff at audio K=8192 (unlike "
             "video K=16384), but auto-pairs with audio FF pretranspose to "
-            "avoid the FP16 x BF16 → FP32 mixed-dtype promotion fallback.  "
+            "avoid the FP16 x BF16 -> FP32 mixed-dtype promotion fallback.  "
             "Default (omit flag): keep audio FF at the loaded checkpoint dtype."
         ),
     )
@@ -5843,7 +5842,7 @@ def main():
         args.save_text_embeddings = True
         args.save_run_log = True
         args.save_audio_sidecar = True
-        # The pre-VSR original mp4 is a sidecar in spirit — it lives next
+        # The pre-VSR original mp4 is a sidecar in spirit - it lives next
         # to the requested output and helps reproduce / compare runs.
         # Implicit no-op when no VT post-processing is engaged (the
         # companion writer only fires when vsr or vtfrc is alive).

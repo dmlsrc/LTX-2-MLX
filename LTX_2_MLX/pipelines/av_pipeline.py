@@ -258,7 +258,7 @@ class AVPipeline:
         """Save final video/audio latents as a sidecar npz file.
 
         See `_save_distilled_two_stage_latents` for the
-        `progress_message` rationale — same fallback semantics.
+        `progress_message` rationale - same fallback semantics.
         """
         arrays = {
             "final_video_latent": cls._latent_to_numpy(video_latent),
@@ -292,7 +292,7 @@ class AVPipeline:
 
         When `progress_message` is supplied the "Saved distilled stage
         latents: ..." confirmation is routed through it instead of a
-        direct `print()` — necessary when the caller is rendering
+        direct `print()` - necessary when the caller is rendering
         progress bars that would otherwise be stomped by a raw stdout
         write.  Default (no callable) falls back to `print()` for
         callers that don't have a progress UI active.
@@ -590,7 +590,7 @@ class AVPipeline:
             sigma = float(sigmas[step_idx])
             sigma_next = float(sigmas[step_idx + 1])
 
-            # ── First evaluation: denoised at current sigma ──
+            # -- First evaluation: denoised at current sigma --
             pos_modality = modality_from_state(
                 video_state, positive_context, sigma
             )
@@ -628,7 +628,7 @@ class AVPipeline:
 
             denoised = maybe_post_process_latent(denoised, video_state)
 
-            # ── Euler prediction to get predicted sample ──
+            # -- Euler prediction to get predicted sample --
             from ..core_utils import to_velocity
             velocity = to_velocity(video_state.latent, sigmas[step_idx], denoised)
             dt = sigma_next - sigma
@@ -644,7 +644,7 @@ class AVPipeline:
                     callback(step_idx + 1, num_steps)
                 continue
 
-            # ── Second evaluation: denoised at predicted point ──
+            # -- Second evaluation: denoised at predicted point --
             predicted_state = video_state.replace(latent=predicted)
             pos_modality_2 = modality_from_state(
                 predicted_state, positive_context, sigma_next
@@ -662,7 +662,7 @@ class AVPipeline:
 
             denoised_at_predicted = maybe_post_process_latent(denoised_at_predicted, video_state)
 
-            # ── Heun corrector step ──
+            # -- Heun corrector step --
             new_latent = stepper.step(
                 sample=video_state.latent,
                 denoised_sample=denoised,
@@ -727,14 +727,18 @@ class AVPipeline:
             profile_events = [] if profile_step in profile_step_set else None
             profile_started_at = time.perf_counter() if profile_events is not None else 0.0
 
-            def mark_profile(name: str, *arrays: mx.array) -> None:
+            def mark_profile(
+                name: str,
+                *arrays: mx.array,
+                _profile_events=profile_events,
+            ) -> None:
                 nonlocal profile_started_at
-                if profile_events is None:
+                if _profile_events is None:
                     return
                 if arrays:
                     mx.eval(*arrays)
                 now = time.perf_counter()
-                profile_events.append((name, now - profile_started_at))
+                _profile_events.append((name, now - profile_started_at))
                 profile_started_at = now
 
             sigma = float(sigmas[step_idx])
@@ -1068,14 +1072,18 @@ class AVPipeline:
             )
             profile_started_at = time.perf_counter() if profile_events is not None else 0.0
 
-            def mark_profile(name: str, *arrays: mx.array) -> None:
+            def mark_profile(
+                name: str,
+                *arrays: mx.array,
+                _profile_events=profile_events,
+            ) -> None:
                 nonlocal profile_started_at
-                if profile_events is None:
+                if _profile_events is None:
                     return
                 if arrays:
                     mx.eval(*arrays)
                 now = time.perf_counter()
-                profile_events.append((name, now - profile_started_at))
+                _profile_events.append((name, now - profile_started_at))
                 profile_started_at = now
 
             video_modality = modality_from_state(
@@ -1102,7 +1110,7 @@ class AVPipeline:
                         blocks=profile_blocks,
                     )
                 if velocity_mode:
-                    # Raw velocity outputs — skip the X0 wrapper.
+                    # Raw velocity outputs - skip the X0 wrapper.
                     result = (
                         velocity_transformer(video_modality, audio_modality)
                         if audio_modality is not None
@@ -1174,7 +1182,7 @@ class AVPipeline:
                     audio_state = audio_state.replace(latent=new_audio_latent)
                     # Sync eval (one call, both arrays).  Profiled vs async_eval:
                     # same wall clock, but ~38% fewer set_copy_output_data calls
-                    # (125 → 78) so the lazy graph stays cleaner.  Profiled vs
+                    # (125 -> 78) so the lazy graph stays cleaner.  Profiled vs
                     # separate calls: combined is slightly faster at small T.
                     mx.eval(video_state.latent, audio_state.latent)
                 else:
@@ -1190,7 +1198,7 @@ class AVPipeline:
             # Profiling helper: LTX_PROFILE_STOP_AFTER_STEPS=N exits cleanly
             # after step N of the current loop.  Combine with
             # LTX_PROFILE_PAUSE_BEFORE_DENOISE=1 to capture a precise window
-            # — e.g. N=2 gives one warmup step + one stable step.
+            # - e.g. N=2 gives one warmup step + one stable step.
             _stop_n_str = os.environ.get("LTX_PROFILE_STOP_AFTER_STEPS")
             if _stop_n_str:
                 try:
@@ -1244,7 +1252,7 @@ class AVPipeline:
         chunk concatenation and returns `(final_video_latent, audio_waveform)`
         instead.  The caller is responsible for running decode (typically via
         `LTX_2_MLX.pipelines.streaming.decode_video_chunks_streaming`) and
-        consuming chunks as they arrive — useful for streaming-encoder paths
+        consuming chunks as they arrive - useful for streaming-encoder paths
         that can start encoding chunk 1 while chunk 2 is still in the VAE,
         and for high-resolution clips where the full decoded tensor would
         otherwise consume gigabytes of unified memory.
@@ -2159,7 +2167,7 @@ class AVPipeline:
         Generate video (and optionally audio) using single-stage CFG pipeline.
 
         When `decode_video=False`, returns `(final_video_latent, audio_waveform)`
-        instead of decoding inside the pipeline — see
+        instead of decoding inside the pipeline - see
         `generate_distilled_two_stage` for the streaming-decode rationale.
 
         Args:
@@ -2196,7 +2204,7 @@ class AVPipeline:
         internal_audio_active = self.is_av_model and (config.use_internal_audio_branch or config.audio_enabled)
 
         # Detect no-CFG fast path: when both video and audio CFG scales are 1.0,
-        # the negative encoding is mathematically a no-op (out = neg + 1·(pos-neg)
+        # the negative encoding is mathematically a no-op (out = neg + 1*(pos-neg)
         # = pos).  Skip negative encoding altogether and route through the
         # simple no-CFG loop, saving one full transformer pass per step.
         # This is the default for the distilled model (cfg_scale = 1.0).
@@ -2337,7 +2345,7 @@ class AVPipeline:
                 )
 
             if skip_cfg and sampler != "heun" and _stg_guider is None:
-                # Fast path: no CFG, no STG, no Heun — just the positive-only
+                # Fast path: no CFG, no STG, no Heun - just the positive-only
                 # transformer pass per step.  Saves one full transformer forward
                 # per step vs the CFG loop.
                 video_state, audio_state = self._denoise_loop_simple_av(
@@ -2411,7 +2419,7 @@ class AVPipeline:
                     f"  STG guidance: scale={stg_scale}, blocks={stg_blocks or 'all'}, cutoff={cutoff_pct}%"
                 )
 
-            # Video-only denoising — select loop based on sampler
+            # Video-only denoising - select loop based on sampler
             if sampler == "heun":
                 heun_stepper = HeunDiffusionStep()
                 emit_progress_message("  Using Heun sampler (2x model evals per step)")
@@ -2462,7 +2470,7 @@ class AVPipeline:
                 raise ValueError("Video decoder required for temporal upscaling.")
             input_frames = final_video_latent.shape[2]
             emit_progress_message(
-                f"  Temporal upscaling: {input_frames} → {input_frames * 2 - 1} latent frames..."
+                f"  Temporal upscaling: {input_frames} -> {input_frames * 2 - 1} latent frames..."
             )
             # Un-normalize latent (upscaler trained on raw latents)
             std = self.video_decoder.std_of_means.reshape(1, -1, 1, 1, 1)

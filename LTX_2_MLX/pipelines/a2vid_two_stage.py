@@ -158,7 +158,7 @@ def load_audio_file(
         max_samples = int(max_duration * sr)
         data = data[:, :max_samples]
 
-    # Simple resample if needed (nearest neighbor — not ideal but functional)
+    # Simple resample if needed (nearest neighbor - not ideal but functional)
     if sr != target_sr:
         num_output = int(data.shape[1] * target_sr / sr)
         indices = np.linspace(0, data.shape[1] - 1, num_output).astype(int)
@@ -232,7 +232,7 @@ class A2VidPipelineTwoStage:
         # Check if video_encoder has an audio encoder component
         # For now, return None to indicate audio should be generated, not encoded
         # Full implementation would use vae_encode_audio
-        print("  Note: Audio VAE encoder not yet ported — audio will be generated from prompt")
+        print("  Note: Audio VAE encoder not yet ported - audio will be generated from prompt")
         return None
 
     def _video_only_denoise_loop(
@@ -258,9 +258,9 @@ class A2VidPipelineTwoStage:
 
             result = self.transformer(video_mod, audio_mod)
             if isinstance(result, tuple):
-                denoised_v, denoised_a = result
+                denoised_v = result[0]
             else:
-                denoised_v, denoised_a = result, None
+                denoised_v = result
 
             # CFG for video only
             if cfg_scale > 1.0 and negative_video_context is not None:
@@ -276,7 +276,7 @@ class A2VidPipelineTwoStage:
             video_state = video_state.replace(latent=new_v)
             mx.eval(video_state.latent)
 
-            # Audio stays frozen — do NOT update audio_state.latent
+            # Audio stays frozen - do NOT update audio_state.latent
 
             if callback:
                 callback(step_idx + 1, num_steps)
@@ -381,7 +381,7 @@ class A2VidPipelineTwoStage:
         video_state = apply_conditionings(video_state, stage_1_conditionings, video_tools)
         video_state = noiser(video_state, noise_scale=1.0)
 
-        # Audio state — frozen (denoise_mask = 0)
+        # Audio state - frozen (denoise_mask = 0)
         audio_shape = AudioLatentShape.from_video_pixel_shape(
             stage_1_pixel_shape,
             channels=config.audio_vae_channels, mel_bins=config.audio_mel_bins,
@@ -393,7 +393,7 @@ class A2VidPipelineTwoStage:
         if initial_audio_latent is not None:
             # Use encoded audio as frozen latent
             audio_state = audio_tools.create_initial_state(dtype=config.dtype, initial_latent=initial_audio_latent)
-            # Set denoise_mask to 0 — audio stays frozen
+            # Set denoise_mask to 0 - audio stays frozen
             frozen_mask = mx.zeros_like(audio_state.denoise_mask)
             audio_state = LatentState(
                 latent=audio_state.latent,
@@ -403,7 +403,7 @@ class A2VidPipelineTwoStage:
                 uniform_mask=False,  # all-zeros mask, not all-ones
             )
         else:
-            # No encoded audio — generate from noise (but still with audio context)
+            # No encoded audio - generate from noise (but still with audio context)
             audio_state = audio_tools.create_initial_state(dtype=config.dtype)
             audio_state = noiser(audio_state, noise_scale=1.0)
 

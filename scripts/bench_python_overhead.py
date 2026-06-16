@@ -86,8 +86,6 @@ class FakeBlock:
         run_a2v = run_vx and ax is not None and ax >= 0
         run_v2a = run_ax and vx is not None and vx >= 0
 
-        skip_video_self = perturbations is not None and False
-        skip_audio_self = perturbations is not None and False
         skip_a2v = perturbations is not None and False
         skip_v2a = perturbations is not None and False
 

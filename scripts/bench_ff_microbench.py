@@ -23,7 +23,7 @@ Usage (from LTX-2-MLX repo root):
 Available benches:
     gelu                - standalone nn.gelu_approx at FF intermediate shape
     qkv_separate_vs_packed - 3 separate Q/K/V matmuls vs 1 packed matmul
-    ff_chain            - matmul → gelu → matmul (naive vs lazy vs mx.compile)
+    ff_chain            - matmul -> gelu -> matmul (naive vs lazy vs mx.compile)
     sdpa_floor          - mx.fast.scaled_dot_product_attention at video_self_attn shape
     sdpa_t_sweep        - SDPA at neighbor T values around 8784 to find
                           tile-alignment cliffs (is padding to a friendlier T
@@ -46,8 +46,8 @@ Available benches:
                           at the smaller audio dimensions, or whether audio
                           should keep its existing pretranspose defaults.
     fused_ffn_feasibility - Bound the per-call wall AND peak-memory savings a
-                          hypothetical fused (matmul→GELU→matmul) Metal kernel —
-                          or a streamed inner-dim variant on top of MLX —
+                          hypothetical fused (matmul->GELU->matmul) Metal kernel -
+                          or a streamed inner-dim variant on top of MLX -
                           could ever deliver vs the stock path.  Reports stock
                           wall, two GEMM-floor scenarios (additive sum and
                           chained-no-GELU), GELU-pass cost in isolation, peak
@@ -57,7 +57,7 @@ Available benches:
                           hardware.  Sweeps `x*1.0`, `x+x`, `x+y` at tensor
                           sizes from 1 MB to 512 MB plus LTX-specific shapes
                           (residual 72 MB, FF hidden 288 MB).  Calibration
-                          probe — use the peak GB/s to grade every other
+                          probe - use the peak GB/s to grade every other
                           bandwidth-bound op below.
     adaln_residual      - AdaLN modulation + gated-residual chain at residual
                           stream shape (1, T, D).  Compares inline vs
@@ -75,8 +75,8 @@ Available benches:
     vae_ops             - Per-op breakdown of the native-conv3d VAE decoder
                           hot path (nn.Conv3d, mx.fast.rms_norm pixel-norm,
                           nn.silu, full resnet block) at three BFHWC shapes
-                          spanning the decoder progression (bottleneck →
-                          mid → late).  Bounds the payoff of the pending
+                          spanning the decoder progression (bottleneck ->
+                          mid -> late).  Bounds the payoff of the pending
                           upstream mx.conv_general int-overflow fix.
 
 Each bench prints a result block. Compare numbers across modes within a
@@ -86,7 +86,7 @@ Notes:
 - Pre-transposes weights via mx.contiguous(weight.T) to match production
   (matches the `--video-ff-layout` and `--video-attn-layout` default stack).
 - Uses BF16 throughout to match production compute dtype.
-- mx.eval barriers + time.monotonic_ns timing — same methodology as
+- mx.eval barriers + time.monotonic_ns timing - same methodology as
   scripts/sdpa_dtype_probe.py.
 - Compile flag (LTX_DISABLE_COMPILED_*) is NOT toggled here; these are
   microbenches of bare ops, not the full transformer.
@@ -189,7 +189,7 @@ def _time_and_peak(fn: Callable[[], mx.array], warmup: int, iters: int) -> tuple
     run one probe call, measure peak - baseline.  Then run timed iters.
 
     The returned peak is "additional bytes above the persistent baseline at
-    entry" — i.e. transient working-set for one call, not absolute allocation.
+    entry" - i.e. transient working-set for one call, not absolute allocation.
     """
     for _ in range(warmup):
         out = fn()
@@ -327,7 +327,7 @@ def bench_qkv_separate_vs_packed(warmup: int, iters: int) -> None:
     delta_ms = sep_mean - pack_mean
     delta_pct = 100 * delta_ms / sep_mean if sep_mean else 0.0
     print()
-    print(f"  Delta: separate {sep_mean:.3f} ms → packed {pack_mean:.3f} ms "
+    print(f"  Delta: separate {sep_mean:.3f} ms -> packed {pack_mean:.3f} ms "
           f"= {delta_ms:+.3f} ms ({delta_pct:+.1f} %)")
     if delta_ms > 0:
         per_run = delta_ms * 96  # 48 blocks x 2 steps
@@ -335,17 +335,17 @@ def bench_qkv_separate_vs_packed(warmup: int, iters: int) -> None:
               f"(48 blocks x 2 steps) = {per_run:.0f} ms = "
               f"{per_run/2:.0f} ms / step ({100*per_run/2/45500:.2f} % of 45.5 s/step)")
     else:
-        print("  Packed is SLOWER — not worth pursuing.")
+        print("  Packed is SLOWER - not worth pursuing.")
 
 
 def bench_ff_chain(warmup: int, iters: int) -> None:
-    """Full FF chain: matmul → gelu → matmul, three variants.
+    """Full FF chain: matmul -> gelu -> matmul, three variants.
 
     Question: does mx.compile fuse this?  The MLX source says no
     (matmul not in fusable set), but worth verifying empirically.
 
     Variants:
-    - naive: three eval boundaries (matmul, gelu, matmul) — uppermost cost
+    - naive: three eval boundaries (matmul, gelu, matmul) - uppermost cost
     - lazy: one mx.eval at the end of the chain (production code path)
     - compiled: wrap the whole chain in mx.compile
     """
@@ -360,7 +360,7 @@ def bench_ff_chain(warmup: int, iters: int) -> None:
     w_out_t, b_out = _bf16_linear_pretransposed(FF_INNER, D)
     mx.eval(x, w_in_t, b_in, w_out_t, b_out)
 
-    # Naive: forces eval at each step (worst case — measures kernel dispatch
+    # Naive: forces eval at each step (worst case - measures kernel dispatch
     # overhead and serial dependence)
     def naive():
         h = _linear(w_in_t, b_in, x)
@@ -374,7 +374,7 @@ def bench_ff_chain(warmup: int, iters: int) -> None:
     _report("naive (eval per op)", durs_naive,
             notes="matmul / gelu / matmul with eval barriers between")
 
-    # Lazy: production code path — one eval at end, MLX scheduler decides
+    # Lazy: production code path - one eval at end, MLX scheduler decides
     def lazy():
         h = _linear(w_in_t, b_in, x)
         h = nn.gelu_approx(h)
@@ -415,14 +415,14 @@ def bench_ff_chain(warmup: int, iters: int) -> None:
         print("  Conclusion: ~equal. mx.compile does NOT fuse matmul+activation. "
               "Confirms MLX source inspection (is_fusable() excludes matmul).")
     elif delta > 0:
-        print("  Conclusion: compile is faster — possible kernel fusion or "
+        print("  Conclusion: compile is faster - possible kernel fusion or "
               "better scheduling. Worth investigating further.")
     else:
         print("  Conclusion: compile is slower (within noise?). Re-run with more iters.")
 
 
 def bench_sdpa_floor(warmup: int, iters: int) -> None:
-    """SDPA at the video_self_attn shape — confirms the 230 ms/call floor.
+    """SDPA at the video_self_attn shape - confirms the 230 ms/call floor.
 
     Cross-validates our per-call probe and the MLX SDPA tile-floor
     analysis.  If this comes out very different from 230 ms, the
@@ -504,7 +504,6 @@ def bench_quant_matmul(warmup: int, iters: int) -> None:
         def naive(_x=x, _W=W_NK, _b=bias):
             return mx.addmm(_b, _x, _W.T)
         durs_naive = _time_call(naive, warmup=warmup, iters=iters)
-        mean_naive = sum(durs_naive) / len(durs_naive)
 
         # Mode 2: BF16 pretranspose -- production default
         # mx.contiguous(W.T) gives a (K, N) contiguous weight matrix, then
@@ -526,7 +525,6 @@ def bench_quant_matmul(warmup: int, iters: int) -> None:
         if "biases" in qlinear:
             mx.eval(qlinear.biases)
         durs_quant = _time_call(lambda _q=qlinear, _x=x: _q(_x), warmup=warmup, iters=iters)
-        mean_quant = sum(durs_quant) / len(durs_quant)
 
         # Report
         for mode_label, durs in [
@@ -562,9 +560,9 @@ def bench_bf16_layout(warmup: int, iters: int) -> None:
     `to_q/to_k/to_v/to_out:pretranspose` for video attention -- but the
     isolated-matmul win is asymmetric across shapes:
     - "tall-skinny output" matmuls (K large, N small, like FF project_out
-      16384→4096): pretranspose can be a massive win because the implicit
+      16384->4096): pretranspose can be a massive win because the implicit
       W.T transpose moves a lot of bytes.
-    - "wide output" matmuls (K small, N large, like FF project_in 4096→16384):
+    - "wide output" matmuls (K small, N large, like FF project_in 4096->16384):
       pretranspose is essentially neutral.
     - Square 4096x4096 attention matmuls: tied within noise.
 
@@ -613,7 +611,6 @@ def bench_bf16_layout(warmup: int, iters: int) -> None:
         def pretrans(_x=x, _W=W_T_contig, _b=bias):
             return mx.addmm(_b, _x, _W)
         durs_pretrans = _time_call(pretrans, warmup=warmup, iters=iters)
-        mean_pretrans = sum(durs_pretrans) / len(durs_pretrans)
 
         # Report
         for mode_label, durs in [
@@ -704,7 +701,6 @@ def bench_bf16_layout_audio(warmup: int, iters: int) -> None:
         def pretrans(_x=x, _W=W_T_contig, _b=bias):
             return mx.addmm(_b, _x, _W)
         durs_pretrans = _time_call(pretrans, warmup=warmup, iters=iters)
-        mean_pretrans = sum(durs_pretrans) / len(durs_pretrans)
 
         for mode_label, durs in [
             ("BF16 naive (no layout)",   durs_naive),
@@ -754,8 +750,8 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
     | 8960 | 560  | 280  | 140  | 70    | 128-aligned (+176)  |
     | 9216 | 576  | 288  | 144  | 72    | 128-aligned (+432)  |
 
-    Normalized cost (ms / T² to remove the O(T²) scaling) makes the
-    cliffs visible — a perfectly-scaling kernel would have constant
+    Normalized cost (ms / T^2 to remove the O(T^2) scaling) makes the
+    cliffs visible - a perfectly-scaling kernel would have constant
     normalized cost across all T.
     """
     print()
@@ -769,7 +765,6 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
     T_values = [8704, 8736, 8768, 8784, 8800, 8832, 8896, 8960, 9216]
     scale = 1.0 / (D_HEAD ** 0.5)
 
-    baseline_mean = None
     rows: list[tuple] = []
 
     for T_val in T_values:
@@ -788,8 +783,8 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
 
         durs = _time_call(_call, warmup=warmup, iters=iters)
         mean_ms = sum(durs) / len(durs)
-        # Normalize by T² (SDPA QK and attn*V are both O(T² D H), constant factors aside)
-        norm_ns_per_T2 = (mean_ms * 1e6) / (T_val * T_val)  # ns per (T tokens)²
+        # Normalize by T^2 (SDPA QK and attn*V are both O(T^2 D H), constant factors aside)
+        norm_ns_per_T2 = (mean_ms * 1e6) / (T_val * T_val)  # ns per (T tokens)^2
 
         if T_val == 8784:
             baseline_mean = mean_ms
@@ -814,7 +809,7 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
         print(f"  {T_val:>5}  {align_str:>14}  {mean_ms:>8.2f}  {p99:>8.2f}  "
               f"{mx_ms:>8.2f}  {norm:>11.4f}  {vs_baseline:>10}")
 
-    # Identify the best PADDING target — must be T >= 8784 (can only pad UP).
+    # Identify the best PADDING target - must be T >= 8784 (can only pad UP).
     # Truncation is not valid: it would drop tokens (lose data).
     print()
     actual_mean = baseline_mean
@@ -831,7 +826,7 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
             savings_per_call = -delta
             # video_self_attn fires 48 blocks x 8 steps = 384 calls per stage 1
             per_stage1 = savings_per_call * 384
-            print(f"  WIN: padding T=8784 → T={best_T} (aligned {best_align}) "
+            print(f"  WIN: padding T=8784 -> T={best_T} (aligned {best_align}) "
                   f"saves {savings_per_call:.2f} ms/call.")
             print(f"  Stage-1 extrapolation: x 384 calls = {per_stage1:.0f} ms saved "
                   f"({100*per_stage1/364400:.2f}% of 364 s stage-1 wall).")
@@ -841,20 +836,20 @@ def bench_sdpa_t_sweep(warmup: int, iters: int) -> None:
                   f"SLOWER.  Padding is NOT a lever for this shape.")
 
     if fast_lower:
-        # Inform but don't claim win — these are sub-baseline T values that we
+        # Inform but don't claim win - these are sub-baseline T values that we
         # can't reach without truncating tokens.
         print(f"  (Note: T values < 8784 do run faster, e.g. "
               f"{', '.join(f'T={T} {(m-actual_mean):+.1f}ms' for T, _, m in fast_lower[:3])} "
-              f"— but truncating tokens is not a valid optimization.)")
+              f"- but truncating tokens is not a valid optimization.)")
 
     # Normalized-cost note: identifies any per-tile-alignment penalty at T=8784
     norm_baseline = [r[5] for r in rows if r[0] == 8784][0]
     best_norm_T, best_norm_align, _, _, _, best_norm = min(rows, key=lambda r: r[5])
     norm_penalty_pct = 100 * (norm_baseline - best_norm) / best_norm
     if norm_penalty_pct > 0.5:
-        print(f"  T=8784 carries a {norm_penalty_pct:.2f}% per-token² alignment "
+        print(f"  T=8784 carries a {norm_penalty_pct:.2f}% per-token^2 alignment "
               f"penalty vs the best T={best_norm_T} ({best_norm_align}-aligned) at "
-              f"{best_norm:.4f} ns/T².  Real but dominated by the extra-token "
+              f"{best_norm:.4f} ns/T^2.  Real but dominated by the extra-token "
               f"cost of any padding target above.")
 
 
@@ -906,7 +901,6 @@ def bench_sdpa_d_sweep(warmup: int, iters: int) -> None:
     D_values = [64, 80, 96, 112, 120, 128, 136, 160, 192, 256]
 
     baseline_tflops = None  # at D=128
-    baseline_mean = None
     rows: list[tuple] = []
 
     for D_val in D_values:
@@ -947,7 +941,6 @@ def bench_sdpa_d_sweep(warmup: int, iters: int) -> None:
 
         if D_val == 128:
             baseline_tflops = tflops
-            baseline_mean = mean_ms
 
         rows.append((D_val, bk, mean_ms, p99, tflops, ns_per_flop, None))
 
@@ -1022,8 +1015,8 @@ def bench_sdpa_d_sweep(warmup: int, iters: int) -> None:
 def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
     """Bound the savings a hypothetical fused BF16 FFN Metal kernel could deliver.
 
-    Question: is writing a fused (matmul → GELU → matmul) Metal kernel — or a
-    streamed inner-dim variant on top of MLX — worth the engineering?
+    Question: is writing a fused (matmul -> GELU -> matmul) Metal kernel - or a
+    streamed inner-dim variant on top of MLX - worth the engineering?
 
     A real fused FFN kernel can NOT beat the irreducible work: it must still
     do both BF16 GEMMs in series (project_out depends on project_in's output).
@@ -1035,13 +1028,13 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
 
     This bench measures stock FF wall + peak transient memory at LTX video
     shapes, plus three reference floors:
-      A. project_in + project_out as isolated GEMMs (sum)        — additive floor
-      B. project_in → project_out chained, no GELU              — chained floor
-      C. GELU-pass cost at the hidden shape                      — what the GELU
+      A. project_in + project_out as isolated GEMMs (sum)        - additive floor
+      B. project_in -> project_out chained, no GELU              - chained floor
+      C. GELU-pass cost at the hidden shape                      - what the GELU
          elimination alone could remove
 
     Anything a fused kernel saves is bounded by ``stock - chained_floor``,
-    plus optionally the hidden-tensor HBM bandwidth (not isolated here — read
+    plus optionally the hidden-tensor HBM bandwidth (not isolated here - read
     it as the gap between A and B, or treat C as a proxy upper bound).
 
     Compute roofline: if the stock GEMMs already run near the steel_gemm
@@ -1091,7 +1084,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
         return mx.addmm(b_out, h, w_out_t)
 
     modes = [
-        ("stock FF (matmul→gelu→matmul)", stock,
+        ("stock FF (matmul->gelu->matmul)", stock,
          2 * T * D * FF_INNER + 2 * T * FF_INNER * D),
         ("project_in matmul only",        gemm_in_only,  2 * T * D * FF_INNER),
         ("project_out matmul only",       gemm_out_only, 2 * T * FF_INNER * D),
@@ -1103,7 +1096,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
     # Per-mode bandwidth estimate (read inputs + write output, BF16 = 2 B).
     # For GELU: read+write the hidden.
     mode_bytes = {
-        "stock FF (matmul→gelu→matmul)":
+        "stock FF (matmul->gelu->matmul)":
             x.nbytes + w_in_t.nbytes + h_seed.nbytes * 2 + w_out_t.nbytes + x.nbytes,
         "project_in matmul only":
             x.nbytes + w_in_t.nbytes + h_seed.nbytes,
@@ -1132,7 +1125,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
               f"{p99:>8.3f}  {peak/1e6:>9.1f}  {tf_str:>9s}  {gbs:>6.1f}")
         results[label] = (mean, p99, peak)
 
-    mean_stock, _, peak_stock = results["stock FF (matmul→gelu→matmul)"]
+    mean_stock, _, peak_stock = results["stock FF (matmul->gelu->matmul)"]
     mean_gin, _, _            = results["project_in matmul only"]
     mean_gout, _, peak_gout   = results["project_out matmul only"]
     mean_gelu, _, _           = results["gelu_approx at hidden shape"]
@@ -1155,7 +1148,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
           f"({recoverable_pct:+.1f}% of stock)")
     # A truly tiled fused kernel could also elide the hidden HBM round-trip
     # embedded in floor B.  Estimate that bandwidth cost from the GELU row:
-    # achieved GB/s x 2 (read+write of the hidden tensor) ≈ same as mean_gelu.
+    # achieved GB/s x 2 (read+write of the hidden tensor) ~ same as mean_gelu.
     # So a perfect tiled fused floor is roughly floor B - mean_gelu.
     fused_floor_estimate = max(floor_chained - mean_gelu, 0.0)
     fused_recoverable = mean_stock - fused_floor_estimate
@@ -1168,23 +1161,23 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
     print()
     print("  MEMORY CEILING (transient peak above persistent weights/inputs)")
     print(f"    stock peak                               = {peak_stock/1e6:>7.1f} MB  "
-          f"(GELU produces a fresh hidden — old & new both alive briefly)")
+          f"(GELU produces a fresh hidden - old & new both alive briefly)")
     print(f"    both-matmuls-chained peak                = {peak_gg/1e6:>7.1f} MB  "
           f"(only one hidden alive at a time)")
     output_floor_mb = x.nbytes / 1e6  # FF output is (B, T, dim_out=D) = same as input
     print(f"    absolute floor (output buffer only)      = {output_floor_mb:>7.1f} MB  "
           f"(fused kernel keeping hidden in registers)")
-    print(f"    stock → chained recoverable              = "
+    print(f"    stock -> chained recoverable              = "
           f"{(peak_stock - peak_gg)/1e6:>+7.1f} MB  (eliminate the GELU double-alloc)")
-    print(f"    stock → fused floor recoverable          = "
+    print(f"    stock -> fused floor recoverable          = "
           f"{(peak_stock - x.nbytes)/1e6:>+7.1f} MB  (also eliminate hidden materialization)")
 
     print()
-    print("  COMPUTE ROOFLINE  (steel_gemm ceiling ≈ 7.95 TFlops/s, BF16 peak ≈ 10)")
-    for label in ("stock FF (matmul→gelu→matmul)", "project_in matmul only",
+    print("  COMPUTE ROOFLINE  (steel_gemm ceiling ~ 7.95 TFlops/s, BF16 peak ~ 10)")
+    for label in ("stock FF (matmul->gelu->matmul)", "project_in matmul only",
                   "project_out matmul only", "both matmuls chained, no GELU"):
         mean, _, _ = results[label]
-        # Recover flops from the modes table by re-mapping label → flops
+        # Recover flops from the modes table by re-mapping label -> flops
         flops = next(f for ll, _, f in modes if ll == label)
         tflops = flops / (mean * 1e-3) / 1e12
         pct_gemm = 100 * tflops / 7.95
@@ -1206,13 +1199,13 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
     # Verdict
     print()
     if recoverable_pct < 10:
-        verdict = ("NOT WORTH IT — stock FF is already near its irreducible floor.  "
+        verdict = ("NOT WORTH IT - stock FF is already near its irreducible floor.  "
                    "A fused kernel could save at most a fraction of the GELU pass.")
     elif recoverable_pct < 25:
-        verdict = ("MARGINAL — recoverable wall exists but is bounded.  Weigh the "
+        verdict = ("MARGINAL - recoverable wall exists but is bounded.  Weigh the "
                    f"per-step savings ({per_step_b:+.0f} ms) against multi-day kernel work.")
     else:
-        verdict = ("PROMISING — meaningful wall and memory headroom above the chained "
+        verdict = ("PROMISING - meaningful wall and memory headroom above the chained "
                    "GEMM floor.  A one-block fused-kernel prototype is justified.")
     print(f"  VERDICT: {verdict}")
 
@@ -1232,9 +1225,9 @@ def bench_pointwise_bw(warmup: int, iters: int) -> None:
       * FF hidden: (1, 8784, 16384) BF16 = 288 MB (FF inner, GELU)
 
     Op patterns:
-      * x * 1.0   — 1 read + 1 write  (pure-bandwidth read/write floor)
-      * x + x     — 1 read + 1 write  (single-input add)
-      * x + y     — 2 reads + 1 write (two-input add; ~1.5x bytes vs single)
+      * x * 1.0   - 1 read + 1 write  (pure-bandwidth read/write floor)
+      * x + x     - 1 read + 1 write  (single-input add)
+      * x + y     - 2 reads + 1 write (two-input add; ~1.5x bytes vs single)
 
     Reports achieved GB/s per (size, pattern).  M1 Max nominal HBM bandwidth
     is ~400 GB/s; benign access typically achieves 250-350 GB/s.  Pointwise
@@ -1245,7 +1238,7 @@ def bench_pointwise_bw(warmup: int, iters: int) -> None:
     print("BENCH: BF16 pointwise bandwidth ceiling on this hardware")
     print("=" * 100)
 
-    # Sweep sizes (in millions of elements) — covers dispatch-bound to HBM-bound.
+    # Sweep sizes (in millions of elements) - covers dispatch-bound to HBM-bound.
     # Each entry: (label, shape).  All BF16 (2 B/element).
     shapes = [
         ("size  ~1 MB",       (1, 524288)),
@@ -1320,13 +1313,13 @@ def bench_adaln_residual(warmup: int, iters: int) -> None:
     different compile boundaries)?
 
     Modes timed at production shapes (B=1, T=8784, D=4096, BF16):
-      * `mx.fast.rms_norm`(x) alone                          — irreducible norm cost
+      * `mx.fast.rms_norm`(x) alone                          - irreducible norm cost
       * AdaLN inline:   ``rms_norm; (normed*(1+scale)+shift).astype(bf16)``
       * AdaLN compiled (production default, `mx.compile`'d)
       * Residual gate inline: ``(x + residual*gate).astype(bf16)``
       * Residual gate compiled (production default)
-      * Full AdaLN+attn-residual chain: rms_norm → mod → (fake_attn_out) → gated_add
-        (inline vs compiled — measures compile-fusion headroom across the chain)
+      * Full AdaLN+attn-residual chain: rms_norm -> mod -> (fake_attn_out) -> gated_add
+        (inline vs compiled - measures compile-fusion headroom across the chain)
 
     Scale/shift/gate are (1, 1, D) FP32 (per-token broadcasts from the FP32
     scale_shift_table); inputs and the cast-back output are BF16.
@@ -1467,11 +1460,11 @@ def bench_adaln_residual(warmup: int, iters: int) -> None:
     if chain_savings > 0:
         per_step_save = chain_savings * per_run_chains / 2
         print(f"    if inline ran instead, would lose {per_step_save:.0f} ms / step "
-              f"({100*per_step_save/45500:.2f}% of step) — KEEP compile")
+              f"({100*per_step_save/45500:.2f}% of step) - KEEP compile")
     else:
         per_step_pen = -chain_savings * per_run_chains / 2
         print(f"    inline would SAVE {per_step_pen:.0f} ms / step "
-              f"({100*per_step_pen/45500:.2f}% of step) — RETEST compile boundary")
+              f"({100*per_step_pen/45500:.2f}% of step) - RETEST compile boundary")
 
     # Headroom vs pointwise ceiling (run bench_pointwise_bw to get the actual peak)
     print()
@@ -1497,9 +1490,9 @@ def bench_rope(warmup: int, iters: int) -> None:
     Modes:
       * production: BF16 input, FP32 cos/sin, cast back to BF16
       * all-BF16 freqs: same compute path but with BF16 cos/sin (lower
-        precision — informational only, NOT a same-math substitute)
-      * bare 4D multiply at (B, H, T, D//2) — pointwise floor
-      * raw concatenate at (B, H, T, D) — concat cost in isolation
+        precision - informational only, NOT a same-math substitute)
+      * bare 4D multiply at (B, H, T, D//2) - pointwise floor
+      * raw concatenate at (B, H, T, D) - concat cost in isolation
 
     Reports wall and bandwidth; extrapolates per-step savings if a fully-BF16
     path is meaningfully cheaper than the production FP32 freqs path.
@@ -1511,7 +1504,7 @@ def bench_rope(warmup: int, iters: int) -> None:
 
     # Try to import the production rope function so we measure the EXACT path.
     # The bench runs as `python scripts/bench_ff_microbench.py ...` from the
-    # repo root, but the LTX_2_MLX package may not be installed in this venv —
+    # repo root, but the LTX_2_MLX package may not be installed in this venv -
     # add the repo root to sys.path so the import resolves.
     rope_fn = None
     try:
@@ -1555,7 +1548,7 @@ def bench_rope(warmup: int, iters: int) -> None:
     # Bytes accounting per call (approx):
     #   x read = x_bytes
     #   cos read + sin read = 2 * cos_bytes
-    #   intermediate x1*cos, x2*sin etc — internal to compiled kernel
+    #   intermediate x1*cos, x2*sin etc - internal to compiled kernel
     #   output write = x_bytes
     bytes_prod   = x_bytes + 2 * cos_fp32_bytes + x_bytes   # FP32 freqs
     bytes_bf16   = x_bytes + 2 * cos_bf16_bytes + x_bytes   # BF16 freqs
@@ -1640,26 +1633,26 @@ def bench_vae_ops(warmup: int, iters: int) -> None:
     fix's payoff is bounded in advance.
 
     Ops timed at three representative BFHWC shapes spanning the decoder
-    progression (bottleneck → mid → late):
+    progression (bottleneck -> mid -> late):
 
       * `nn.Conv3d(in=C, out=C, k=3)` -- the dominant cost
       * `mx.fast.rms_norm` over the channel axis (pixel norm in `ops.py`)
       * `nn.silu` -- pointwise activation in every resnet block
-      * Full resnet pattern: norm → silu → conv → norm → silu → conv → add
+      * Full resnet pattern: norm -> silu -> conv -> norm -> silu -> conv -> add
 
     Shape progression mirrors `NativeConv3dVideoDecoder` defaults
     (base_channels=128, feature_channels=1024 at bottleneck, halving on
     each spatial upsample, with per-tile spatial extent following the
     `tile_size_in_pixels >= 64` invariant from `tiling.py`).
 
-    Bottleneck:  (1,  4,  8,  8, 1024)  -- ~0.5 MB BF16 — pure dispatch regime
+    Bottleneck:  (1,  4,  8,  8, 1024)  -- ~0.5 MB BF16 - pure dispatch regime
     Mid:         (1,  8, 32, 32,  256)  -- ~4   MB
     Late:        (1, 16, 64, 64,   64)  -- ~8   MB
 
     Reports per-op mean/p99 + GB/s.  Use the `pointwise_bw` peak to grade
     pointwise efficiency; for Conv3d, compare achieved TFlops/s to the
     ~7.95 `steel_gemm` ceiling (Conv3d in MLX im2col-style typically lands
-    well below GEMM ceiling — that's the int-overflow-fix opportunity).
+    well below GEMM ceiling - that's the int-overflow-fix opportunity).
     """
     print()
     print("=" * 100)
@@ -1696,7 +1689,7 @@ def bench_vae_ops(warmup: int, iters: int) -> None:
         mean = sum(durs_conv) / len(durs_conv)
         gbs = conv_bytes / (mean * 1e-3) / 1e9
         tflops = conv_flops / (mean * 1e-3) / 1e12
-        print(f"  {shape_label:<28s}  {'nn.Conv3d (k=3, C→C)':<28s}  "
+        print(f"  {shape_label:<28s}  {'nn.Conv3d (k=3, C->C)':<28s}  "
               f"{mean:>8.3f}  {_pct(durs_conv,99):>8.3f}  "
               f"{tensor_mb:>10.2f}  {gbs:>7.1f}  {tflops:>9.3f}")
 
@@ -1721,7 +1714,7 @@ def bench_vae_ops(warmup: int, iters: int) -> None:
               f"{mean_s:>8.3f}  {_pct(durs_silu,99):>8.3f}  "
               f"{tensor_mb:>10.2f}  {gbs_s:>7.1f}  {'n/a':>9s}")
 
-        # ---- full resnet block pattern: norm → silu → conv → norm → silu → conv → add ----
+        # ---- full resnet block pattern: norm -> silu -> conv -> norm -> silu -> conv -> add ----
         conv2 = nn.Conv3d(in_channels=C_, out_channels=C_, kernel_size=3, padding=1)
         conv2.set_dtype(DTYPE)
         mx.eval(conv2.weight)
@@ -1735,7 +1728,7 @@ def bench_vae_ops(warmup: int, iters: int) -> None:
 
         durs_rb = _time_call(resnet_block, warmup, iters)
         mean_rb = sum(durs_rb) / len(durs_rb)
-        # rough byte count: input read 3x, 2 conv weights, output write — dominated by conv
+        # rough byte count: input read 3x, 2 conv weights, output write - dominated by conv
         rb_bytes = x.nbytes * 6 + conv.weight.nbytes * 2
         gbs_rb = rb_bytes / (mean_rb * 1e-3) / 1e9
         # FLOPs: 2 convs
@@ -1756,7 +1749,7 @@ def bench_vae_ops(warmup: int, iters: int) -> None:
     print("      ceiling, the upstream int-overflow fix could lift it.")
     print("    * pixel-norm + silu are pointwise; grade vs `pointwise_bw` peak.")
     print("    * VAE decode is ~7 % of total wall.  A 2x conv speedup would")
-    print("      buy ~3.5 % of total — small but real if the fix lands free.")
+    print("      buy ~3.5 % of total - small but real if the fix lands free.")
 
 
 # --- driver ---

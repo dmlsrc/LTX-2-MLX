@@ -128,7 +128,6 @@ def generate_checkpoints(
         text_output = text_encoder(text=prompt, padding_side="left")
         # Extract video encoding from the structured output
         video_encoding = text_output.video_encoding
-        text_mask = text_output.attention_mask
 
     print(f"  Video encoding shape: {video_encoding.shape}")
 

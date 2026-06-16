@@ -182,7 +182,7 @@ class Embeddings1DConnector(nn.Module):
 
         Matches ComfyUI behavior: extends the sequence to at least 1024 tokens
         (or the next multiple of num_learnable_registers above seq_len) by
-        appending tiled register tokens. Original tokens stay in place — no
+        appending tiled register tokens. Original tokens stay in place - no
         sorting or replacement. Attention mask is cleared so all positions
         (including original pad tokens) attend to each other.
 
@@ -201,7 +201,6 @@ class Embeddings1DConnector(nn.Module):
         # the next multiple of num_learnable_registers.
         target_len = max(1024, seq_len)
         num_duplications = math.ceil(target_len / self.num_learnable_registers)
-        total_register_len = num_duplications * self.num_learnable_registers
 
         tiled_registers = mx.tile(
             self.learnable_registers, (num_duplications, 1)

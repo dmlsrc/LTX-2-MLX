@@ -548,7 +548,6 @@ def decode_tiled(
         DEFAULT_SPATIAL_SCALE,
     )
 
-    out_t = 1 + (latent_t - 1) * scale_t
     out_h = latent_h * scale_h
     out_w = latent_w * scale_w
 

@@ -8,7 +8,7 @@ conversion ratio is driven entirely by per-pair interpolation phases.
 Per source frame pair (frame_N at PTS_N, frame_N+1 at PTS_N+1), we
 compute the set of target output PTSes that fall in [PTS_N, PTS_N+1)
 and their phases (where phase = (target_pts - PTS_N) / (PTS_N+1 - PTS_N)
-∈ [0, 1)). VT's API takes a phase array and a matching destinationFrames
+in [0, 1)). VT's API takes a phase array and a matching destinationFrames
 array, so a single call produces all interpolated frames for that pair.
 
 Cleanly handles arbitrary float fps both sides:
@@ -146,14 +146,8 @@ class VtfrcSession:
         """Target frame indices M such that M's PTS falls in
         [src_index / source_fps, (src_index + 1) / source_fps).
         """
-        lo = src_index * self._ratio
-        hi = (src_index + 1) * self._ratio
-        # ceil(lo) but stay >= self._next_target_index so we never re-emit.
-        start = max(self._next_target_index, int(-(-int(lo * 10**9) // 10**9)))
-        # Simpler / more numerically stable: just take next_target_index and
-        # filter by < hi. start might overshoot lo slightly due to float
-        # rounding but the < hi guard catches that.
-        # Actually `start = self._next_target_index` is the most robust:
+        # Start at next_target_index so we never re-emit. The loop guards
+        # below filter the exact source-frame interval.
         start = self._next_target_index
         out = []
         m = start
@@ -259,7 +253,7 @@ class VtfrcSession:
         self._prev_src_index = src_index
 
         # Yield one buffer at a time and drop our local list reference once
-        # we hand it over — the writer retains what it needs.
+        # we hand it over - the writer retains what it needs.
         while dest_buffers:
             yield dest_buffers.pop(0)
 
@@ -273,7 +267,7 @@ class VtfrcSession:
         cases where target PTSes exactly coincide with the last source PTS
         (phase 0 of a "virtual" next pair).
         """
-        # For now, no additional drain needed — the half-open [N, N+1)
+        # For now, no additional drain needed - the half-open [N, N+1)
         # interval logic emits everything up to but not including the next
         # source's PTS. If the last source PTS is also a target PTS, that
         # frame is emitted as phase 0 of the pair starting at the previous

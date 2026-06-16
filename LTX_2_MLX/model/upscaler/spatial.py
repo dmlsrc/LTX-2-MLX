@@ -243,20 +243,8 @@ class BlurDownsample(nn.Module):
             # No blur kernel loaded or stride=1, pass through
             return x
 
-        b, h, w, c = x.shape
-
-        # Apply blur per channel using depthwise conv
-        # kernel is (1, 1, kH, kW), need to expand for depthwise conv
-        k = self.kernel.squeeze()  # (kH, kW)
-        kh, kw = k.shape
-
-        # Pad input
-        pad_h = kh // 2
-        pad_w = kw // 2
-        x_padded = mx.pad(x, [(0, 0), (pad_h, pad_h), (pad_w, pad_w), (0, 0)])
-
-        # Manual depthwise conv with blur kernel
-        # For simplicity, just return input if stride=1 (blur is minor effect)
+        # Native depthwise blur is not implemented in this lightweight path.
+        # Preserve existing behavior: pass through at stride 1, otherwise downsample.
         if self.stride == 1:
             return x
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Monolithic inlined AV transformer forward — same-math reference impl.
+"""Monolithic inlined AV transformer forward - same-math reference impl.
 
 This module is a library, not a standalone script.  It provides
-``InlinedAVModel`` — a drop-in replacement for ``X0Model(LTXAVModel)`` that
+``InlinedAVModel`` - a drop-in replacement for ``X0Model(LTXAVModel)`` that
 the pipeline can call instead of the modular block stack.  The 48-block
 forward, AdaLN preprocess, output projection, and X0 conversion are all
 inlined into one function (``transformer_step``) with flat pretransposed
@@ -13,7 +13,7 @@ unchanged.
 **Result (kept for historical record, see docs/PERFORMANCE.md):** wall
 clock is neutral vs the modular path; final latent cosine similarity is
 0.99922+ for both video and audio against a modular reference.  Inlining
-does not reduce per-step cost — MLX's lazy graph already optimizes through
+does not reduce per-step cost - MLX's lazy graph already optimizes through
 the ``nn.Module`` dispatch chain.  The remaining gap to mlx-video (when
 it exists at any shape) is structural at the MLX kernel / Metal command-
 buffer level, not abstraction-level.
@@ -44,7 +44,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-# ─── Reused, non-transformer pieces ──────────────────────────────────────────
+# --- Reused, non-transformer pieces ------------------------------------------
 from LTX_2_MLX.model.transformer.rope import (  # noqa: E402
     LTXRopeType,
     apply_rotary_emb,
@@ -52,7 +52,7 @@ from LTX_2_MLX.model.transformer.rope import (  # noqa: E402
 )
 
 
-# ─── Constants (V2.3 distilled, hardcoded for happy path) ────────────────────
+# --- Constants (V2.3 distilled, hardcoded for happy path) --------------------
 
 VIDEO_INNER_DIM = 4096
 AUDIO_INNER_DIM = 2048
@@ -74,11 +74,11 @@ AV_CA_NUM_SCALE_SHIFT = 4
 AV_CA_NUM_GATE = 1
 
 
-# ─── Helpers (thin wrappers, exactly the math the modular path does) ─────────
+# --- Helpers (thin wrappers, exactly the math the modular path does) ---------
 
 
 def rms_norm(x: mx.array, eps: float = NORM_EPS) -> mx.array:
-    """Bare RMS norm — matches our ``rms_norm`` helper without a weight."""
+    """Bare RMS norm - matches our ``rms_norm`` helper without a weight."""
     return mx.fast.rms_norm(x, None, eps)
 
 
@@ -114,7 +114,7 @@ def attention(
     dim_head: int,
     mask: Optional[mx.array] = None,
 ) -> mx.array:
-    """Reshape → SDPA → reshape, same as our ``_attention_core``."""
+    """Reshape -> SDPA -> reshape, same as our ``_attention_core``."""
     b, t_q, _ = q.shape
     _, t_k, _ = k.shape
     q = q.reshape(b, t_q, heads, dim_head).transpose(0, 2, 1, 3)
@@ -168,7 +168,7 @@ def get_av_ca_ada(
     )
 
 
-# ─── The inlined AV transformer block forward ────────────────────────────────
+# --- The inlined AV transformer block forward --------------------------------
 
 
 def av_block_forward(
@@ -201,9 +201,7 @@ def av_block_forward(
     (cross_attention_adaln + apply_gated_attention both on).  Uses
     pretransposed weights everywhere (``..._weight_t``).
     """
-    B = vx.shape[0]
-
-    # ─── Video self-attention ───
+    # --- Video self-attention ---
     v_shift_msa, v_scale_msa, v_gate_msa = get_ada_values(
         w["scale_shift_table"], v_timestep_emb, 0, 3,
     )
@@ -230,7 +228,7 @@ def av_block_forward(
     attn_out = linear_pretransposed(attn_out, w["attn1.to_out.weight_t"], w["attn1.to_out.bias"])
     vx = vx + attn_out * v_gate_msa
 
-    # ─── Video text cross-attention (V2 prompt-adaln path) ───
+    # --- Video text cross-attention (V2 prompt-adaln path) ---
     v_shift_q, v_scale_q, v_gate_q = get_ada_values(
         w["scale_shift_table"], v_timestep_emb, 6, 9,
     )
@@ -255,7 +253,7 @@ def av_block_forward(
     attn_out = linear_pretransposed(attn_out, w["attn2.to_out.weight_t"], w["attn2.to_out.bias"])
     vx = vx + attn_out * v_gate_q
 
-    # ─── Audio self-attention ───
+    # --- Audio self-attention ---
     a_shift_msa, a_scale_msa, a_gate_msa = get_ada_values(
         w["audio_scale_shift_table"], a_timestep_emb, 0, 3,
     )
@@ -278,7 +276,7 @@ def av_block_forward(
     attn_out = linear_pretransposed(attn_out, w["audio_attn1.to_out.weight_t"], w["audio_attn1.to_out.bias"])
     ax = ax + attn_out * a_gate_msa
 
-    # ─── Audio text cross-attention (V2 prompt-adaln path) ───
+    # --- Audio text cross-attention (V2 prompt-adaln path) ---
     a_shift_q, a_scale_q, a_gate_q = get_ada_values(
         w["audio_scale_shift_table"], a_timestep_emb, 6, 9,
     )
@@ -303,7 +301,7 @@ def av_block_forward(
     attn_out = linear_pretransposed(attn_out, w["audio_attn2.to_out.weight_t"], w["audio_attn2.to_out.bias"])
     ax = ax + attn_out * a_gate_q
 
-    # ─── AV cross-modal (A2V + V2A) ───
+    # --- AV cross-modal (A2V + V2A) ---
     vx_norm3 = rms_norm(vx)
     ax_norm3 = rms_norm(ax)
     (
@@ -360,7 +358,7 @@ def av_block_forward(
     attn_out = linear_pretransposed(attn_out, w["video_to_audio_attn.to_out.weight_t"], w["video_to_audio_attn.to_out.bias"])
     ax = ax + attn_out * gate_out_v2a
 
-    # ─── Video FFN ───
+    # --- Video FFN ---
     v_shift_mlp, v_scale_mlp, v_gate_mlp = get_ada_values(
         w["scale_shift_table"], v_timestep_emb, 3, 6,
     )
@@ -370,7 +368,7 @@ def av_block_forward(
     ff_out = linear_pretransposed(h, w["ff.project_out.weight_t"], w["ff.project_out.bias"])
     vx = vx + ff_out * v_gate_mlp
 
-    # ─── Audio FFN ───
+    # --- Audio FFN ---
     a_shift_mlp, a_scale_mlp, a_gate_mlp = get_ada_values(
         w["audio_scale_shift_table"], a_timestep_emb, 3, 6,
     )
@@ -383,7 +381,7 @@ def av_block_forward(
     return vx, ax
 
 
-# ─── Weight extraction: pull every per-block weight into a flat list of dicts ───
+# --- Weight extraction: pull every per-block weight into a flat list of dicts ---
 
 
 def extract_block_weights(model) -> List[dict]:
@@ -411,7 +409,7 @@ def extract_block_weights(model) -> List[dict]:
             "audio_attn1", "audio_attn2", "video_to_audio_attn",
         ):
             attn = getattr(block, attn_name)
-            # Q/K norm have learned weights (RMSNorm.weight) — extract them so
+            # Q/K norm have learned weights (RMSNorm.weight) - extract them so
             # ``av_block_forward`` can pass them to mx.fast.rms_norm.  Skipping
             # this silently breaks attention (mismatched stats per head); was
             # the bug that turned the first inlined output into brown noise.
@@ -455,7 +453,7 @@ def extract_block_weights(model) -> List[dict]:
     return blocks
 
 
-# ─── Inlined transformer preprocessing and forward (one denoise step) ────────
+# --- Inlined transformer preprocessing and forward (one denoise step) --------
 
 
 def transformer_step(
@@ -497,8 +495,6 @@ def transformer_step(
         weights["audio_patchify_proj.weight"],
         weights["audio_patchify_proj.bias"],
     )
-    B = vx.shape[0]
-
     # AdaLN-single timestep embedding for both modalities (V2: 9 emb each)
     v_timestep_emb, v_embedded_ts = _adaln_single_forward(
         video_timestep_scalar * TIMESTEP_SCALE,
@@ -521,7 +517,7 @@ def transformer_step(
 
     # V2 prompt AdaLN.  Modular ``_prepare_timestep`` scales by
     # ``timestep_scale_multiplier`` (= TIMESTEP_SCALE) for every adaln call,
-    # including prompt — so apply * TIMESTEP_SCALE here too, not just MSA.
+    # including prompt - so apply * TIMESTEP_SCALE here too, not just MSA.
     v_prompt_ts, _ = _adaln_single_forward(
         video_timestep_scalar * TIMESTEP_SCALE,
         weights["prompt_adaln_single.emb"],
@@ -551,7 +547,7 @@ def transformer_step(
     v_ctx_mask = _prepare_mask(video_context_mask, compute_dtype)
     a_ctx_mask = _prepare_mask(audio_context_mask, compute_dtype)
 
-    # ─── The block stack ───
+    # --- The block stack ---
     for w in block_weights:
         vx, ax = av_block_forward(
             vx, ax,
@@ -566,7 +562,7 @@ def transformer_step(
             w,
         )
 
-    # ─── Output projection (per-modality scale_shift_table + LayerNorm + proj_out) ───
+    # --- Output projection (per-modality scale_shift_table + LayerNorm + proj_out) ---
     v_out = _output_project(
         vx, v_embedded_ts,
         weights["scale_shift_table"],
@@ -633,13 +629,13 @@ def _output_project(
     ).astype(x.dtype)
     shift = scale_shift[:, :, 0, :]
     scale = scale_shift[:, :, 1, :]
-    # nn.LayerNorm with affine=False ⇒ no learnable params; use mx.fast.layer_norm
+    # nn.LayerNorm with affine=False => no learnable params; use mx.fast.layer_norm
     x = mx.fast.layer_norm(x, None, None, NORM_EPS)
     x = x * (1 + scale) + shift
     return linear(x, proj_weight, proj_bias)
 
 
-# ─── Top-level weight extraction (model-level params, not per-block) ──────────
+# --- Top-level weight extraction (model-level params, not per-block) ----------
 
 
 def extract_top_level_weights(model) -> dict:
@@ -671,7 +667,7 @@ def extract_top_level_weights(model) -> dict:
     w["audio_prompt_adaln_single.linear.weight"] = model.audio_prompt_adaln_single.linear.weight
     w["audio_prompt_adaln_single.linear.bias"] = model.audio_prompt_adaln_single.linear.bias
 
-    # AV CA AdaLN modules (4 of them) — reuse the call inline
+    # AV CA AdaLN modules (4 of them) - reuse the call inline
     w["av_ca_video_scale_shift_adaln_single"] = model.av_ca_video_scale_shift_adaln_single
     w["av_ca_audio_scale_shift_adaln_single"] = model.av_ca_audio_scale_shift_adaln_single
     w["av_ca_a2v_gate_adaln_single"] = model.av_ca_a2v_gate_adaln_single
@@ -681,7 +677,7 @@ def extract_top_level_weights(model) -> dict:
     return w
 
 
-# ─── Cross-attention timestep prep (mirrors MultiModalTransformerArgsPreprocessor) ───
+# --- Cross-attention timestep prep (mirrors MultiModalTransformerArgsPreprocessor) ---
 
 
 def prep_cross_attention_timestep(
@@ -701,7 +697,7 @@ def prep_cross_attention_timestep(
     return ss_emb, gate_emb
 
 
-# ─── Per-stage RoPE precompute ───
+# --- Per-stage RoPE precompute ---
 
 
 def precompute_stage_rope(
@@ -750,7 +746,7 @@ class InlinedAVModel:
 
     ``stage2_harness.py`` swaps ``av_pipeline.transformer = InlinedAVModel(model)``
     when ``LTX_MONO_INLINED=1`` is set.  Pipeline still does spatial upscale,
-    sigma loop, modality construction, and Euler step — only the transformer
+    sigma loop, modality construction, and Euler step - only the transformer
     forward changes.
 
     Bit-identical math intent vs the modular path: same weights, same
@@ -774,7 +770,7 @@ class InlinedAVModel:
         self._video_cross_rope_cache: dict = {}
         self._audio_cross_rope_cache: dict = {}
 
-        # AV CA AdaLN modules — small, not the experiment; reuse.
+        # AV CA AdaLN modules - small, not the experiment; reuse.
         self._av_ca_video_ss = base_model.av_ca_video_scale_shift_adaln_single
         self._av_ca_audio_ss = base_model.av_ca_audio_scale_shift_adaln_single
         self._av_ca_a2v_gate = base_model.av_ca_a2v_gate_adaln_single
