@@ -8,7 +8,6 @@ import atexit
 import os
 
 import mlx.core as mx
-import numpy as np
 
 # -- Dispatch probe ---------------------------------------------------------
 #
@@ -208,117 +207,6 @@ def gelu_mul(a: mx.array, b: mx.array) -> mx.array:
     )
 
     return outputs[0].reshape(original_shape)
-
-
-# Fused Interleaved RoPE kernel
-# Combines reshape, rotation, and multiply in one pass
-_interleaved_rope_kernel = mx.fast.metal_kernel(
-    name="interleaved_rope",
-    input_names=["x", "cos_freq", "sin_freq"],
-    output_names=["out"],
-    source="""
-        // x shape: (batch, seq, dim) where dim is even
-        // cos/sin shape: (batch, seq, dim) - pre-broadcasted
-        // Each pair (x[2i], x[2i+1]) is rotated together
-
-        uint idx = thread_position_in_grid.x;
-        uint total = x_shape[0] * x_shape[1] * x_shape[2];
-
-        if (idx < total) {
-            // Get position in output
-            uint dim = x_shape[2];
-            uint seq_dim = x_shape[1] * dim;
-
-            uint batch_idx = idx / seq_dim;
-            uint remainder = idx % seq_dim;
-            uint seq_idx = remainder / dim;
-            uint dim_idx = remainder % dim;
-
-            // Check if this is even or odd index in the pair
-            uint pair_idx = dim_idx / 2;
-            bool is_even = (dim_idx % 2) == 0;
-
-            // Calculate indices for the pair
-            uint even_idx = batch_idx * seq_dim + seq_idx * dim + pair_idx * 2;
-            uint odd_idx = even_idx + 1;
-
-            float x_even = float(x[even_idx]);
-            float x_odd = float(x[odd_idx]);
-            float cos_val = float(cos_freq[idx]);
-            float sin_val = float(sin_freq[idx]);
-
-            // Interleaved rotation: out_even = x_even * cos - x_odd * sin
-            //                       out_odd = x_odd * cos + x_even * sin
-            if (is_even) {
-                out[idx] = T(x_even * cos_val - x_odd * sin_val);
-            } else {
-                out[idx] = T(x_odd * cos_val + x_even * sin_val);
-            }
-        }
-    """,
-)
-
-
-def interleaved_rope(
-    x: mx.array, cos_freqs: mx.array, sin_freqs: mx.array
-) -> mx.array:
-    """
-    Apply interleaved rotary position embeddings using fused kernel.
-
-    This fuses the reshape, rotation computation, and application into one kernel,
-    avoiding intermediate memory allocations.
-
-    Args:
-        x: Input tensor of shape (..., dim) where dim is even
-        cos_freqs: Cosine frequencies, broadcastable to x shape
-        sin_freqs: Sine frequencies, broadcastable to x shape
-
-    Returns:
-        Tensor with rotary embeddings applied
-    """
-    original_shape = x.shape
-    original_ndim = x.ndim
-
-    # Flatten to 3D: (batch, seq, dim)
-    if x.ndim == 2:
-        x = x[None, :, :]
-        cos_freqs = cos_freqs[None, :, :] if cos_freqs.ndim == 2 else cos_freqs
-        sin_freqs = sin_freqs[None, :, :] if sin_freqs.ndim == 2 else sin_freqs
-    elif x.ndim > 3:
-        # Flatten batch dimensions
-        batch_dims = x.shape[:-2]
-        batch_size = int(np.prod(batch_dims))
-        x = x.reshape(batch_size, x.shape[-2], x.shape[-1])
-        cos_freqs = mx.broadcast_to(cos_freqs, x.shape)
-        sin_freqs = mx.broadcast_to(sin_freqs, x.shape)
-
-    # Ensure shapes match
-    cos_freqs = mx.broadcast_to(cos_freqs, x.shape)
-    sin_freqs = mx.broadcast_to(sin_freqs, x.shape)
-
-    x = mx.contiguous(x)
-    cos_freqs = mx.contiguous(cos_freqs)
-    sin_freqs = mx.contiguous(sin_freqs)
-
-    n = x.size
-    outputs = _interleaved_rope_kernel(
-        inputs=[x, cos_freqs, sin_freqs],
-        template=[("T", x.dtype)],
-        output_shapes=[x.shape],
-        output_dtypes=[x.dtype],
-        grid=(n, 1, 1),
-        threadgroup=(min(256, n), 1, 1),
-    )
-
-    result = outputs[0]
-
-    # Restore original shape
-    if original_ndim == 2:
-        result = result[0]
-    elif original_ndim > 3:
-        result = result.reshape(original_shape)
-
-    return result
 
 
 # -- Fused AdaLN: rms_norm(x) * (1 + scale) + shift -------------------------

@@ -1,7 +1,7 @@
 """Precision plumbing tests for the LTX-2.3 hot path."""
 
 import mlx.core as mx
-import numpy as np
+import pytest
 
 import LTX_2_MLX.model.transformer.model as transformer_model
 from LTX_2_MLX.kernels import fused_ops
@@ -180,34 +180,6 @@ def test_fused_adaln_falls_back_for_non_default_eps(monkeypatch):
     assert calls["fallback"] == 1
 
 
-def test_interleaved_rope_fused_path_preserves_fp32_cos_sin_math():
-    x = mx.array(
-        [[[1.125, -2.25, 3.5, -4.75], [0.5, 1.5, -2.5, 4.0]]],
-        dtype=mx.bfloat16,
-    )
-    cos = mx.array(
-        [[[0.90625, 0.90625, 0.53125, 0.53125], [0.25, 0.25, -0.75, -0.75]]],
-        dtype=mx.float32,
-    )
-    sin = mx.array(
-        [[[0.421875, 0.421875, -0.84375, -0.84375], [0.96875, 0.96875, 0.65625, 0.65625]]],
-        dtype=mx.float32,
-    )
-
-    out = fused_ops.interleaved_rope(x, cos, sin)
-    x_dup = x.reshape(1, 2, 2, 2)
-    x1 = x_dup[..., 0]
-    x2 = x_dup[..., 1]
-    x_rot = mx.stack([-x2, x1], axis=-1).reshape(x.shape)
-    expected = (x * cos + x_rot * sin).astype(x.dtype)
-    mx.eval(out, expected)
-
-    np.testing.assert_array_equal(
-        np.array(out.astype(mx.float32)),
-        np.array(expected.astype(mx.float32)),
-    )
-
-
 def test_load_av_transformer_uses_transformer_precision_metadata(monkeypatch):
     from scripts import generate as gen
 
@@ -240,3 +212,50 @@ def test_load_av_transformer_uses_transformer_precision_metadata(monkeypatch):
     assert captured["rope_type"] == LTXRopeType.SPLIT
     assert captured["positional_embedding_max_pos"] == [20, 2048, 2048]
     assert captured["av_ca_timestep_scale_multiplier"] == 1000
+
+
+def test_load_av_transformer_warns_for_missing_rope_metadata(monkeypatch, capsys):
+    from scripts import generate as gen
+
+    captured = {}
+
+    class FakeLTXAVModel:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(gen, "LTXAVModel", FakeLTXAVModel)
+    monkeypatch.setattr(
+        gen,
+        "_read_transformer_config",
+        lambda _path: {
+            "frequencies_precision": "float64",
+        },
+    )
+
+    gen.load_av_transformer(
+        weights_path="/nonexistent/transformer.safetensors",
+        config_weights_path="/nonexistent/config.safetensors",
+        cross_attention_adaln=True,
+        apply_gated_attention=True,
+    )
+
+    assert "metadata missing rope_type; defaulting to split RoPE" in capsys.readouterr().out
+    assert captured["rope_type"] == LTXRopeType.SPLIT
+
+
+def test_load_av_transformer_rejects_interleaved_rope_metadata(monkeypatch):
+    from scripts import generate as gen
+
+    monkeypatch.setattr(
+        gen,
+        "_read_transformer_config",
+        lambda _path: {"rope_type": "interleaved"},
+    )
+
+    with pytest.raises(ValueError, match="rope_type=interleaved"):
+        gen.load_av_transformer(
+            weights_path="/nonexistent/transformer.safetensors",
+            config_weights_path="/nonexistent/config.safetensors",
+            cross_attention_adaln=True,
+            apply_gated_attention=True,
+        )

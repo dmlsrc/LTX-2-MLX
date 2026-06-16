@@ -10,9 +10,6 @@ Used to A/B candidate optimizations by toggling env vars before invocation:
     # baseline
     python scripts/bench_eval_cadence.py --weights ...
 
-    # disable custom Metal RoPE kernel (force pure-MLX RoPE)
-    LTX_DISABLE_FUSED_ROPE=1 python scripts/bench_eval_cadence.py --weights ...
-
     # disable @mx.compile around reshape+SDPA+reshape
     LTX_DISABLE_COMPILED_ATTN=1 python scripts/bench_eval_cadence.py --weights ...
 
@@ -143,8 +140,6 @@ def describe_variant(fast_mode: bool = False, no_pretranspose: bool = False) -> 
         flags.append("--fast-mode (eval_frequency=0, no per-forward block evals)")
     if no_pretranspose:
         flags.append("--no-pretranspose (plain nn.Linear, no weight.T cache)")
-    if os.environ.get("LTX_DISABLE_FUSED_ROPE"):
-        flags.append("LTX_DISABLE_FUSED_ROPE=1 (pure-MLX RoPE)")
     if os.environ.get("LTX_DISABLE_COMPILED_ATTN"):
         flags.append("LTX_DISABLE_COMPILED_ATTN=1 (uncompiled attn reshape)")
     if os.environ.get("LTX_DISABLE_COMPILED_HELPERS"):

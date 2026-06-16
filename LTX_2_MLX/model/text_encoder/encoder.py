@@ -690,9 +690,31 @@ def _parse_rope_type(value) -> LTXRopeType:
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in ("split", "interleaved"):
-            return LTXRopeType(normalized)
-    return LTXRopeType.INTERLEAVED
+        if normalized == "split":
+            return LTXRopeType.SPLIT
+        if normalized == "interleaved":
+            raise ValueError(
+                "Unsupported checkpoint metadata rope_type=interleaved. "
+                "Current LTX-2 checkpoints use split RoPE."
+            )
+    return LTXRopeType.SPLIT
+
+
+def _transformer_rope_type_from_config(
+    transformer_config: dict,
+    context: str,
+) -> LTXRopeType:
+    """Parse checkpoint RoPE metadata, warning when falling back to split."""
+    if "rope_type" in transformer_config:
+        return _parse_rope_type(transformer_config["rope_type"])
+    if "split_rope" in transformer_config:
+        return _parse_rope_type(transformer_config["split_rope"])
+
+    if transformer_config:
+        print(f"  WARNING: {context} metadata missing rope_type; defaulting to split RoPE.")
+    else:
+        print(f"  WARNING: {context} metadata missing transformer config; defaulting to split RoPE.")
+    return LTXRopeType.SPLIT
 
 
 def _normalize_positional_embedding_max_pos(value) -> list[int]:
@@ -718,7 +740,7 @@ def create_av_text_encoder_v2(
     connector_layers: int = 8,
     num_registers: int = 128,
     positional_embedding_max_pos: list[int] | None = None,
-    rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
+    rope_type: LTXRopeType = LTXRopeType.SPLIT,
     connector_apply_gated_attention: bool = True,
     double_precision_rope: bool = False,
 ) -> AudioVideoGemmaTextEncoderModel:
@@ -787,8 +809,9 @@ def create_av_text_encoder_v2_from_checkpoint(
     positional_embedding_max_pos = _normalize_positional_embedding_max_pos(
         transformer_config.get("connector_positional_embedding_max_pos")
     )
-    rope_type = _parse_rope_type(
-        transformer_config.get("rope_type", transformer_config.get("split_rope"))
+    rope_type = _transformer_rope_type_from_config(
+        transformer_config,
+        "AV text encoder",
     )
     connector_apply_gated_attention = bool(
         transformer_config.get("connector_apply_gated_attention", True)

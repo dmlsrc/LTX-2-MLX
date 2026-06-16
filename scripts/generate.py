@@ -1140,8 +1140,29 @@ def _parse_rope_type_from_metadata(value) -> LTXRopeType:
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in ("split", "interleaved"):
-            return LTXRopeType(normalized)
+        if normalized == "split":
+            return LTXRopeType.SPLIT
+        if normalized == "interleaved":
+            raise ValueError(
+                "Unsupported checkpoint metadata rope_type=interleaved. "
+                "Current LTX-2 checkpoints use split RoPE."
+            )
+    return LTXRopeType.SPLIT
+
+
+def _transformer_rope_type_from_config(
+    transformer_config: dict,
+    context: str,
+) -> LTXRopeType:
+    if "rope_type" in transformer_config:
+        return _parse_rope_type_from_metadata(transformer_config["rope_type"])
+    if "split_rope" in transformer_config:
+        return _parse_rope_type_from_metadata(transformer_config["split_rope"])
+
+    if transformer_config:
+        print(f"  WARNING: {context} metadata missing rope_type; defaulting to split RoPE.")
+    else:
+        print(f"  WARNING: {context} metadata missing transformer config; defaulting to split RoPE.")
     return LTXRopeType.SPLIT
 
 
@@ -2241,8 +2262,9 @@ def load_av_transformer(
     transformer_config = _read_transformer_config(config_weights_path or weights_path)
     if double_precision_rope is None:
         double_precision_rope = transformer_config.get("frequencies_precision") == "float64"
-    rope_type = _parse_rope_type_from_metadata(
-        transformer_config.get("rope_type", transformer_config.get("split_rope"))
+    rope_type = _transformer_rope_type_from_config(
+        transformer_config,
+        "AudioVideo transformer",
     )
     positional_embedding_max_pos = _normalize_positional_embedding_max_pos(
         transformer_config.get("positional_embedding_max_pos")

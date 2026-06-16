@@ -5,7 +5,6 @@ from .fused_ops import (
     gated_add_fused,
     gelu_mul,
     get_dispatch_counts,
-    interleaved_rope,
     silu_mul,
 )
 
@@ -14,6 +13,5 @@ __all__ = [
     "gated_add_fused",
     "gelu_mul",
     "get_dispatch_counts",
-    "interleaved_rope",
     "silu_mul",
 ]

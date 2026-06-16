@@ -381,7 +381,7 @@ class Attention(nn.Module):
         heads: int = 8,
         dim_head: int = 64,
         norm_eps: float = 1e-6,
-        rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,  # PyTorch default
+        rope_type: LTXRopeType = LTXRopeType.SPLIT,
         apply_gated_attention: bool = False,
     ):
         """

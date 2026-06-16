@@ -1,38 +1,23 @@
 """3D Rotary Position Embeddings (RoPE) for LTX-2 Transformer."""
 
 import math
-import os
 from enum import Enum
 from functools import lru_cache
 
 import mlx.core as mx
 import numpy as np
 
-# Import fused RoPE kernel for interleaved format.  Set LTX_DISABLE_FUSED_ROPE=1
-# to force the pure-MLX fallback (used to A/B kernel-launch overhead vs fusion).
-if os.environ.get("LTX_DISABLE_FUSED_ROPE"):
-    _HAS_FUSED_ROPE = False
-    _fused_interleaved_rope = None
-else:
-    try:
-        from LTX_2_MLX.kernels import interleaved_rope as _fused_interleaved_rope
-        _HAS_FUSED_ROPE = True
-    except ImportError:
-        _HAS_FUSED_ROPE = False
-        _fused_interleaved_rope = None
-
 
 class LTXRopeType(Enum):
     """RoPE implementation variants."""
 
-    INTERLEAVED = "interleaved"
     SPLIT = "split"
 
 
 def apply_rotary_emb(
     input_tensor: mx.array,
     freqs_cis: tuple[mx.array, mx.array],
-    rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
+    rope_type: LTXRopeType = LTXRopeType.SPLIT,
 ) -> mx.array:
     """
     Apply rotary position embeddings to input tensor.
@@ -45,53 +30,9 @@ def apply_rotary_emb(
     Returns:
         Tensor with rotary embeddings applied.
     """
-    if rope_type == LTXRopeType.INTERLEAVED:
-        return apply_interleaved_rotary_emb(input_tensor, freqs_cis[0], freqs_cis[1])
     if rope_type == LTXRopeType.SPLIT:
         return apply_split_rotary_emb(input_tensor, freqs_cis[0], freqs_cis[1])
     raise ValueError(f"Invalid rope type: {rope_type}")
-
-
-def apply_interleaved_rotary_emb(
-    input_tensor: mx.array,
-    cos_freqs: mx.array,
-    sin_freqs: mx.array,
-) -> mx.array:
-    """
-    Apply interleaved rotary embeddings using fused Metal kernel.
-
-    The interleaved format pairs adjacent dimensions: (d0, d1), (d2, d3), ...
-    Rotation is applied to each pair.
-
-    Uses a custom Metal kernel for ~1.2x speedup over the naive implementation.
-
-    Args:
-        input_tensor: Input tensor of shape (..., dim).
-        cos_freqs: Cosine frequencies.
-        sin_freqs: Sine frequencies.
-
-    Returns:
-        Tensor with rotary embeddings applied.
-    """
-    # Use fused kernel if available (1.2x faster)
-    if _HAS_FUSED_ROPE and _fused_interleaved_rope is not None:
-        return _fused_interleaved_rope(input_tensor, cos_freqs, sin_freqs)
-
-    # Fallback to naive implementation
-    input_dtype = input_tensor.dtype  # cos/sin are FP32 - cast result back
-    shape = input_tensor.shape
-    t_dup = input_tensor.reshape(*shape[:-1], shape[-1] // 2, 2)
-
-    # Split into t1, t2
-    t1 = t_dup[..., 0]  # Even indices
-    t2 = t_dup[..., 1]  # Odd indices
-
-    # Compute rotated version: (-t2, t1)
-    t_rot = mx.stack([-t2, t1], axis=-1)
-    input_tensor_rot = t_rot.reshape(shape)
-
-    # Apply rotation: x * cos + x_rot * sin (promoted to FP32 by cos/sin dtype)
-    return (input_tensor * cos_freqs + input_tensor_rot * sin_freqs).astype(input_dtype)
 
 
 @mx.compile
@@ -333,40 +274,6 @@ def split_freqs_cis(
     return cos_freq, sin_freq
 
 
-def interleaved_freqs_cis(
-    freqs: mx.array,
-    pad_size: int,
-) -> tuple[mx.array, mx.array]:
-    """
-    Compute cos/sin frequencies for interleaved RoPE format.
-
-    Args:
-        freqs: Frequency array, shape (B, T, freq_dim).
-        pad_size: Padding size.
-
-    Returns:
-        Tuple of (cos_freq, sin_freq), each shape (B, T, dim).
-    """
-    # Compute cos and sin, then repeat each value twice for interleaved format
-    cos_freq = mx.cos(freqs)
-    sin_freq = mx.sin(freqs)
-
-    # Repeat interleave: each element appears twice
-    # (B, T, D) -> (B, T, 2*D)
-    cos_freq = mx.repeat(cos_freq, 2, axis=-1)
-    sin_freq = mx.repeat(sin_freq, 2, axis=-1)
-
-    if pad_size != 0:
-        # Pad with identity transform
-        cos_padding = mx.ones((cos_freq.shape[0], cos_freq.shape[1], pad_size))
-        sin_padding = mx.zeros((sin_freq.shape[0], sin_freq.shape[1], pad_size))
-
-        cos_freq = mx.concatenate([cos_padding, cos_freq], axis=-1)
-        sin_freq = mx.concatenate([sin_padding, sin_freq], axis=-1)
-
-    return cos_freq, sin_freq
-
-
 def precompute_freqs_cis(
     indices_grid: mx.array,
     dim: int,
@@ -375,7 +282,7 @@ def precompute_freqs_cis(
     max_pos: list[int] | None = None,
     use_middle_indices_grid: bool = False,
     num_attention_heads: int = 32,
-    rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
+    rope_type: LTXRopeType = LTXRopeType.SPLIT,
     use_double_precision: bool = False,
 ) -> tuple[mx.array, mx.array]:
     """
@@ -389,7 +296,7 @@ def precompute_freqs_cis(
         max_pos: Maximum positions per dimension [time, height, width].
         use_middle_indices_grid: If True, use middle of position bounds.
         num_attention_heads: Number of attention heads.
-        rope_type: Type of RoPE (INTERLEAVED or SPLIT).
+        rope_type: Type of RoPE.
         use_double_precision: Use float64 for frequency grid computation
             (matches ComfyUI's generate_freq_grid_np). Required for V2.3.
 
@@ -409,16 +316,13 @@ def precompute_freqs_cis(
     # Generate frequencies from positions
     freqs = generate_freqs(indices, indices_grid, max_pos, use_middle_indices_grid)
 
-    # Compute cos/sin based on RoPE type
-    if rope_type == LTXRopeType.SPLIT:
-        expected_freqs = dim // 2
-        current_freqs = freqs.shape[-1]
-        pad_size = expected_freqs - current_freqs
-        cos_freq, sin_freq = split_freqs_cis(freqs, pad_size, num_attention_heads)
-    else:
-        # Interleaved format
-        n_elem = 2 * n_pos_dims
-        cos_freq, sin_freq = interleaved_freqs_cis(freqs, dim % n_elem)
+    if rope_type != LTXRopeType.SPLIT:
+        raise ValueError(f"Invalid rope type: {rope_type}")
+
+    expected_freqs = dim // 2
+    current_freqs = freqs.shape[-1]
+    pad_size = expected_freqs - current_freqs
+    cos_freq, sin_freq = split_freqs_cis(freqs, pad_size, num_attention_heads)
 
     return cos_freq.astype(out_dtype), sin_freq.astype(out_dtype)
 

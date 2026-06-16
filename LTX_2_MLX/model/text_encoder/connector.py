@@ -25,7 +25,7 @@ class BasicTransformerBlock1D(nn.Module):
         dim: int,
         heads: int,
         dim_head: int,
-        rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
+        rope_type: LTXRopeType = LTXRopeType.SPLIT,
         norm_eps: float = 1e-6,
         apply_gated_attention: bool = False,
     ):
@@ -117,7 +117,7 @@ class Embeddings1DConnector(nn.Module):
         positional_embedding_theta: float = 10000.0,
         positional_embedding_max_pos: list[int] | None = None,
         num_learnable_registers: int | None = 128,
-        rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
+        rope_type: LTXRopeType = LTXRopeType.SPLIT,
         norm_eps: float = 1e-6,
         apply_gated_attention: bool = False,
         double_precision_rope: bool = False,

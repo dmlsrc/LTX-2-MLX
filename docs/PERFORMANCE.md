@@ -607,9 +607,8 @@ at five call sites:
 4. Cross-modal A2V/V2A inline scale-shift
 5. Cross-modal A2V/V2A residual gates
 
-Plus `apply_split_rotary_emb` and `apply_interleaved_rotary_emb` fallback in
-rope.py (kept the RoPE fix even though it wasn't the bottleneck — same
-pattern, correct hygiene).
+Plus the RoPE helpers in rope.py (kept the RoPE fix even though it wasn't the
+bottleneck; same pattern, correct hygiene).
 
 #### Verification (post-fix probe)
 
@@ -729,7 +728,7 @@ so the same shell incantation produces directly comparable captures.
 | Largest dispatch gap            | 24 ms     | 100 ms         | **2283 ms**    |
 
 The "no-compile" column was captured with `LTX_DISABLE_COMPILED_ATTN=1
-LTX_DISABLE_COMPILED_HELPERS=1 LTX_DISABLE_FUSED_ROPE=1`.
+LTX_DISABLE_COMPILED_HELPERS=1`.
 
 #### What this overturned from earlier sessions
 
