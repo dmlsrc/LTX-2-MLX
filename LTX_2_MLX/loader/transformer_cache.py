@@ -695,21 +695,22 @@ def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
             or key in comfy_quant_keys
         ):
             continue
+        stored = value
         if key in fp8_keys:
             scale_key = f"{key}_scale"
             if scale_key in weight_scale_keys:
                 # Dequantize in FP32; the scale can push values past the FP16
                 # ceiling, so route through the range-guarded cast.
-                value = _cast_for_cache(
-                    mx.from_fp8(value, dtype=mx.float32)
+                stored = _cast_for_cache(
+                    mx.from_fp8(stored, dtype=mx.float32)
                     * raw_weights[scale_key].astype(mx.float32),
                     value_dtype,
                     key,
                 )
             else:
                 # Plain E4M3 maxes at 448, always in FP16 range.
-                value = mx.from_fp8(value, dtype=value_dtype)
-        yield key, value
+                stored = mx.from_fp8(stored, dtype=value_dtype)
+        yield key, stored
 
 
 def transformer_cache_paths(
@@ -1060,9 +1061,10 @@ def _bake_conv_layout_for_family(family: str, weights: dict[str, mx.array]) -> d
 
     converted: dict[str, mx.array] = {}
     for key, value in weights.items():
+        converted_value = value
         if value.ndim == target_ndim and key.endswith(".weight"):
-            value = mx.contiguous(value.transpose(*perm))
-        converted[key] = value
+            converted_value = mx.contiguous(value.transpose(*perm))
+        converted[key] = converted_value
     return converted
 
 
@@ -1318,11 +1320,12 @@ def build_transformer_cache(
             pending.append(stored)
             shard_bytes += stored.nbytes
         else:
+            stored = value
             if target_dtype is not None and value.dtype != target_dtype:
-                value = _cast_for_cache(value, target_dtype, mlx_key)
-            cache_weights[mlx_key] = value
-            pending.append(value)
-            shard_bytes += value.nbytes
+                stored = _cast_for_cache(value, target_dtype, mlx_key)
+            cache_weights[mlx_key] = stored
+            pending.append(stored)
+            shard_bytes += stored.nbytes
         loaded_count += 1
 
     # Flush the remainder as the final shard. Metadata is written last, so an

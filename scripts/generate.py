@@ -480,14 +480,14 @@ def parse_profile_transformer_steps(value: str | None) -> tuple[int, ...]:
 
     steps = []
     for raw_step in value.split(","):
-        raw_step = raw_step.strip()
-        if not raw_step:
+        step_text = raw_step.strip()
+        if not step_text:
             continue
         try:
-            step = int(raw_step)
+            step = int(step_text)
         except ValueError as exc:
             raise argparse.ArgumentTypeError(
-                f"Invalid denoise step '{raw_step}' in --profile-transformer-steps"
+                f"Invalid denoise step '{step_text}' in --profile-transformer-steps"
             ) from exc
         if step <= 0:
             raise argparse.ArgumentTypeError(
@@ -505,14 +505,14 @@ def parse_profile_transformer_blocks(value: str | None) -> tuple[int, ...]:
 
     blocks = []
     for raw_block in value.split(","):
-        raw_block = raw_block.strip()
-        if not raw_block:
+        block_text = raw_block.strip()
+        if not block_text:
             continue
         try:
-            block = int(raw_block)
+            block = int(block_text)
         except ValueError as exc:
             raise argparse.ArgumentTypeError(
-                f"Invalid transformer block '{raw_block}' in --profile-transformer-blocks"
+                f"Invalid transformer block '{block_text}' in --profile-transformer-blocks"
             ) from exc
         if block < 0:
             raise argparse.ArgumentTypeError(

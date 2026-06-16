@@ -1296,14 +1296,25 @@ class AVPipeline:
             STAGE_2_DISTILLED_SIGMA_VALUES if stage_2_sigmas is None else stage_2_sigmas,
             dtype=mx.float32,
         )
+
+        def emit_progress_message(message: str) -> None:
+            if progress_message is not None:
+                progress_message(message)
+            else:
+                print(message)
+
         _s1o = os.environ.get("LTX_STAGE1_SIGMAS")
         if _s1o:
             stage_1_sigmas = mx.array([float(x) for x in _s1o.split(",") if x.strip()], dtype=mx.float32)
-            print(f"  [LTX_STAGE1_SIGMAS] stage-1 schedule override: {len(stage_1_sigmas) - 1} steps")
+            emit_progress_message(
+                f"  [LTX_STAGE1_SIGMAS] stage-1 schedule override: {len(stage_1_sigmas) - 1} steps"
+            )
         _s2o = os.environ.get("LTX_STAGE2_SIGMAS")
         if _s2o:
             stage_2_sigmas = mx.array([float(x) for x in _s2o.split(",") if x.strip()], dtype=mx.float32)
-            print(f"  [LTX_STAGE2_SIGMAS] stage-2 schedule override: {len(stage_2_sigmas) - 1} steps")
+            emit_progress_message(
+                f"  [LTX_STAGE2_SIGMAS] stage-2 schedule override: {len(stage_2_sigmas) - 1} steps"
+            )
         if len(stage_1_sigmas) < 2:
             raise ValueError("stage_1_sigmas must contain at least two sigma values.")
         if len(stage_2_sigmas) < 2:
@@ -1311,12 +1322,6 @@ class AVPipeline:
         total_steps = len(stage_1_sigmas) + len(stage_2_sigmas) - 2
         if callback:
             callback(0, total_steps)
-
-        def emit_progress_message(message: str) -> None:
-            if progress_message is not None:
-                progress_message(message)
-            else:
-                print(message)
 
         stage_1_loras = lora_configs_for_stage(stage_lora_configs, 1)
         stage_2_total_loras = lora_configs_for_stage(stage_lora_configs, 2)
@@ -1872,21 +1877,24 @@ class AVPipeline:
         noiser = GaussianNoiser()
         stepper = self.diffusion_step
         stage_2_sigmas = mx.array(STAGE_2_DISTILLED_SIGMA_VALUES)
-        _s2_override = os.environ.get("LTX_STAGE2_SIGMAS")
-        if _s2_override:
-            stage_2_sigmas = mx.array([float(x) for x in _s2_override.split(",") if x.strip()])
-            print(f"  [LTX_STAGE2_SIGMAS] stage-2 schedule override: "
-                  f"{[round(float(s), 6) for s in stage_2_sigmas]} "
-                  f"({len(stage_2_sigmas) - 1} steps)")
-        total_steps = len(stage_2_sigmas) - 1
-        if callback:
-            callback(0, total_steps)
 
         def emit_progress_message(message: str) -> None:
             if progress_message is not None:
                 progress_message(message)
             else:
                 print(message)
+
+        _s2_override = os.environ.get("LTX_STAGE2_SIGMAS")
+        if _s2_override:
+            stage_2_sigmas = mx.array([float(x) for x in _s2_override.split(",") if x.strip()])
+            emit_progress_message(
+                f"  [LTX_STAGE2_SIGMAS] stage-2 schedule override: "
+                f"{[round(float(s), 6) for s in stage_2_sigmas]} "
+                f"({len(stage_2_sigmas) - 1} steps)"
+            )
+        total_steps = len(stage_2_sigmas) - 1
+        if callback:
+            callback(0, total_steps)
 
         stage_2_loras = lora_configs_for_stage(stage_lora_configs, 2)
         stage_lora_restore_state = None

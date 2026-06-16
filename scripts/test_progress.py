@@ -571,11 +571,12 @@ def test_write_above_bars_does_not_duplicate_bar_rows() -> None:
     stripped = ansi.sub("", buf.getvalue())
     physical_lines: list[str] = []
     for chunk in stripped.split("\n"):
+        visible_line = chunk
         # If a \r appears, the last segment wins (everything before
         # was overwritten in place on that physical row).
         if "\r" in chunk:
-            chunk = chunk.split("\r")[-1]
-        physical_lines.append(chunk.rstrip())
+            visible_line = chunk.split("\r")[-1]
+        physical_lines.append(visible_line.rstrip())
 
     # Look for adjacent identical bar lines - that would be the dup-bar
     # bug.  Same-label-different-content is fine (e.g. 0/1 vs 1/1);
@@ -771,9 +772,10 @@ def test_raw_print_between_bar_updates_breaks_layout() -> None:
     stripped = ansi.sub("", buf.getvalue())
     physical_lines: list[str] = []
     for chunk in stripped.split("\n"):
+        visible_line = chunk
         if "\r" in chunk:
-            chunk = chunk.split("\r")[-1]
-        physical_lines.append(chunk.rstrip())
+            visible_line = chunk.split("\r")[-1]
+        physical_lines.append(visible_line.rstrip())
     bar_lines = [L for L in physical_lines if "bar [" in L]
     # The bug signature: at least one bar line has the raw print's
     # text appended directly to its content (no `\n` between), because
@@ -827,9 +829,10 @@ def test_progress_message_routes_through_bars_write() -> None:
     stripped = ansi.sub("", buf.getvalue())
     physical_lines: list[str] = []
     for chunk in stripped.split("\n"):
+        visible_line = chunk
         if "\r" in chunk:
-            chunk = chunk.split("\r")[-1]
-        physical_lines.append(chunk.rstrip())
+            visible_line = chunk.split("\r")[-1]
+        physical_lines.append(visible_line.rstrip())
     # No physical line should have BOTH the bar content AND the
     # confirmation text on it - they must be on separate physical
     # lines (because bars.write() ended the bar's row with \n before
