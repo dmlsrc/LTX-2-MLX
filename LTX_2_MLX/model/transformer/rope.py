@@ -4,7 +4,7 @@ import math
 import os
 from enum import Enum
 from functools import lru_cache
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import numpy as np

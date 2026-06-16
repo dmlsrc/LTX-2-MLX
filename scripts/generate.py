@@ -23,7 +23,6 @@ from LTX_2_MLX.model.transformer import (
     LTXModelType,
     LTXRopeType,
     Modality,
-    MultiModalTransformerArgsPreprocessor,
     X0Model,
 )
 from LTX_2_MLX.components.patchifiers import get_pixel_coords
@@ -1104,8 +1103,6 @@ from LTX_2_MLX.pipelines.ic_lora import (
     VideoCondition,
     ICLoraPipeline,
     ICLoraConfig,
-    preprocess_control_signal,
-    load_control_signal_tensor,
 )
 from LTX_2_MLX.pipelines.keyframe_interpolation import (
     KeyframeInterpolationPipeline,

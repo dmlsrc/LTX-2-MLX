@@ -1,7 +1,7 @@
 """Patchification strategies for LTX-2 latent tensors."""
 
 import math
-from typing import Optional, Protocol, Tuple
+from typing import Protocol, Tuple
 
 import mlx.core as mx
 

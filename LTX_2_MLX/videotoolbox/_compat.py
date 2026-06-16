@@ -8,7 +8,6 @@ inside a Metal call.
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 # Sentinel-typed slots so submodules can `from ._compat import av` even when

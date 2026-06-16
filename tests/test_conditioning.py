@@ -13,7 +13,7 @@ from LTX_2_MLX.components.patchifiers import VideoLatentPatchifier
 from LTX_2_MLX.conditioning.keyframe import VideoConditionByKeyframeIndex
 from LTX_2_MLX.conditioning.latent import VideoConditionByLatentIndex, ConditioningError
 from LTX_2_MLX.conditioning.tools import VideoLatentTools
-from LTX_2_MLX.types import LatentState, VideoLatentShape, NATIVE_FPS
+from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
 
 
 class TestVideoConditionByLatentIndex:

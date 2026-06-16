@@ -1,7 +1,6 @@
 """Weight conversion from PyTorch safetensors to MLX format."""
 
 import re
-from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import mlx.core as mx

@@ -10,7 +10,6 @@ sys.path.insert(0, '/Users/mcruz/Developer/LTX-2-MLX')
 sys.path.insert(0, '/Users/mcruz/Developer/LTX-2-Pytorch/packages/ltx-core/src')
 
 import torch
-import torch.nn.functional as F
 import mlx.core as mx
 import mlx.nn as nn
 from safetensors import safe_open

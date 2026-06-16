@@ -3,7 +3,6 @@
 import os
 import pytest
 import mlx.core as mx
-from unittest.mock import MagicMock
 import tempfile
 from PIL import Image
 

@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
 import mlx.core as mx
-import numpy as np
 
 from .common import (
     ImageCondition,
@@ -22,12 +21,10 @@ from .common import (
     create_image_conditionings,
     modality_from_state,
     audio_modality_from_state,
-    post_process_latent,
     maybe_post_process_latent,
 )
 from ..components import (
     STAGE_2_DISTILLED_SIGMA_VALUES,
-    CFGGuider,
     EulerDiffusionStep,
     GaussianNoiser,
     LTX2Scheduler,
@@ -37,7 +34,7 @@ from ..components import (
 )
 from ..components.patchifiers import AudioPatchifier
 from ..conditioning.tools import VideoLatentTools, AudioLatentTools
-from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model, Modality
+from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder

@@ -12,7 +12,7 @@ import mlx.nn as nn
 
 from .rope import LTXRopeType, precompute_freqs_cis
 from .timestep_embedding import AdaLayerNormSingle
-from .transformer import BasicTransformerBlock, BasicAVTransformerBlock, TransformerArgs, TransformerConfig
+from .transformer import BasicAVTransformerBlock, TransformerArgs, TransformerConfig
 from ...components.perturbations import BatchedPerturbationConfig
 
 

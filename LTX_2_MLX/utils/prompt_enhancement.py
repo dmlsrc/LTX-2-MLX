@@ -3,7 +3,6 @@
 Uses Gemma 3 to enhance user prompts for better video generation.
 """
 
-import re
 from typing import Optional
 
 import mlx.core as mx

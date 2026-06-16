@@ -13,7 +13,6 @@ from LTX_2_MLX.types import AudioLatentShape
 
 from .decoder import (
     CausalConv2d,
-    CausalityAxis,
     PerChannelStatistics,
     SimpleResBlock2d,
     LATENT_DOWNSAMPLE_FACTOR,

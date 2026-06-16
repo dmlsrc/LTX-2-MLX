@@ -4,7 +4,6 @@ This module provides shared test configuration, fixtures, and utilities
 for all test files in the test suite.
 """
 
-import os
 import sys
 from pathlib import Path
 from typing import Generator

@@ -6,7 +6,6 @@ Run with: pytest tests/test_upscalers.py -v
 """
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 import pytest
 

@@ -1,7 +1,7 @@
 """Diffusion stepping strategies for LTX-2 sampling."""
 
 import math
-from typing import Optional, Protocol, Tuple, Union
+from typing import Optional, Protocol, Tuple
 
 import mlx.core as mx
 

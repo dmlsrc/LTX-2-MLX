@@ -31,17 +31,13 @@ the A/B isolates exactly the transformer forward.
 
 from __future__ import annotations
 
-import argparse
 import math
-import os
 import sys
-import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -49,11 +45,6 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 # ─── Reused, non-transformer pieces ──────────────────────────────────────────
-import generate as gen  # noqa: E402
-from LTX_2_MLX.components.schedulers import (  # noqa: E402
-    DISTILLED_SIGMA_VALUES,
-    STAGE_2_DISTILLED_SIGMA_VALUES,
-)
 from LTX_2_MLX.model.transformer.rope import (  # noqa: E402
     LTXRopeType,
     apply_rotary_emb,

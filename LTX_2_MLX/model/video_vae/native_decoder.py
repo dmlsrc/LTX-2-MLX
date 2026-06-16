@@ -15,7 +15,6 @@ import mlx.nn as nn
 
 from .native_blocks import (
     NativeConv3dBlock,
-    NativeResBlock3d,  # re-exported for callers that imported via this module
     NativeResBlockGroup,
     lookup_weight,
     pixel_norm_bfhwc,

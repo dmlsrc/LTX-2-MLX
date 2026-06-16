@@ -7,7 +7,7 @@ audio components, and upscalers.
 
 import gc
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Any
 
 import mlx.core as mx
 

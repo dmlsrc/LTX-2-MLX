@@ -1210,7 +1210,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
                    "A fused kernel could save at most a fraction of the GELU pass.")
     elif recoverable_pct < 25:
         verdict = ("MARGINAL — recoverable wall exists but is bounded.  Weigh the "
-                   f"per-step savings ({per_step_ms:+.0f} ms) against multi-day kernel work.")
+                   f"per-step savings ({per_step_b:+.0f} ms) against multi-day kernel work.")
     else:
         verdict = ("PROMISING — meaningful wall and memory headroom above the chained "
                    "GEMM floor.  A one-block fused-kernel prototype is justified.")

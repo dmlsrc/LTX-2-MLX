@@ -10,7 +10,7 @@ This combines the quality of CFG guidance with the speed of distilled refinement
 import gc
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import mlx.core as mx
 
@@ -20,7 +20,6 @@ from .common import (
     create_image_conditionings,
     modality_from_state,
     audio_modality_from_state,
-    post_process_latent,
     maybe_post_process_latent,
 )
 from ..components import (
@@ -49,7 +48,7 @@ from ..loader import (
     restore_transformer_cache_state,
     get_transformer_cache_restore_state,
 )
-from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, Modality, X0Model
+from ..model.transformer import LTXModel, LTXModelType, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder

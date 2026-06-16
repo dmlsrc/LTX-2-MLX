@@ -61,7 +61,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional, TextIO
+from typing import Iterator, Optional
 
 
 # The 8 transformer sub-ops we instrument, plus event-only markers.

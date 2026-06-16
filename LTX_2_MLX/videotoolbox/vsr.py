@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from ._compat import CoreMedia, vt, require_pyobjc
+from ._compat import vt, require_pyobjc
 from . import pixel_buffers as _pb
 
 

@@ -19,7 +19,6 @@ that drove the perf-research thread.
 """
 from __future__ import annotations
 
-import math
 import time
 
 import mlx.core as mx

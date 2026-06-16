@@ -20,7 +20,7 @@ python scripts/generate.py "A rocket launching into space" \
 ### Prerequisites
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
-- Python 3.10+
+- Python 3.14+
 - ~25GB available RAM (128GB recommended for high resolution)
 - ffmpeg for video encoding
 
