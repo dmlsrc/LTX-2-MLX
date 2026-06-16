@@ -148,6 +148,48 @@ Out of scope:
   mode — see matrix).
 - VAE-only visual changes as denoise-speed optimizations.
 
+## MLX Hot-Path Hygiene
+
+Treat every CPU boundary as suspicious until it is proven to be a real boundary
+such as image/video encode, audio IO, sidecar save, parity test, or an explicit
+diagnostic script.  MLX's lazy graphs and mmap-backed safetensors only help if
+the code keeps values in MLX form and lets the graph scheduler see the work.
+
+Common performance smells to avoid:
+
+- Do not round-trip through NumPy for MLX-native math.  Prefer `mx.linspace`,
+  `mx.arange`, `mx.stack`, `mx.concatenate`, `mx.mean`, `mx.max`, etc. over
+  `np.* -> list -> mx.array` or `mx.array(np.*)`.
+- Do not call `np.array(mx_array)` in the generation path just to print stats.
+  That forces a CPU readback and synchronizes the lazy graph.  Put such checks
+  behind an explicit diagnostic flag or reuse sidecars / profiling tools.
+- Do not call `.tolist()` on tensors or schedules unless an external API needs
+  Python scalars.  Python lists destroy dtype/device information and make the
+  next step rebuild MLX arrays.
+- Do not wrap `mx.load(...)` in `dict(...)`, `list(...)`, or similar "just in
+  case" conversions.  Keep the lazy mapping returned by `mx.load` unless there
+  is a concrete reason to copy metadata.
+- Do not wrap MLX arrays in containers just to evaluate them.  If you already
+  have a list of arrays, use `mx.eval(*arrays)`.  If you have a mapping of
+  arrays, use `mx.eval(*weights.values())`.
+- Avoid tiny eager materializations inside loops.  If a checkpoint is needed
+  for memory pressure or watchdog safety, make it explicit and measure the wall
+  time and memory effect.
+- Avoid hidden debug work in default generation.  Printing shapes is cheap;
+  computing means/stds/nan counts by copying activations to NumPy is not.
+
+Useful scans before committing performance-sensitive code:
+
+```bash
+rg -n "dict\s*\(\s*mx\.load|list\s*\(\s*mx\.load|tuple\s*\(\s*mx\.load|set\s*\(\s*mx\.load" LTX_2_MLX scripts tests
+rg -n "mx\.eval\(list\(|mx\.eval\(tuple\(|mx\.eval\(\*\[|mx\.array\(np\.|np\.linspace\([^\n]*\.tolist\(\)" LTX_2_MLX scripts tests
+rg -n "np\.array\([^\n]*\.astype\(mx\.|np\.array\([^\n]*mx\.|\.tolist\(\)" LTX_2_MLX scripts tests
+```
+
+Hits in tests, sidecar helpers, image/audio/video encoders, or standalone probe
+scripts may be fine.  Hits in model loading, LoRA fuse, cache build/load,
+prompt encoding, denoise, or VAE hot paths need a concrete explanation.
+
 ## Measurement Rules
 
 Use the same prompt, seed, weights, Gemma path, resolution, duration or frame
