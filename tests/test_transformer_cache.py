@@ -99,14 +99,14 @@ def test_transformer_cache_payload_keys_quant_group_overrides(tmp_path):
     path = tmp_path / "weights.safetensors"
     mx.save_safetensors(str(path), {"x": mx.array([1.0])})
 
-    common = dict(
-        include_audio=False,
-        video_ff_layout_specs=(),
-        video_ff_layout_layers=(),
-        video_attn_layout_specs=(),
-        video_attn_layout_layers=(),
-        transformer_cache_quantize=TRANSFORMER_CACHE_QUANTIZE_MXFP8_BLOCKS,
-    )
+    common = {
+        "include_audio": False,
+        "video_ff_layout_specs": (),
+        "video_ff_layout_layers": (),
+        "video_attn_layout_specs": (),
+        "video_attn_layout_layers": (),
+        "transformer_cache_quantize": TRANSFORMER_CACHE_QUANTIZE_MXFP8_BLOCKS,
+    }
     a = _cache_payload(str(path), video_ff_quantize_group_size=32, **common)
     b = _cache_payload(str(path), video_ff_quantize_group_size=64, **common)
 

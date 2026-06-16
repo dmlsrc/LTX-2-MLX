@@ -398,7 +398,7 @@ def _flatten_to_nested(flat_dict: Dict[str, mx.array]) -> Dict[str, Any]:
         parts = key.split(".")
         current = nested
 
-        for i, part in enumerate(parts[:-1]):
+        for part in parts[:-1]:
             if part not in current:
                 current[part] = {}
             current = current[part]

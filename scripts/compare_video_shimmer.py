@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare two videos by temporal second-difference (TSD) — a frame-to-frame
+"""Compare two videos by temporal second-difference (TSD) - a frame-to-frame
 "shimmer" / non-smoothness metric.
 
 Why TSD?
@@ -9,14 +9,14 @@ Why TSD?
 
   TSD = |frame[i] - (frame[i-1] + frame[i+1]) / 2|
 
-  cancels smooth (linear) motion — real motion is approximately linear
+  cancels smooth (linear) motion - real motion is approximately linear
   frame-to-frame at small scales, so the midpoint average predicts frame[i]
-  well — and leaves only non-smooth temporal variation: shimmer, flicker,
+  well - and leaves only non-smooth temporal variation: shimmer, flicker,
   cuts, encoding artifacts.  Useful for A/B-ing two videos that show the
   same source content but went through different processing (VSR modes,
   encoder settings, temporal upscaling, etc.).
 
-Streams frames through ffmpeg at full source resolution as gray8 luma —
+Streams frames through ffmpeg at full source resolution as gray8 luma -
 keeps a 3-frame ring buffer in memory, computes per-frame TSD plus an
 8x8 spatial grid of per-patch shimmer, never materializes more than ~30 MB
 of luma at any time regardless of video resolution.
@@ -114,12 +114,18 @@ def stream_tsd(path: str, w: int, h: int, grid: int) -> tuple[np.ndarray, np.nda
 
 def _patch_glyph(value: float) -> str:
     """Compact 2-char glyph for the per-patch ascii heatmap."""
-    if value >= 0.10:    return "##"
-    if value >= 0.05:    return "++"
-    if value >= 0.02:    return "+ "
-    if value <= -0.10:   return "@@"
-    if value <= -0.05:   return "--"
-    if value <= -0.02:   return "- "
+    if value >= 0.10:
+        return "##"
+    if value >= 0.05:
+        return "++"
+    if value >= 0.02:
+        return "+ "
+    if value <= -0.10:
+        return "@@"
+    if value <= -0.05:
+        return "--"
+    if value <= -0.02:
+        return "- "
     return ". "
 
 
@@ -217,15 +223,15 @@ def main() -> None:
     diff_patches = patches_a - patches_b
     print()
     print(f"=== Per-patch shimmer ({label_a} - {label_b}, {args.grid}x{args.grid} grid) ===")
-    print("  (rows top→bottom, cols left→right)")
+    print("  (rows top->bottom, cols left->right)")
     for r in range(args.grid):
         row = "  "
         for c in range(args.grid):
             row += _patch_glyph(diff_patches[r, c]) + " "
         print(row)
     print(
-        "  legend: ##≥0.10  ++≥0.05  + ≥0.02  . ≈0  "
-        "- ≤-0.02  --≤-0.05  @@≤-0.10"
+        "  legend: ##>=0.10  ++>=0.05  + >=0.02  . ~0  "
+        "- <=-0.02  --<=-0.05  @@<=-0.10"
     )
     mx_idx = np.unravel_index(int(diff_patches.argmax()), diff_patches.shape)
     mn_idx = np.unravel_index(int(diff_patches.argmin()), diff_patches.shape)

@@ -55,10 +55,10 @@ def prod_inputs():
     residual = mx.random.normal(shape=(1, PROD_T, PROD_C), dtype=mx.float32).astype(mx.bfloat16)
     branch = mx.random.normal(shape=(1, PROD_T, PROD_C), dtype=mx.float32).astype(mx.bfloat16)
     mx.eval(x, scale, shift, gate, residual, branch)
-    return dict(x=x, scale=scale, shift=shift, gate=gate, residual=residual, branch=branch)
+    return {"x": x, "scale": scale, "shift": shift, "gate": gate, "residual": residual, "branch": branch}
 
 
-# ── adaln_norm_fused ───────────────────────────────────────────────────────
+# -- adaln_norm_fused -------------------------------------------------------
 
 
 def test_adaln_norm_fused_t2v_parity(prod_inputs):
@@ -80,7 +80,7 @@ def test_adaln_t2v_gate_predicate(prod_inputs):
 
 
 def test_adaln_fallback_on_fp32_x(prod_inputs):
-    """fp32 x doesn't match the gate → MLX fallback preserves fp32 output."""
+    """fp32 x doesn't match the gate -> MLX fallback preserves fp32 output."""
     x = prod_inputs["x"].astype(mx.float32)
     scale, shift = prod_inputs["scale"], prod_inputs["shift"]
     y = adaln_norm_fused(x, scale, shift, EPS)
@@ -89,7 +89,7 @@ def test_adaln_fallback_on_fp32_x(prod_inputs):
 
 
 def test_adaln_fallback_on_per_token_scale(prod_inputs):
-    """I2V per-token scale/shift (B, T, C) doesn't match gate → MLX fallback."""
+    """I2V per-token scale/shift (B, T, C) doesn't match gate -> MLX fallback."""
     x = prod_inputs["x"]
     scale_pt = mx.broadcast_to(prod_inputs["scale"], (1, PROD_T, PROD_C))
     shift_pt = mx.broadcast_to(prod_inputs["shift"], (1, PROD_T, PROD_C))
@@ -143,7 +143,7 @@ def test_adaln_unsupported_dim_falls_back():
     assert _cos_sim(y_mlx, y_fused) >= 0.99999  # both = MLX path
 
 
-# ── gated_add_fused ────────────────────────────────────────────────────────
+# -- gated_add_fused --------------------------------------------------------
 
 
 def test_gated_add_fused_t2v_parity(prod_inputs):
@@ -168,7 +168,7 @@ def test_gated_add_t2v_gate_predicate(prod_inputs):
 
 
 def test_gated_add_fallback_on_per_token_gate(prod_inputs):
-    """I2V per-token gate (B, T, C) doesn't match gate → MLX fallback."""
+    """I2V per-token gate (B, T, C) doesn't match gate -> MLX fallback."""
     residual = prod_inputs["residual"]
     branch = prod_inputs["branch"]
     gate_pt = mx.broadcast_to(prod_inputs["gate"], (1, PROD_T, PROD_C))
@@ -202,7 +202,7 @@ def test_gated_add_audio_dim_t2v_parity():
 
 
 def test_gated_add_unsupported_dim_falls_back():
-    """An unsupported C doesn't match any registered kernel → MLX fallback."""
+    """An unsupported C doesn't match any registered kernel -> MLX fallback."""
     B, T, C = 1, 256, 3584  # not in _GATED_ADD_FUSED_CONFIGS
     mx.random.seed(0)
     residual = mx.random.normal(shape=(B, T, C), dtype=mx.float32).astype(mx.bfloat16)

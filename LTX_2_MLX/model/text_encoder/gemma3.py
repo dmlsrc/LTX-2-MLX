@@ -124,7 +124,7 @@ def apply_rotary_pos_emb(
 
     Matches HF Gemma3's `apply_rotary_pos_emb`: keep cos/sin in FP32, let the
     multiply promote Q/K to FP32, then downcast the result back to the input
-    dtype before SDPA (so SDPA still picks its BF16 kernel — propagating FP32
+    dtype before SDPA (so SDPA still picks its BF16 kernel - propagating FP32
     activations to attention compiles a pure-FP32 steel kernel that's ~2x
     slower).  This closes the precision gap vs HF, where running the rotate
     in BF16 was costing ~0.0003 cos sim per layer of accumulated drift.
@@ -137,7 +137,7 @@ def apply_rotary_pos_emb(
     q1, q2 = mx.split(q, 2, axis=-1)
     k1, k2 = mx.split(k, 2, axis=-1)
 
-    cos = cos[None, None, :, :]  # stays FP32 — promotes the multiplies below
+    cos = cos[None, None, :, :]  # stays FP32 - promotes the multiplies below
     sin = sin[None, None, :, :]
 
     # Apply rotation (FP32 because cos/sin are FP32) and downcast back to BF16.
@@ -319,7 +319,7 @@ class Gemma3Model(nn.Module):
         # Embedding scale factor (Gemma multiplies embeddings by sqrt(hidden_size))
         self.embed_scale = config.hidden_size ** 0.5
 
-        # Transformer layers — each with its own layer type (sliding or full attention)
+        # Transformer layers - each with its own layer type (sliding or full attention)
         self.layers = [
             Gemma3DecoderLayer(config, layer_type=config.layer_types[i])
             for i in range(config.num_hidden_layers)
@@ -362,7 +362,7 @@ class Gemma3Model(nn.Module):
         # Collect hidden states (PyTorch adds hidden states at START of each layer iteration)
         all_hidden_states = [] if output_hidden_states else None
 
-        # Create boolean attention masks — separate for sliding and full attention layers.
+        # Create boolean attention masks - separate for sliding and full attention layers.
         # Using bool masks (True=attend, False=block) matching HF Gemma3 behavior.
         # This is critical: additive float masks cause NaN for all-padded rows,
         # and the "fix" of setting padded rows to attend-all produces different
@@ -396,7 +396,7 @@ class Gemma3Model(nn.Module):
         except ImportError:
             layer_iter = list(enumerate(self.layers))
 
-        for i, layer in layer_iter:
+        for _, layer in layer_iter:
             # Add hidden states BEFORE each layer (matching PyTorch behavior)
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)

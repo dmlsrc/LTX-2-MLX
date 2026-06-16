@@ -93,7 +93,7 @@ class FakeBlock:
 
         if run_vx:
             assert video is not None and vx is not None
-            # mock the body — just stamp profile names + lookups
+            # mock the body - just stamp profile names + lookups
             mark_profile("video self-attn adaln")
             mark_profile("video self-attn residual", vx)
             self._apply_text_cross_attention(
@@ -147,7 +147,7 @@ def main() -> None:
             v, a = v_args, a_args
 
     t0 = time.perf_counter()
-    for step in range(n_steps):
+    for _ in range(n_steps):
         v = FakeArgs(x=1, context=2, timesteps=3)
         a = FakeArgs(x=4, context=5, timesteps=6)
         for b in blocks:
@@ -160,7 +160,7 @@ def main() -> None:
 
     print(f"Total: {elapsed:.3f}s for {n_steps} steps x {n_blocks} blocks")
     print(f"Per step: {per_step_ms:.2f} ms")
-    print(f"Per block: {per_block_us:.1f} µs")
+    print(f"Per block: {per_block_us:.1f} us")
     print()
     print("Hypothesis: ~1.4 s/step gap at stage 1")
     print(f"Observed Python-only cost per step: {per_step_ms:.2f} ms")

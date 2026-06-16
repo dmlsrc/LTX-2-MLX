@@ -6,7 +6,7 @@ video + audio ONCE through the VAE / vocoder, then re-encodes the SAME decoded
 result through a list of named ffmpeg presets so codec / bit-depth / chroma /
 audio-codec choices can be A/B compared without re-running diffusion.
 
-Frames are piped straight to ffmpeg via stdin (rawvideo) — no PNG round-trip.
+Frames are piped straight to ffmpeg via stdin (rawvideo) - no PNG round-trip.
 Use `--frame-bit-depth 16` when running 10-bit or RGB-lossless presets so the
 source feeding the encoder is rgb48le, not rgb24.
 
@@ -106,7 +106,7 @@ def make_video_decoder(
 
 
 # Benchmark-only presets that aren't part of the production TIERS ladder.
-# These exist for A/B testing — banding fixes, lossless ground truth, hardware
+# These exist for A/B testing - banding fixes, lossless ground truth, hardware
 # H.264 (kept as documentation), HEVC VT q-sweep, audio codec A/Bs, etc.
 HARNESS_EXTRAS: dict[str, EncodePreset] = {
     "h265_10bit_420": EncodePreset(
@@ -413,7 +413,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Resolve tiling the same way scripts/generate.py does. With the
     # native backend `TilingConfig.auto` may return None (no tiling
-    # needed) and the decode runs as a single pass through decode_latent —
+    # needed) and the decode runs as a single pass through decode_latent -
     # NO spatial seams. The legacy simple-decoder branch always splits
     # spatially for width > 512, which is what was creating edge artifacts.
     from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_tiled
@@ -483,7 +483,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             pass
 
     writers: list[threading.Thread] = []
-    for preset, proc, raw_pix_fmt, _, _, q in encoders:
+    for preset, proc, _, _, _, q in encoders:
         t = threading.Thread(target=_writer, args=(proc, q, preset.name), daemon=False)
         t.start()
         writers.append(t)

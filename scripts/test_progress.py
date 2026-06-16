@@ -55,7 +55,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     if condition:
         print(f"  PASS  {name}")
     else:
-        msg = f"{name}{(' — ' + detail) if detail else ''}"
+        msg = f"{name}{(' - ' + detail) if detail else ''}"
         print(f"  FAIL  {msg}")
         _FAILURES.append(msg)
 
@@ -71,7 +71,7 @@ def near(actual: float, expected: float, tol: float) -> bool:
 def test_first_tick_records_duration() -> None:
     """A bar at 1/N must show a measured pace, not the n=0 'measuring'
     placeholder.  Verifies that the first `update()` advances `_t_last`
-    so elapsed becomes non-zero — pace is derived from
+    so elapsed becomes non-zero - pace is derived from
     `n / (now - origin)`."""
     print("\n[1] first tick advances the clock past origin")
     buf = io.StringIO()
@@ -85,7 +85,7 @@ def test_first_tick_records_duration() -> None:
             b._t_last is not None,
         )
         check(
-            "elapsed since origin ≈ time slept before first update",
+            "elapsed since origin ~ time slept before first update",
             near(elapsed, 0.05, 0.04),
             f"got {elapsed * 1000:.1f} ms (expected ~50 ms)",
         )
@@ -101,7 +101,7 @@ def test_first_tick_records_duration() -> None:
 
 def _parse_duration(s: str) -> Optional[float]:
     """Parse the dashed clock format (`--:--:SS`, `--:MM:SS`, `HH:MM:SS`)
-    back to seconds. Substitutes `--` → `00` then parses HH:MM:SS."""
+    back to seconds. Substitutes `--` -> `00` then parses HH:MM:SS."""
     s = s.strip().replace("--", "00")
     m = re.match(r"^(\d+):(\d{2}):(\d{2})$", s)
     if m:
@@ -112,7 +112,7 @@ def _parse_duration(s: str) -> Optional[float]:
 def test_fmt_duration_covers_all_scales() -> None:
     """`_fmt_duration` returns `HH:MM:SS` with leading-zero groups
     replaced by `--:` so the active fields stand out. Always 8 chars
-    up to 99:59:59 — no use-site padding needed.
+    up to 99:59:59 - no use-site padding needed.
     """
     print("\n[8] _fmt_duration: dashed HH:MM:SS, 8 chars constant")
     cases = [
@@ -130,10 +130,10 @@ def test_fmt_duration_covers_all_scales() -> None:
         (3599.5,     "01:00:00"),  # carry past hour reveals HH field
         (3600.0,     "01:00:00"),
         (3660.0,     "01:01:00"),
-        (86400.0,    "24:00:00"),  # 24 hours — primary target
+        (86400.0,    "24:00:00"),  # 24 hours - primary target
         (90061.0,    "25:01:01"),
         (359999.0,   "99:59:59"),  # just under 100h
-        (360000.0,   "100:00:00"), # 100h+ — column overflows by 1
+        (360000.0,   "100:00:00"), # 100h+ - column overflows by 1
     ]
     for seconds, expected in cases:
         got = _fmt_duration(seconds)
@@ -146,26 +146,26 @@ def test_fmt_duration_covers_all_scales() -> None:
     for seconds in (0.0, 59.9, 60.0, 3599.0, 3600.0, 86400.0, 359999.0):
         got = _fmt_duration(seconds)
         check(
-            f"{seconds:>8}s → {got!r} is exactly 8 chars",
+            f"{seconds:>8}s -> {got!r} is exactly 8 chars",
             len(got) == 8,
             f"got len={len(got)}",
         )
 
 
 def test_eta_uses_post_update_count() -> None:
-    """ETA at 1/N with constant pace t should be ~(N-1)·t, not N·t.
+    """ETA at 1/N with constant pace t should be ~(N-1)*t, not N*t.
     Regression for the bug where the count used for ETA hadn't been
     incremented yet at the moment of render."""
     print("\n[4] ETA reflects post-update count")
     buf = io.StringIO()
     with redirect_stderr(buf):
         # 1.0 s/tick so ETA differences survive HH:MM:SS rounding:
-        # 3 remaining x 1.0 → 00:00:03 (fixed) vs 4 x 1.0 → 00:00:04 (bug).
+        # 3 remaining x 1.0 -> 00:00:03 (fixed) vs 4 x 1.0 -> 00:00:04 (bug).
         b = PhaseBar(total=4, desc="t", unit="it", mininterval=0.0)
         time.sleep(1.0)
         b.update(1)
         line = b._build_line()
-        # Line shape: "... | ETA <HH:MM:SS> | <pace>" — match the field
+        # Line shape: "... | ETA <HH:MM:SS> | <pace>" - match the field
         # between "ETA " and " |".
         m = re.search(r"ETA\s+(\S+)\s+\|", line)
         check("line contains ETA field", m is not None, f"line={line!r}")
@@ -174,7 +174,7 @@ def test_eta_uses_post_update_count() -> None:
             check("ETA field is parseable", eta is not None, f"got {m.group(1)!r}")
             if eta is not None:
                 check(
-                    "eta ≈ remaining x median (not (remaining+1) x median)",
+                    "eta ~ remaining x median (not (remaining+1) x median)",
                     near(eta, 3.0, 1.0),
                     f"got eta={eta}s (expected ~3s, would be ~4s on the bug)",
                 )
@@ -182,15 +182,15 @@ def test_eta_uses_post_update_count() -> None:
 
 
 def test_pace_elapsed_count_are_math_consistent() -> None:
-    """The OCD invariant: at any moment, `pace x elapsed ≈ n_so_far` and
-    `eta x pace ≈ total - n_so_far` (within rounding noise).
+    """The OCD invariant: at any moment, `pace x elapsed ~ n_so_far` and
+    `eta x pace ~ total - n_so_far` (within rounding noise).
 
     Regression: an earlier median-of-window implementation displayed an
     "instantaneous" pace that didn't multiply out to the work actually
-    done — fine for a stable phase but dishonest across cross-phase
+    done - fine for a stable phase but dishonest across cross-phase
     waits (e.g. VSR pace x RUN underestimated frames done by ~30%).
     """
-    print("\n[5] pace x elapsed ≈ n; eta x pace ≈ remaining")
+    print("\n[5] pace x elapsed ~ n; eta x pace ~ remaining")
     buf = io.StringIO()
     with redirect_stderr(buf):
         b = PhaseBar(total=30, desc="t", unit="it", mininterval=0.0)
@@ -205,19 +205,19 @@ def test_pace_elapsed_count_are_math_consistent() -> None:
             b.update(1)
         elapsed = (b._t_last or 0) - b._t_origin
         sec_per_unit = elapsed / b._n
-        # pace x elapsed must equal n exactly (no slop — same arithmetic).
+        # pace x elapsed must equal n exactly (no slop - same arithmetic).
         check(
             "pace x elapsed == n_so_far (exact)",
             abs(sec_per_unit * b._n - elapsed) < 1e-9,
             f"pace*elapsed={sec_per_unit * b._n}, elapsed={elapsed}",
         )
-        # ETA x pace ≈ remaining (within rounding from int-second display).
+        # ETA x pace ~ remaining (within rounding from int-second display).
         # The displayed ETA = remaining * sec_per_unit (same math), so
         # exact at the model layer; rounding happens in _fmt_duration.
         remaining = 30 - b._n
         eta_seconds = remaining * sec_per_unit
         check(
-            "model eta ≈ remaining x sec_per_unit",
+            "model eta ~ remaining x sec_per_unit",
             near(eta_seconds, remaining * sec_per_unit, 1e-9),
             f"eta={eta_seconds}, remaining={remaining}, spu={sec_per_unit}",
         )
@@ -226,12 +226,12 @@ def test_pace_elapsed_count_are_math_consistent() -> None:
 
 def test_line_columns_do_not_jitter() -> None:
     """As n grows from 1-digit to 3-digit values and elapsed crosses the
-    minute threshold, every section's width must stay constant — that's
+    minute threshold, every section's width must stay constant - that's
     the whole point of the fixed-width allocation. Measured by section
     length, splitting on ` | ` (the unambiguous separator between
     prefix / STEP1 / RUN / ETA / pace).
 
-    The prefix section is `<indent><label> [<bar>] <count> <pct>` — its
+    The prefix section is `<indent><label> [<bar>] <count> <pct>` - its
     width depends on indent + label (both fixed for one bar), bar_width
     (fixed), count_str (fixed via n_width), and pct_str (fixed `5.1f%`).
     """
@@ -284,15 +284,15 @@ def test_line_columns_do_not_jitter() -> None:
 
 
 def test_count_column_scales_with_total() -> None:
-    """The count column width is `max(3, len(str(total))) * 2 + 1` —
+    """The count column width is `max(3, len(str(total))) * 2 + 1` -
     verify large totals (9999, 10_000+) don't truncate or overflow."""
     print("\n[6b] count column scales to large totals (9999, 10000+)")
     for total, max_n_token in [
         (3,     "3/3"),          # 3 chars; padded into a 7-char slot
         (80,    "80/80"),        # 5 chars; padded into a 7-char slot
         (999,   "999/999"),      # 7 chars; fills the 7-char slot exactly
-        (9999,  "9999/9999"),    # 9 chars; n_width grows to 4 → 9-char slot
-        (10000, "10000/10000"),  # 11 chars; n_width grows to 5 → 11-char slot
+        (9999,  "9999/9999"),    # 9 chars; n_width grows to 4 -> 9-char slot
+        (10000, "10000/10000"),  # 11 chars; n_width grows to 5 -> 11-char slot
     ]:
         buf = io.StringIO()
         with redirect_stderr(buf):
@@ -302,7 +302,7 @@ def test_count_column_scales_with_total() -> None:
             b._t_last = b._t_origin + 0.1
             line = b._build_line()
             b.close()
-        # Extract just the count column — between "] " (after the bar) and " |".
+        # Extract just the count column - between "] " (after the bar) and " |".
         m = re.search(r"\] +(\S+(?:/\S+)?) +\|", line)
         check(
             f"total={total}: count slot contains the largest token {max_n_token!r}",
@@ -313,7 +313,7 @@ def test_count_column_scales_with_total() -> None:
 
 def test_bar_width_pinned() -> None:
     """The rendered `[####----]` segment must be exactly `bar_width`
-    chars regardless of the rest of the line — that's why we build the
+    chars regardless of the rest of the line - that's why we build the
     bar string ourselves rather than letting it stretch to fill."""
     print("\n[6] visual bar width matches bar_width parameter")
     buf = io.StringIO()
@@ -367,7 +367,7 @@ def test_stacked_bars_share_count_column() -> None:
 def test_stacked_bars_share_visual_width() -> None:
     """Two stacked bars whose line lengths differ (different total widths,
     different unit names, etc.) must still render `[####----]` segments
-    of the same visual width — driven by the same `bar_width` parameter."""
+    of the same visual width - driven by the same `bar_width` parameter."""
     print("\n[7] stacked bars share visual width across line lengths")
     buf = io.StringIO()
     with redirect_stderr(buf):
@@ -402,7 +402,7 @@ def test_stacked_bars_share_label_column() -> None:
     """Stacked bars with different `desc` lengths must left-justify the
     label in a column wide enough for the longest one, so the `[` opening
     every bar's progress segment lines up vertically (e.g. "VAE chunks"
-    at 10 chars next to "VT encode" at 9 chars — both render with the
+    at 10 chars next to "VT encode" at 9 chars - both render with the
     label padded to 10 chars + space + `[`)."""
     print("\n[8] stacked bars share label column across disparate desc lengths")
     buf = io.StringIO()
@@ -446,7 +446,7 @@ def test_stacked_bars_share_pace_number_column() -> None:
         with StackedPhaseBars() as bars:
             fast = bars.add(total=1, desc="fast", unit="chunk", mininterval=0.0)
             slow = bars.add(total=361, desc="slow", unit="frame", mininterval=0.0)
-            # Synthesize timings directly — avoid wall-clock variance.
+            # Synthesize timings directly - avoid wall-clock variance.
             fast._n = 1
             fast._t_last = fast._t_origin + 0.00002    # ~50000 chunk/s
             slow._n = 1
@@ -555,7 +555,7 @@ def test_write_above_bars_does_not_duplicate_bar_rows() -> None:
     rendering of the same bar.
 
     Regression for: bars.write() reserving rows via `\\n * n_bars`
-    then writing bar content via cursor-up-then-content — in file
+    then writing bar content via cursor-up-then-content - in file
     captures the reserved blank row and the redrawn bar landed on
     separate file lines, producing the visible duplicate.
     """
@@ -572,7 +572,7 @@ def test_write_above_bars_does_not_duplicate_bar_rows() -> None:
 
     # Strip ANSI escapes and apply `\r`-overwrite semantics:
     # within each newline-delimited file line, anything before the
-    # last `\r` is "overwritten" by what follows — i.e., the terminal
+    # last `\r` is "overwritten" by what follows - i.e., the terminal
     # only displays the final post-\r content on that physical line.
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
     stripped = ansi.sub("", buf.getvalue())
@@ -584,7 +584,7 @@ def test_write_above_bars_does_not_duplicate_bar_rows() -> None:
             chunk = chunk.split("\r")[-1]
         physical_lines.append(chunk.rstrip())
 
-    # Look for adjacent identical bar lines — that would be the dup-bar
+    # Look for adjacent identical bar lines - that would be the dup-bar
     # bug.  Same-label-different-content is fine (e.g. 0/1 vs 1/1);
     # only adjacent identical strings count as a duplicate.
     def has_adjacent_dup(lines, predicate):
@@ -652,7 +652,7 @@ def test_lazy_bar_add_after_write() -> None:
     the existing bar must continue to render correctly at its row
     while the new bar gets its own row below.  Bug class: bars.write()
     leaving stale cursor / row state that breaks a subsequent
-    bars.add() — would manifest as overlapping bars or one bar
+    bars.add() - would manifest as overlapping bars or one bar
     overwriting the other.
     """
     print("\n[15] lazy bar add after bars.write(position='below')")
@@ -811,7 +811,7 @@ def test_progress_message_routes_through_bars_write() -> None:
     """Pipeline-side regression check: when the pipeline emits a
     confirmation through `progress_message`, the message must NOT
     corrupt the bar's row.  Compare against
-    test_raw_print_between_bar_updates_breaks_layout — using
+    test_raw_print_between_bar_updates_breaks_layout - using
     bars.write(position="below") keeps the bar and the message on
     DIFFERENT physical lines in the captured output.
     """
@@ -826,7 +826,7 @@ def test_progress_message_routes_through_bars_write() -> None:
             bar.update(1)
             bar.update(1)
             bar.update(1)
-            # Pipeline-style: emit confirmation via bars.write() —
+            # Pipeline-style: emit confirmation via bars.write() -
             # this is what the fixed _save_distilled_two_stage_latents
             # does when `progress_message` is supplied.
             bars.write(
@@ -842,7 +842,7 @@ def test_progress_message_routes_through_bars_write() -> None:
             chunk = chunk.split("\r")[-1]
         physical_lines.append(chunk.rstrip())
     # No physical line should have BOTH the bar content AND the
-    # confirmation text on it — they must be on separate physical
+    # confirmation text on it - they must be on separate physical
     # lines (because bars.write() ended the bar's row with \n before
     # emitting the message).
     no_stomp = not any(
@@ -864,7 +864,7 @@ def test_progress_message_routes_through_bars_write() -> None:
 
 def test_no_raw_prints_in_progress_message_methods() -> None:
     """Static lint: any pipeline method that takes a `progress_message`
-    callback must NOT contain raw `print()` calls inside its body —
+    callback must NOT contain raw `print()` calls inside its body -
     those would stomp the caller's bars when a bar UI is active.
 
     Allowlist: the documented `print(message)` fallback inside
@@ -913,7 +913,7 @@ def test_no_raw_prints_in_progress_message_methods() -> None:
                 func = child.func
                 if not (isinstance(func, ast.Name) and func.id == "print"):
                     continue
-                # Allowlist: `print(message)` — the documented fallback
+                # Allowlist: `print(message)` - the documented fallback
                 # inside emit_progress_message and _save_distilled_two_stage_latents
                 # for when progress_message is None.
                 if (
@@ -980,7 +980,7 @@ def test_set_n_forwards_absolute_step() -> None:
     with redirect_stderr(buf):
         bar3 = PhaseBar(total=10, desc="b3", unit="step", mininterval=0.0)
         bar3.set_n(7)
-        bar3.set_n(4)   # backward — must clamp to no-op
+        bar3.set_n(4)   # backward - must clamp to no-op
     check(
         "backward set_n() is a no-op (does not rewind)",
         bar3._n == 7,
@@ -991,7 +991,7 @@ def test_set_n_forwards_absolute_step() -> None:
     with redirect_stderr(buf):
         bar4 = PhaseBar(total=10, desc="b4", unit="step", mininterval=0.0)
         bar4.set_n(5)
-        bar4.set_n(5)   # same step — must be no-op
+        bar4.set_n(5)   # same step - must be no-op
     check(
         "idempotent set_n() does not double-tick",
         bar4._n == 5,
@@ -1002,7 +1002,7 @@ def test_set_n_forwards_absolute_step() -> None:
 def test_write_below_force_renders_final_state() -> None:
     """`bars.write(position="below")` must force-render every active bar
     before freezing them, so the persisted state shows the actual final
-    counts — not whatever was on screen at the previous
+    counts - not whatever was on screen at the previous
     mininterval-rate-limited render.
 
     Regression test for the "239/241 frozen" symptom: when the encoder
@@ -1030,7 +1030,7 @@ def test_write_below_force_renders_final_state() -> None:
     stripped = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
     # The bar render before the "done: ..." message must include the
     # final count "10/10".  Splitting on "done:" gives everything that
-    # was emitted before the below-write — that's where the final
+    # was emitted before the below-write - that's where the final
     # render is.
     pre, _, post = stripped.partition("done: 10 frames")
     check(
@@ -1092,7 +1092,7 @@ def demo_vae_vsr_streaming() -> None:
       * Both bars share label / count / pace-number columns.
       * VAE pace settles in "X.X s/chunk" form; VT pace shows
         "XX.X frame/s" once the first frame completes.
-      * Cursor parks at column 0 of the row below the bottom bar — no
+      * Cursor parks at column 0 of the row below the bottom bar - no
         extra blank line, no "done:" appended to the bar row.
     """
     n_chunks = 4
@@ -1131,7 +1131,7 @@ def demo_denoise_with_step1() -> None:
       * STEP1 column populates only after the first update.
       * STEP1 reads `--:--:01` once the slow first step completes;
         subsequent steps tick fast and STEP1 stays fixed at that value
-        — STEP1 reports the FIRST step's duration, not the running pace.
+        - STEP1 reports the FIRST step's duration, not the running pace.
       * RUN climbs across all steps; ETA shrinks; pace reflects the
         running average.
     """
@@ -1167,7 +1167,7 @@ def demo_denoise_stacked() -> None:
       * The inter-stage messages land above Stage 1's frozen bar; the
         bar redraws cleanly below each message.
       * When Stage 2 is added (lazy), it slots in below Stage 1 in
-        the same stack — no overlap, both bars share the layout.
+        the same stack - no overlap, both bars share the layout.
     """
     _header(
         "Stage 1 + Stage 2 denoise stacked (lazy add + interstage messages)",
@@ -1189,7 +1189,7 @@ def demo_denoise_stacked() -> None:
         # Inter-stage pipeline messages (same content `av_pipeline.py`
         # emits via progress_message between stage 1 and stage 2).
         # position="below" leaves Stage 1's bar frozen at its row and
-        # routes the messages BELOW it — Stage 2's bar then slots in
+        # routes the messages BELOW it - Stage 2's bar then slots in
         # under the messages when added next.
         bars.write(
             "  Upsampling latent 2x with spatial upscaler...",
@@ -1334,7 +1334,7 @@ def demo_column_growth() -> None:
 
 def demo_single_bar_fast() -> None:
     """One bar ticking ~5000 it/s.  Stress-tests mininterval throttling
-    — without it the terminal would be saturated by render calls.  Pace
+    - without it the terminal would be saturated by render calls.  Pace
     should settle into a steady value, RUN climb in seconds, ETA
     shrink monotonically.
     """
@@ -1449,7 +1449,7 @@ def main() -> int:
             print()
             list_scenarios()
         elif args.demo == "all":
-            for name, fn in SCENARIOS.items():
+            for _, fn in SCENARIOS.items():
                 fn()
         elif args.demo in SCENARIOS:
             SCENARIOS[args.demo]()

@@ -36,7 +36,7 @@ Environment variables:
 
 Recommended invocation for the video_self_attn outlier hunt (assumes you've
 sourced docs/TEST_PROMPTS.md to get $BAKERY).  Log output goes to
-$SHARED_TEMP_DIR/trace_analysis/ when set (preferred — shared between
+$SHARED_TEMP_DIR/trace_analysis/ when set (preferred - shared between
 accounts, survives reboots), otherwise falls back to ${TMPDIR:-/tmp}.
 
     LTX_PROBE_TIME_SDPA=1 \\
@@ -113,7 +113,7 @@ def _patched_sdpa(q, k, v, scale=None, mask=None, **kwargs):
     if _TIME_SDPA:
         # mx.eval inputs first so the timer doesn't pick up upstream work.
         # If we're called from inside a compiled context, mx.eval raises
-        # ValueError — fall back to untimed dispatch and continue.
+        # ValueError - fall back to untimed dispatch and continue.
         try:
             mx.eval(q, k, v)
             if mask is not None:
@@ -125,7 +125,7 @@ def _patched_sdpa(q, k, v, scale=None, mask=None, **kwargs):
             _per_sig_ms[sig].append(ms)
         except ValueError as e:
             if "eval" in str(e) and "compile" in str(e):
-                # Inside a compiled function — can't break the graph.
+                # Inside a compiled function - can't break the graph.
                 # Record the call signature but skip timing.
                 return _orig_sdpa(q, k, v, scale=scale, mask=mask, **kwargs)
             raise
@@ -171,10 +171,14 @@ def _dump_report():
     print(f"[probe] UNIQUE SIGNATURES: {len(_sig_counter)}", flush=True)
     print("=" * 78, flush=True)
     for i, (sig, n) in enumerate(_sig_counter.most_common()):
-        q_dt = sig[0][1]; q_sh = sig[0][2]
-        k_dt = sig[1][1]; k_sh = sig[1][2]
-        v_dt = sig[2][1]; v_sh = sig[2][2]
-        m_dt = sig[3][1]; m_sh = sig[3][2]
+        q_dt = sig[0][1]
+        q_sh = sig[0][2]
+        k_dt = sig[1][1]
+        k_sh = sig[1][2]
+        v_dt = sig[2][1]
+        v_sh = sig[2][2]
+        m_dt = sig[3][1]
+        m_sh = sig[3][2]
         print(f"\n[{i:2d}] {n:5d} calls", flush=True)
         print(f"    q: {str(q_dt):12s} {q_sh}", flush=True)
         print(f"    k: {str(k_dt):12s} {k_sh}", flush=True)
@@ -242,7 +246,7 @@ atexit.register(_dump_report)
 # Default to LTX-2-MLX's scripts/generate.py via run_path; set
 # LTX_PROBE_MODULE to a dotted module path (e.g.
 # mlx_video.models.ltx_2.generate) for projects that use
-# package-relative imports — those need run_module so the package
+# package-relative imports - those need run_module so the package
 # context is set up. LTX_PROBE_SCRIPT still works for standalone files.
 import runpy
 
