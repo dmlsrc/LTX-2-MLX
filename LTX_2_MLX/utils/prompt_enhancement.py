@@ -366,11 +366,10 @@ def generate_enhanced_prompt(
             max_new_tokens=max_new_tokens,
             seed=seed,
         )
-    else:
-        return enhance_prompt_t2v(
-            user_prompt=prompt,
-            gemma_model=gemma_model,
-            tokenizer=tokenizer,
-            max_new_tokens=max_new_tokens,
-            seed=seed,
-        )
+    return enhance_prompt_t2v(
+        user_prompt=prompt,
+        gemma_model=gemma_model,
+        tokenizer=tokenizer,
+        max_new_tokens=max_new_tokens,
+        seed=seed,
+    )

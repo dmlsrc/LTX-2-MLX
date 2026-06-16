@@ -1563,10 +1563,9 @@ class LTXModel(nn.Module):
         # --- Return Logic ---
         if self.model_type == LTXModelType.VideoOnly:
             return video_out
-        elif self.model_type == LTXModelType.AudioOnly:
+        if self.model_type == LTXModelType.AudioOnly:
             return audio_out
-        else:
-            return video_out, audio_out
+        return video_out, audio_out
 
 
 class X0Model(nn.Module):
@@ -1615,13 +1614,12 @@ class X0Model(nn.Module):
                 # Video-only inference on AV model - return video only
                 return denoised_video
             return denoised_video, denoised_audio
-        else:
-            # VideoOnly or AudioOnly case
-            if video is not None:
-                return denoise(video, output)
-            elif audio is not None:
-                return denoise(audio, output)
-            return output
+        # VideoOnly or AudioOnly case
+        if video is not None:
+            return denoise(video, output)
+        if audio is not None:
+            return denoise(audio, output)
+        return output
 
 
 # Aliases for backward compatibility

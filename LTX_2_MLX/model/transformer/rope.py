@@ -47,10 +47,9 @@ def apply_rotary_emb(
     """
     if rope_type == LTXRopeType.INTERLEAVED:
         return apply_interleaved_rotary_emb(input_tensor, freqs_cis[0], freqs_cis[1])
-    elif rope_type == LTXRopeType.SPLIT:
+    if rope_type == LTXRopeType.SPLIT:
         return apply_split_rotary_emb(input_tensor, freqs_cis[0], freqs_cis[1])
-    else:
-        raise ValueError(f"Invalid rope type: {rope_type}")
+    raise ValueError(f"Invalid rope type: {rope_type}")
 
 
 def apply_interleaved_rotary_emb(

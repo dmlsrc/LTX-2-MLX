@@ -477,16 +477,16 @@ def _load_res_block_weight(blocks: list, key: str, value: mx.array, prefix: str)
         else:
             block.conv1_bias = value
         return 1
-    elif layer_name == "conv2":
+    if layer_name == "conv2":
         if param_name == "weight":
             block.conv2_weight = value
         else:
             block.conv2_bias = value
         return 1
-    elif layer_name == "norm1":
+    if layer_name == "norm1":
         setattr(block.norm1, param_name, value)
         return 1
-    elif layer_name == "norm2":
+    if layer_name == "norm2":
         setattr(block.norm2, param_name, value)
         return 1
 
@@ -502,10 +502,10 @@ def _load_upsampler_weight(upsampler: SpatialRationalResampler, key: str, value:
         value = value.transpose(0, 2, 3, 1)
         upsampler.conv_weight = value
         return 1
-    elif key in ("upsampler.conv.bias", "upsampler.0.bias"):
+    if key in ("upsampler.conv.bias", "upsampler.0.bias"):
         upsampler.conv_bias = value
         return 1
-    elif key == "upsampler.blur_down.kernel":
+    if key == "upsampler.blur_down.kernel":
         upsampler.blur_down.kernel = value
         return 1
     return 0

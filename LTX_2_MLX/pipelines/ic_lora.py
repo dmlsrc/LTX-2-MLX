@@ -176,7 +176,7 @@ def preprocess_control_signal(
             high_threshold=kwargs.get("high_threshold", 200),
             output_path=output_path,
         )
-    elif control_type == ControlType.RAW:
+    if control_type == ControlType.RAW:
         # Load video without preprocessing
         try:
             import cv2
@@ -206,8 +206,7 @@ def preprocess_control_signal(
             frames.append(frames[-1])
 
         return np.stack(frames, axis=0)
-    else:
-        raise ValueError(f"Unknown control type: {control_type}")
+    raise ValueError(f"Unknown control type: {control_type}")
 
 
 def load_control_signal_tensor(

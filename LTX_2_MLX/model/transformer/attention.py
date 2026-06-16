@@ -305,8 +305,7 @@ def _attention_core(
                 )
             _kv_downsample_record(reason)
         return _compiled_attention_core_no_mask(q, k, v, heads, dim_head)
-    else:
-        return _compiled_attention_core_with_mask(q, k, v, heads, dim_head, mask)
+    return _compiled_attention_core_with_mask(q, k, v, heads, dim_head, mask)
 
 
 def rms_norm(x: mx.array, weight: mx.array | None = None, eps: float = 1e-6) -> mx.array:

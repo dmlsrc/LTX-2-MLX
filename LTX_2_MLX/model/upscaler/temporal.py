@@ -389,16 +389,16 @@ def _load_res_block_weight(blocks: list, key: str, value: mx.array, prefix: str)
         else:
             block.conv1_bias = value
         return 1
-    elif layer_name == "conv2":
+    if layer_name == "conv2":
         if param_name == "weight":
             block.conv2_weight = value
         else:
             block.conv2_bias = value
         return 1
-    elif layer_name == "norm1":
+    if layer_name == "norm1":
         setattr(block.norm1, param_name, value)
         return 1
-    elif layer_name == "norm2":
+    if layer_name == "norm2":
         setattr(block.norm2, param_name, value)
         return 1
 

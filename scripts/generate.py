@@ -1294,8 +1294,7 @@ def progress_bar(iterable, desc=None, total=None):
     """
     if HAS_TQDM:
         return tqdm(iterable, desc=desc, total=total, ncols=80, ascii=True, mininterval=2.0)
-    else:
-        return _simple_progress(iterable, desc, total)
+    return _simple_progress(iterable, desc, total)
 
 
 def _simple_progress(iterable, desc, total):
