@@ -58,7 +58,7 @@ def load_image_tensor(
     try:
         img = Image.open(image_path)
     except Exception as e:
-        raise ValueError(f"Failed to open image {image_path}: {e}")
+        raise ValueError(f"Failed to open image {image_path}: {e}") from e
 
     # Validate format
     if img.mode not in ['RGB', 'RGBA', 'L']:
@@ -74,16 +74,16 @@ def load_image_tensor(
     src_aspect = src_w / src_h
 
     if abs(src_aspect - target_aspect) < 0.01:
-        # Aspect ratios match — direct resize
+        # Aspect ratios match - direct resize
         img = img.resize((width, height), Image.Resampling.LANCZOS)
     else:
         # Scale so the image covers the target area, then center crop
         if src_aspect > target_aspect:
-            # Source is wider — fit by height, crop width
+            # Source is wider - fit by height, crop width
             new_h = height
             new_w = int(src_w * (height / src_h))
         else:
-            # Source is taller — fit by width, crop height
+            # Source is taller - fit by width, crop height
             new_w = width
             new_h = int(src_h * (width / src_w))
         img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -242,7 +242,7 @@ def modality_from_state(
     # (B,) instead of a per-token tensor (B, T).  This avoids running the
     # sinusoidal embedding + AdaLN MLP on all T tokens when every token would
     # produce the same result.  The preprocessor broadcasts (B, 1, 9, D) over
-    # T tokens — identical math, much less compute and memory.
+    # T tokens - identical math, much less compute and memory.
     sigma_tensor = mx.full((state.latent.shape[0],), sigma, dtype=mx.float32)
     if state.uniform_mask:
         timesteps = sigma_tensor
@@ -313,7 +313,7 @@ def maybe_post_process_latent(
     """Blend denoised output with clean state, skipping when mask is uniform.
 
     When the denoise mask is all-ones (uniform_mask=True), every token is
-    fully denoised — the blend is ``denoised * 1 + clean * 0 == denoised``.
+    fully denoised - the blend is ``denoised * 1 + clean * 0 == denoised``.
     Skipping it avoids a full-latent elementwise op per step.
 
     Args:

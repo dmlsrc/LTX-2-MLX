@@ -70,7 +70,7 @@ def compare_tensors(name: str, pt_tensor: torch.Tensor, mlx_tensor: mx.array, at
     max_diff = diff.max()
     mean_diff = diff.mean()
 
-    status = "✓" if match else "✗"
+    status = "OK" if match else "X"
     print(f"  {status} {name}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
     if not match:
@@ -147,7 +147,9 @@ def test_step_by_step_parity():
     pt_res_out = pt_act_out
     mlx_res_out = mlx_act_out
 
-    for i, (pt_block, mlx_block) in enumerate(zip(pt_model.res_blocks, mlx_model.res_blocks)):
+    for i, (pt_block, mlx_block) in enumerate(
+        zip(pt_model.res_blocks, mlx_model.res_blocks, strict=True)
+    ):
         with torch.no_grad():
             pt_res_out = pt_block(pt_res_out)
         mlx_res_out = mlx_block(mlx_res_out)
@@ -170,7 +172,9 @@ def test_step_by_step_parity():
     pt_post_out = pt_up_out
     mlx_post_out = mlx_up_out
 
-    for i, (pt_block, mlx_block) in enumerate(zip(pt_model.post_upsample_res_blocks, mlx_model.post_upsample_res_blocks)):
+    for i, (pt_block, mlx_block) in enumerate(
+        zip(pt_model.post_upsample_res_blocks, mlx_model.post_upsample_res_blocks, strict=True)
+    ):
         with torch.no_grad():
             pt_post_out = pt_block(pt_post_out)
         mlx_post_out = mlx_block(mlx_post_out)
@@ -369,13 +373,13 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    print(f"Step-by-step parity: {'✓ PASS' if step_match else '✗ FAIL'}")
-    print(f"Realistic latent parity: {'✓ PASS' if real_match else '✗ FAIL'}")
+    print(f"Step-by-step parity: {'PASS' if step_match else 'FAIL'}")
+    print(f"Realistic latent parity: {'PASS' if real_match else 'FAIL'}")
     print(f"Correlation: {correlation:.6f}")
 
     if correlation > 0.9999:
-        print("\n🎉 Excellent parity achieved!")
+        print("\nExcellent parity achieved!")
     elif correlation > 0.999:
-        print("\n✓ Good parity - minor numerical differences")
+        print("\nGood parity - minor numerical differences")
     else:
-        print("\n⚠ Parity needs improvement")
+        print("\nParity needs improvement")

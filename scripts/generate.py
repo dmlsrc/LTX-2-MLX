@@ -5946,10 +5946,11 @@ def main():
                     stage1_strengths,
                     stage2_strengths,
                     excludes,
+                    strict=True,
                 )
             ]
         except ValueError as exc:
-            raise SystemExit(f"ERROR: {exc}")
+            raise SystemExit(f"ERROR: {exc}") from None
 
     distilled_stage_strength_requested = (
         args.distilled_lora_stage1_scale is not None
@@ -5969,7 +5970,7 @@ def main():
                 stage_2_strength=args.distilled_lora_stage2_scale,
             )
         except ValueError as exc:
-            raise SystemExit(f"ERROR: {exc}")
+            raise SystemExit(f"ERROR: {exc}") from None
         cli_lora_configs = (cli_lora_configs or []) + [distilled_config]
         legacy_distilled_lora = None
 

@@ -220,7 +220,7 @@ class VtfrcSession:
         # Dest frames: PTS doesn't matter to VT (writer assigns it later) but
         # it expects valid CMTimes. Use the target-fps PTSes for clarity.
         dest_frames = []
-        for m, dpb in zip(target_indices, dest_buffers):
+        for m, dpb in zip(target_indices, dest_buffers, strict=True):
             dpts = _pb.frame_pts(m, self.target_fps)
             dest_frames.append(
                 vt.VTFrameProcessorFrame.alloc().initWithBuffer_presentationTimeStamp_(dpb, dpts)

@@ -12,14 +12,14 @@ characterization; the short version is:
 
 So the mitigation is **detect-then-trim**, not unconditional surgery,
 and the trim **mutes/zero-fills** the leading region rather than
-dropping samples — dropping would shift audio relative to video and
+dropping samples - dropping would shift audio relative to video and
 break lip sync.
 
 Detection
 ---------
 The signature is *loud burst followed by silence*, not just *loud
 burst*.  A real speech onset at t=0 would also be loud at t=0 but
-would NOT be followed by silence — it would sustain.  So we use a
+would NOT be followed by silence - it would sustain.  So we use a
 two-window check:
 
   first 50 ms RMS > 2.0x global RMS
@@ -32,7 +32,7 @@ not fire and lip sync at t=0 is preserved.
 
 Trim
 ----
-The trim zeros out the leading 120 ms by default — long enough to
+The trim zeros out the leading 120 ms by default - long enough to
 clear the diagnosed click's ~95 ms decay tail with margin, short
 enough to sit comfortably inside the intentional silence the model
 places before the first spoken word (95-250 ms on the diagnosed clip).
@@ -55,7 +55,7 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Threshold constants — single source of truth for both this module and
+# Threshold constants - single source of truth for both this module and
 # scripts/analyze_audio_onset.py (which imports the same defaults so the
 # diagnostic and the mitigation agree on what counts as a spike).
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ def detect_onset_spike(
 
 
 # ---------------------------------------------------------------------------
-# Trim — zero-fill leading region, preserve sample count
+# Trim - zero-fill leading region, preserve sample count
 # ---------------------------------------------------------------------------
 
 def trim_onset(
@@ -180,7 +180,7 @@ def trim_onset(
 
 
 # ---------------------------------------------------------------------------
-# High-level mitigation entry — what the encoders call
+# High-level mitigation entry - what the encoders call
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -192,7 +192,7 @@ class OnsetTrimResult:
     input with the channel layout normalized to (C, T); when
     `applied=True` the leading `trim_ms` is zero-filled.
 
-    `detected` is the diagnostic verdict from the two-window check —
+    `detected` is the diagnostic verdict from the two-window check -
     it can be True even when `applied=False` (e.g. mode="off"), and
     False when `applied=True` (e.g. mode="force" / explicit N_ms).
     """
@@ -223,7 +223,7 @@ def mitigate_onset(
              by the CLI when the user specifies an explicit N_ms.
 
     `trim_ms` is the duration of the leading zero-fill applied when a
-    trim occurs.  Detector parameters are not exposed here — callers
+    trim occurs.  Detector parameters are not exposed here - callers
     that want non-default thresholds should call `detect_onset_spike`
     + `trim_onset` directly.
     """
@@ -281,7 +281,7 @@ def mitigate_onset(
 
 
 # ---------------------------------------------------------------------------
-# CLI parsing — accepts "auto" / "off" / "<float ms>"
+# CLI parsing - accepts "auto" / "off" / "<float ms>"
 # ---------------------------------------------------------------------------
 
 def parse_trim_mode(spec: str) -> tuple[str, float]:
@@ -306,7 +306,7 @@ def parse_trim_mode(spec: str) -> tuple[str, float]:
         raise ValueError(
             f"Invalid --audio-onset-trim value {spec!r}.  Expected "
             f"'auto', 'off', or a duration in milliseconds (e.g. '120')."
-        )
+        ) from None
     if value < 0:
         raise ValueError(
             f"--audio-onset-trim must be non-negative; got {value}"

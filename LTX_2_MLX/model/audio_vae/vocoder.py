@@ -145,7 +145,7 @@ class ResBlock1(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         """Apply residual block."""
-        for conv1, conv2 in zip(self.convs1, self.convs2):
+        for conv1, conv2 in zip(self.convs1, self.convs2, strict=True):
             xt = nn.leaky_relu(x, negative_slope=LRELU_SLOPE)
             xt = conv1(xt)
             xt = nn.leaky_relu(xt, negative_slope=LRELU_SLOPE)
@@ -237,7 +237,7 @@ def _depthwise_conv1d(
 
     Args:
         x: Input (B, C, T).
-        filt: Filter (1, 1, K) — will be transposed for MLX.
+        filt: Filter (1, 1, K) - will be transposed for MLX.
         stride: Convolution stride.
     Returns:
         Output (B, C, T').
@@ -446,7 +446,7 @@ class AMPBlock1(nn.Module):
 
     def __call__(self, x: mx.array) -> mx.array:
         for c1, c2, a1, a2 in zip(
-            self.convs1, self.convs2, self.acts1, self.acts2
+            self.convs1, self.convs2, self.acts1, self.acts2, strict=True
         ):
             xt = a1(x)
             xt = c1(xt)
@@ -470,7 +470,7 @@ class _STFTFn(nn.Module):
         self.hop_length = hop_length
         self.win_length = win_length
         n_freqs = filter_length // 2 + 1
-        # Buffers — shape (n_freqs*2, 1, filter_length); loaded from checkpoint
+        # Buffers - shape (n_freqs*2, 1, filter_length); loaded from checkpoint
         self.forward_basis = mx.zeros((n_freqs * 2, 1, filter_length))
         self.inverse_basis = mx.zeros((n_freqs * 2, 1, filter_length))
 
@@ -725,7 +725,7 @@ class Vocoder(nn.Module):
 
         # Upsampling layers
         self.ups = []
-        for i, (rate, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
+        for i, (rate, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes, strict=True)):
             in_ch = upsample_initial_channel // (2 ** i)
             out_ch = upsample_initial_channel // (2 ** (i + 1))
             padding = (k - rate) // 2
@@ -735,7 +735,9 @@ class Vocoder(nn.Module):
         self.resblocks = []
         for i in range(len(self.ups)):
             ch = upsample_initial_channel // (2 ** (i + 1))
-            for k, dilations in zip(resblock_kernel_sizes, resblock_dilation_sizes):
+            for k, dilations in zip(
+                resblock_kernel_sizes, resblock_dilation_sizes, strict=True
+            ):
                 if self.is_amp:
                     self.resblocks.append(
                         AMPBlock1(ch, k, tuple(dilations), activation=activation)

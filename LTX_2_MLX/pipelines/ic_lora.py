@@ -79,11 +79,11 @@ def preprocess_canny(
     """
     try:
         import cv2
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
             "OpenCV required for Canny preprocessing. "
             "Install with: pip install opencv-python"
-        )
+        ) from exc
 
     cap = cv2.VideoCapture(str(video_path))
     frames = []
@@ -184,11 +184,11 @@ def preprocess_control_signal(
         # Load video without preprocessing
         try:
             import cv2
-        except ImportError:
+        except ImportError as exc:
             raise ImportError(
                 "OpenCV required for video loading. "
                 "Install with: pip install opencv-python"
-            )
+            ) from exc
 
         cap = cv2.VideoCapture(str(video_path))
         frames = []
@@ -310,8 +310,10 @@ def load_video_tensor(
     """
     try:
         import cv2
-    except ImportError:
-        raise ImportError("OpenCV (cv2) required for video loading. Install with: pip install opencv-python")
+    except ImportError as exc:
+        raise ImportError(
+            "OpenCV (cv2) required for video loading. Install with: pip install opencv-python"
+        ) from exc
 
     cap = cv2.VideoCapture(video_path)
     frames = []

@@ -174,10 +174,10 @@ def load_latents(
     elif audio_key in keys:
         # Defensive: shouldn't happen because we checked `audio_key in data`, but
         # if a future code path strips the key after the with-block, surface it.
-        print(f"Audio key {audio_key!r} present but not loaded — check load_latents logic.")
+        print(f"Audio key {audio_key!r} present but not loaded - check load_latents logic.")
     else:
         # Explicitly state we looked for the matching-stage audio and found none.
-        print(f"No audio latent at key {audio_key!r} — video-only output.")
+        print(f"No audio latent at key {audio_key!r} - video-only output.")
 
     resolved = parse_dtype(mx_mod, latent_dtype)
     if resolved == "auto":
@@ -330,7 +330,9 @@ def compare_spatial_padding_modes(
                     next(rhs_iter)
                 except StopIteration:
                     break
-                raise RuntimeError("Conv-padding decode yielded more chunks than manual-padding decode")
+                raise RuntimeError(
+                    "Conv-padding decode yielded more chunks than manual-padding decode"
+                ) from None
 
             try:
                 rhs = next(rhs_iter)

@@ -401,7 +401,7 @@ def main() -> None:
     stages.append(_reduce_tail_bfhwc("conv_in", x, args.tail_frames))
     _print_stage(stages[-1])
 
-    for idx, (block, btype) in enumerate(zip(decoder.up_blocks, decoder.block_types)):
+    for idx, (block, btype) in enumerate(zip(decoder.up_blocks, decoder.block_types, strict=True)):
         if btype == "upsample":
             x = _run_upsample_with_optional_probe(
                 idx=idx,

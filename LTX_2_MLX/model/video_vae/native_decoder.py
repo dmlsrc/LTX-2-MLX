@@ -157,7 +157,7 @@ class NativeConv3dVideoDecoder(nn.Module):
 
     def _iter_convs(self):
         yield "conv_in.conv", self.conv_in
-        for idx, (block, btype) in enumerate(zip(self.up_blocks, self.block_types)):
+        for idx, (block, btype) in enumerate(zip(self.up_blocks, self.block_types, strict=True)):
             if btype == "res":
                 for res_idx, res_block in enumerate(block.res_blocks):
                     yield f"up_blocks.{idx}.res_blocks.{res_idx}.conv1.conv", res_block.conv1
@@ -190,7 +190,7 @@ class NativeConv3dVideoDecoder(nn.Module):
         x = self.conv_in(x, causal=causal)
         mx.eval(x)
 
-        for block, btype in zip(self.up_blocks, self.block_types):
+        for block, btype in zip(self.up_blocks, self.block_types, strict=True):
             if btype == "res":
                 x = block(x, causal=causal)
             else:

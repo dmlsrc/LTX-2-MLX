@@ -195,10 +195,10 @@ class BetaScheduler:
         """
         try:
             import scipy.stats
-        except ImportError:
+        except ImportError as exc:
             raise ImportError(
                 "BetaScheduler requires scipy. Install with: pip install scipy"
-            )
+            ) from exc
 
         model_sampling_sigmas = _precalculate_model_sampling_sigmas(
             self.shift, self.timesteps_length

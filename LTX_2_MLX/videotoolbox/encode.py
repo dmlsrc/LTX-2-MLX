@@ -3,7 +3,7 @@
 `encode_video_videotoolbox()` is the AVAssetWriter-backed sister of
 `LTX_2_MLX.video_encoder.encode_video()`.  It accepts the same frame
 list / audio waveform shape generate.py already builds and emits an
-HEVC mp4 — no ffmpeg, no on-disk WAV unless `save_audio_sidecar=True`.
+HEVC mp4 - no ffmpeg, no on-disk WAV unless `save_audio_sidecar=True`.
 
 Two optional post-VAE stages can be inserted between the frame source
 and the writer:
@@ -15,15 +15,15 @@ and the writer:
                                             Conversion to the requested
                                             output rate.
 
-Both default off; with neither engaged this is a pure ffmpeg→AVWriter
+Both default off; with neither engaged this is a pure ffmpeg->AVWriter
 swap for HEVC output.  Dest pools are wired for zero-copy: VSR writes
 into VTFRC's source pool (or AVWriter's when no VTFRC), and VTFRC writes
-into AVWriter's pool — frames never round-trip through main memory once
+into AVWriter's pool - frames never round-trip through main memory once
 they enter the chain.
 
 Frames may be supplied as:
-  - list[(H,W,3) uint8]   — generate.py's normalized output
-  - list[(H,W,4) float16] — future streaming-VAE path (kept in bf16
+  - list[(H,W,3) uint8]   - generate.py's normalized output
+  - list[(H,W,4) float16] - future streaming-VAE path (kept in bf16
                             precision through to VSR's RGBAHalf source)
   - (T,H,W,3) uint8 ndarray
   - Iterator yielding any of the above per-frame shapes
@@ -88,7 +88,7 @@ def _peek_frames(
     try:
         first = next(it)
     except StopIteration:
-        raise ValueError("encode_video_videotoolbox: empty frames iterator")
+        raise ValueError("encode_video_videotoolbox: empty frames iterator") from None
     return first, itertools.chain([first], it), None
 
 
@@ -164,7 +164,7 @@ def encode_video_videotoolbox(
 
     Returns the actual output path; rewrites the extension to .mp4 if the
     caller supplied something else (matches encode_video() behavior for
-    the ffmpeg `default` tier — both produce .mp4).
+    the ffmpeg `default` tier - both produce .mp4).
 
     `audio_waveform` is anything castable to (B,C,T) or (C,T) numpy
     float32. Pass None for video-only.
@@ -330,7 +330,7 @@ def encode_video_videotoolbox(
         # result" companion writer.  Only meaningful when some VT post-
         # processing is engaged; otherwise the primary writer IS the
         # original and a duplicate adds zero value.  Shares the same
-        # AudioTrack — CMSampleBuffer is fresh per make_sample_buffer()
+        # AudioTrack - CMSampleBuffer is fresh per make_sample_buffer()
         # call so two GCD pumps on the same track are safe.
         #
         # Source format + HEVC profile mirror the primary writer's
@@ -339,7 +339,7 @@ def encode_video_videotoolbox(
         # -> HEVC Main42210 (4:2:2 10-bit) and the original should match
         # so the A/B comparison isn't a precision-floor mismatch.  For
         # VSR fast and VTFRC-only the primary is NV12 -> Main10 (4:2:0
-        # 10-bit); the original matches that too — upgrading the
+        # 10-bit); the original matches that too - upgrading the
         # original's source format past what its companion uses adds
         # bits the encoder would just throw away.  When the input frames
         # are fp16 RGBA from the streaming-VAE path, RGBAHalf preserves
@@ -398,7 +398,7 @@ def encode_video_videotoolbox(
                 )
 
     # If we captured the setup output, route it above the caller's bar
-    # stack now — single bars.write() call so the bars stay coherent.
+    # stack now - single bars.write() call so the bars stay coherent.
     if _setup_buf is not None:
         _setup_msg = _setup_buf.getvalue().rstrip("\n")
         if _setup_msg:
@@ -409,7 +409,7 @@ def encode_video_videotoolbox(
     # (count-only, no ETA).  Suppress entirely when verbose=False.
     #
     # When `progress_stack` is provided, the encoder shares the caller's
-    # stack — useful when generate.py wants a "VAE chunks" bar above the
+    # stack - useful when generate.py wants a "VAE chunks" bar above the
     # encoder's "VT encode" bar, both rendered in one cohesive display.
     # The caller owns close() in that mode; we just add our row.
     bars: StackedPhaseBars | None = None

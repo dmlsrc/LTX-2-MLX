@@ -3,14 +3,14 @@
 
 Built originally to diagnose the "loud click at t=0" sequence-start
 spike that LTX-2.3 AV produces on *some* clips (dialog-heavy prompts
-in particular — see `docs/AUDIO_ISSUES.md` -> "Sequence-Start Audio
+in particular - see `docs/AUDIO_ISSUES.md` -> "Sequence-Start Audio
 Spike" for the dialog-vs-ambient comparison).  The tool is generic:
 any LTX-2 audio output sidecar pair (decoded WAV + latent NPZ) can
 be passed in, and it reports whether the head of the clip has
 anomalously high energy relative to the rest, in both the time
 domain and in the latent.
 
-The two domains can diverge — elevated lat_t=0 RMS appears to be
+The two domains can diverge - elevated lat_t=0 RMS appears to be
 universal (attention-sink behavior) while the audible WAV spike is
 content-dependent.  The VERDICT line therefore reflects only the
 audible (WAV) case; latent stats are printed for context and for
@@ -35,19 +35,19 @@ If the latents NPZ isn't present (e.g. the run wasn't launched with
 
 What it prints
 --------------
-1. WAV summary — channels, sample rate, duration, global RMS/peak.
-2. Coarse head profile — N-millisecond windows over the first M
+1. WAV summary - channels, sample rate, duration, global RMS/peak.
+2. Coarse head profile - N-millisecond windows over the first M
    seconds (defaults: 50 ms windows, 2.0 s window).  Each window
    shows RMS, ratio vs. global RMS, and an ASCII bar.
-3. Fine head profile — finer windows over a smaller leading slice
+3. Fine head profile - finer windows over a smaller leading slice
    (defaults: 5 ms windows, 120 ms window).  Useful for localizing
    transient attacks to within a single AV frame's worth of audio.
-4. Per-frame latent profile — for each audio-latent key found in the
+4. Per-frame latent profile - for each audio-latent key found in the
    NPZ (`final_audio_latent`, and on distilled two-stage runs also
    `stage_1_audio_latent` / `stage_2_audio_latent`), prints per-frame
    RMS / max-abs / energy-vs-median ratio for the first K latent
    frames (default 30, which spans ~1.2 s at LTX-2.3's 25 fps_lat).
-5. Verdict — a one-line "spike at start" classification using a
+5. Verdict - a one-line "spike at start" classification using a
    simple ratio threshold (default 2.0x global RMS in the first
    window).  Returns non-zero exit code when a spike is detected, so
    the script is also usable in CI / sweep contexts.
@@ -55,7 +55,7 @@ What it prints
 Why this script exists
 ----------------------
 The sequence-start spike is reliably reproducible across prompts and
-seeds — it's a model-side artifact, not a one-clip fluke.  Having a
+seeds - it's a model-side artifact, not a one-clip fluke.  Having a
 dedicated diag tool means:
 
   - We can re-measure after any audio-side change (VAE decoder tweaks,
@@ -73,7 +73,7 @@ Implementation notes
   parse IEEE_FLOAT format=3, which is what our audio writer emits).
 - Audio latent shape is `(B=1, C=8, T, F=16)`.  The frame rate is
   `T / duration_seconds`; LTX-2.3 lands at 25 fps_lat for 30-second
-  clips (752/30).  Older models or different durations may differ —
+  clips (752/30).  Older models or different durations may differ -
   the script computes per-run from the latent shape and WAV duration.
 - Per-frame latent RMS uses the (C, F) dims as the "amplitude"
   channels and treats T as time, mirroring how the vocoder sees them.
@@ -225,10 +225,10 @@ def report_head_profile(
     global_rms = float(np.sqrt((samples.mean(axis=1) ** 2).mean()))
     t, rms, peak = windowed_rms(samples, sr, window_ms, head_ms)
     print(
-        f"\n{label} — {window_ms:g} ms windows over first "
+        f"\n{label} - {window_ms:g} ms windows over first "
         f"{head_ms:g} ms (global RMS={global_rms:.4f}):"
     )
-    for ti, ri, pi in zip(t, rms, peak):
+    for ti, ri, pi in zip(t, rms, peak, strict=True):
         ratio = ri / max(global_rms, 1e-9)
         bar = ascii_bar(ri, global_rms)
         end_ms = ti + window_ms
@@ -368,7 +368,7 @@ def main() -> int:
         report_audio_latents(npz_path, args.latent_frames, duration_s)
     else:
         print(
-            "\n(no .npz sidecar next to the WAV — re-run with "
+            "\n(no .npz sidecar next to the WAV - re-run with "
             "--save-latents / --save-all-sidecars to also see latent stats)"
         )
 
@@ -376,7 +376,7 @@ def main() -> int:
     # Diagnostic verdict (single-window): catches anything elevated at t=0,
     # including legitimate loud onsets.
     # Mitigation verdict (two-window): matches the encoders' detect-then-
-    # trim gate — fires only when the loud onset is followed by silence
+    # trim gate - fires only when the loud onset is followed by silence
     # (the click signature).  These can disagree, which is informative.
     ratio = first_win_rms / max(global_rms, 1e-9)
     mitigation_would_fire = detect_onset_spike(samples.T, sr)
@@ -384,14 +384,14 @@ def main() -> int:
     diagnostic_hit = ratio >= args.spike_threshold
     if diagnostic_hit:
         print(
-            f"VERDICT: SPIKE detected — first {args.coarse_window_ms:g} ms "
+            f"VERDICT: SPIKE detected - first {args.coarse_window_ms:g} ms "
             f"RMS is {ratio:.2f}x global "
             f"(threshold {args.spike_threshold:g}x).  See docs/AUDIO_ISSUES.md -> "
             f"\"Sequence-Start Audio Spike\" for mitigation options."
         )
     else:
         print(
-            f"VERDICT: clean — first {args.coarse_window_ms:g} ms RMS is "
+            f"VERDICT: clean - first {args.coarse_window_ms:g} ms RMS is "
             f"{ratio:.2f}x global (below threshold {args.spike_threshold:g}x)."
         )
     print(
