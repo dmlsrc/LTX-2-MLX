@@ -3,7 +3,7 @@
 
 Built originally to diagnose the "loud click at t=0" sequence-start
 spike that LTX-2.3 AV produces on *some* clips (dialog-heavy prompts
-in particular — see `AUDIO_ISSUES.md` -> "Sequence-Start Audio
+in particular — see `docs/AUDIO_ISSUES.md` -> "Sequence-Start Audio
 Spike" for the dialog-vs-ambient comparison).  The tool is generic:
 any LTX-2 audio output sidecar pair (decoded WAV + latent NPZ) can
 be passed in, and it reports whether the head of the clip has
@@ -82,7 +82,7 @@ Implementation notes
   fancier statistic.  Tune `--spike-threshold` if you want stricter
   / laxer detection.
 
-See `AUDIO_ISSUES.md` -> "Sequence-Start Audio Spike (OPEN ...)" for
+See `docs/AUDIO_ISSUES.md` -> "Sequence-Start Audio Spike (OPEN ...)" for
 the full diagnosis on the canonical reproduction.
 """
 
@@ -386,7 +386,7 @@ def main() -> int:
         print(
             f"VERDICT: SPIKE detected — first {args.coarse_window_ms:g} ms "
             f"RMS is {ratio:.2f}x global "
-            f"(threshold {args.spike_threshold:g}x).  See AUDIO_ISSUES.md -> "
+            f"(threshold {args.spike_threshold:g}x).  See docs/AUDIO_ISSUES.md -> "
             f"\"Sequence-Start Audio Spike\" for mitigation options."
         )
     else:

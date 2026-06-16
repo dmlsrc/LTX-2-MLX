@@ -278,7 +278,7 @@ def encode_video_videotoolbox(
             # Sequence-start onset mitigation.  Runs before the AudioTrack
             # build so the same cleaned (C,T) float32 buffer feeds both the
             # muxed track and the optional sidecar.  See
-            # LTX_2_MLX.audio.onset and AUDIO_ISSUES.md ->
+            # LTX_2_MLX.audio.onset and docs/AUDIO_ISSUES.md ->
             # "Sequence-Start Audio Spike".
             from ..audio import DEFAULT_TRIM_MS, mitigate_onset
 

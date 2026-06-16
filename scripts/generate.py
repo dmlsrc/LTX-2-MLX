@@ -5093,7 +5093,7 @@ def main():
         help=(
             "Sequence-start audio-spike mitigation.  Some AV generations "
             "produce a loud click at t=0 followed by silence before the "
-            "first spoken word (see AUDIO_ISSUES.md -> Sequence-Start "
+            "first spoken word (see docs/AUDIO_ISSUES.md -> Sequence-Start "
             "Audio Spike).  auto (default) runs a two-window detector "
             "(first 50 ms > 2x global RMS AND 100-250 ms < 0.1x global "
             "RMS) and, when the click signature is present, zero-fills "

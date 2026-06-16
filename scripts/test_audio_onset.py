@@ -5,7 +5,7 @@ Covers `LTX_2_MLX.audio.onset` — the module both encoders (ffmpeg and
 VideoToolbox) and the diagnostic script `analyze_audio_onset.py` share.
 
 Synthetic waveform fixtures model the documented signal classes from
-`AUDIO_ISSUES.md` -> "Sequence-Start Audio Spike":
+`docs/AUDIO_ISSUES.md` -> "Sequence-Start Audio Spike":
 
   * click_signature   loud 60 ms burst, then silence, then steady speech
                       -- detector MUST fire
@@ -85,7 +85,7 @@ def make_click_signature(duration_s: float = 5.0, burst_ms: float = 60.0,
                          speech_amp: float = 0.15) -> np.ndarray:
     """Loud 60 ms burst, ~190 ms silence, sustained quiet speech.
 
-    Matches the canonical click signature documented in AUDIO_ISSUES.md
+    Matches the canonical click signature documented in docs/AUDIO_ISSUES.md
     (dialog-heavy clip class): first 50 ms RMS >> global, 100-250 ms
     RMS ~ 0, then normal speech RMS from 250 ms onward.
     """

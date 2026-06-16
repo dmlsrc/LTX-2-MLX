@@ -4,7 +4,7 @@ Currently only the sequence-start onset-spike mitigation lives here; if
 more audio post-processing accrues (notch filters, dynamic range checks,
 loudness measurement, ...) it joins this package.
 
-The mitigation is documented in `AUDIO_ISSUES.md` ->
+The mitigation is documented in `docs/AUDIO_ISSUES.md` ->
 "Sequence-Start Audio Spike".  See `onset.py` for the implementation
 and the threshold rationale.
 """

@@ -2,7 +2,7 @@
 
 Some LTX-2.3 AV generations produce a ~65 ms loud transient at t=0
 followed by clean silence until the first spoken word.  See
-`AUDIO_ISSUES.md` -> "Sequence-Start Audio Spike" for the full
+`docs/AUDIO_ISSUES.md` -> "Sequence-Start Audio Spike" for the full
 characterization; the short version is:
 
   * Dialog-heavy prompts: the model encodes a broadband loud onset
