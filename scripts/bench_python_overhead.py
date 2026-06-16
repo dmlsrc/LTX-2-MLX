@@ -162,15 +162,15 @@ def main() -> None:
     print(f"Per step: {per_step_ms:.2f} ms")
     print(f"Per block: {per_block_us:.1f} µs")
     print()
-    print(f"Hypothesis: ~1.4 s/step gap at stage 1")
+    print("Hypothesis: ~1.4 s/step gap at stage 1")
     print(f"Observed Python-only cost per step: {per_step_ms:.2f} ms")
     if per_step_ms < 100:
-        print(f"=> Python overhead can't explain a 1400 ms gap.  Look elsewhere.")
+        print("=> Python overhead can't explain a 1400 ms gap.  Look elsewhere.")
     elif per_step_ms < 700:
         print(f"=> Python overhead is non-trivial but not the full gap.  Refactor"
               f" might recover {per_step_ms / 1400 * 100:.0f}% of it.")
     else:
-        print(f"=> Python overhead alone could explain a large fraction of the gap.")
+        print("=> Python overhead alone could explain a large fraction of the gap.")
 
 
 if __name__ == "__main__":

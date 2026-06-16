@@ -55,7 +55,7 @@ class VerboseTestLogger:
 
 
 @pytest.fixture
-def test_logger(request) -> Generator[VerboseTestLogger, None, None]:
+def test_logger(request) -> Generator[VerboseTestLogger]:
     """Fixture providing a verbose test logger."""
     logger = VerboseTestLogger(request.node.name)
     logger.start()
@@ -64,7 +64,7 @@ def test_logger(request) -> Generator[VerboseTestLogger, None, None]:
 
 
 @pytest.fixture
-def temp_output_dir(tmp_path) -> Generator[Path, None, None]:
+def temp_output_dir(tmp_path) -> Generator[Path]:
     """Fixture providing a temporary output directory."""
     output_dir = tmp_path / "test_outputs"
     output_dir.mkdir(exist_ok=True)

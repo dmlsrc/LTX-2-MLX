@@ -8,7 +8,7 @@ import os
 import math
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 import mlx.core as mx
@@ -960,7 +960,7 @@ def save_run_log_sidecar(
 ) -> None:
     """Save human-readable run metadata and timing information."""
     log = dict(payload)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     log["status"] = status
     log["updated_at"] = now
     if status != "started":
@@ -1371,8 +1371,8 @@ def enhance_prompt(
     Enhance prompt is not available — the Gemma QAT model used for encoding
     cannot do text generation. Returns the original prompt unchanged.
     """
-    print(f"  Prompt enhancement not available (Gemma QAT model cannot generate text)")
-    print(f"  Using original prompt as-is")
+    print("  Prompt enhancement not available (Gemma QAT model cannot generate text)")
+    print("  Using original prompt as-is")
     return prompt
 
 
@@ -1409,14 +1409,14 @@ def encode_with_gemma(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"  Loading Gemma 3 model...")
+    print("  Loading Gemma 3 model...")
     config = Gemma3Config()
     gemma = Gemma3Model(config)
-    
+
     # Weights load in their native bfloat16 via mx.load() - no dtype conversion needed.
     load_gemma3_weights(gemma, gemma_path)
 
-    print(f"  Loading text encoder projection...")
+    print("  Loading text encoder projection...")
     text_encoder = create_text_encoder()
     load_text_encoder_weights(text_encoder, ltx_weights_path)
 
@@ -1424,7 +1424,7 @@ def encode_with_gemma(
     # Chat template adds ~28 shared tokens, diluting the actual content
     # Without template: 0.71 correlation for blue vs red (good)
     # With template: 0.98 correlation (bad - template tokens dominate)
-    print(f"  Tokenizing prompt...")
+    print("  Tokenizing prompt...")
     # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace before tokenizing.
     encoding = tokenizer(
         (prompt or "").strip(),  # Use raw prompt, not chat template
@@ -1441,7 +1441,7 @@ def encode_with_gemma(
     print(f"  Token count: {num_tokens}/{max_length}")
 
     # Run through Gemma to get hidden states
-    print(f"  Running Gemma 3 forward pass (48 layers)...")
+    print("  Running Gemma 3 forward pass (48 layers)...")
     last_hidden, all_hidden_states = gemma(
         input_ids,
         attention_mask=attention_mask,
@@ -1475,7 +1475,7 @@ def encode_with_gemma(
     else:
         # Run through text encoder pipeline
         # Note: We skip caption_projection here because the transformer has its own
-        print(f"  Processing through text encoder pipeline...")
+        print("  Processing through text encoder pipeline...")
 
         # Feature extraction (uses Layer 48 only for best differentiation)
         encoded = text_encoder.feature_extractor.extract_from_hidden_states(
@@ -1487,7 +1487,7 @@ def encode_with_gemma(
         # Use connector (1D transformer with learnable registers)
         # Earlier testing showed connector homogenizes embeddings, but the model
         # may have been trained to expect connector output format
-        print(f"  Processing through connector...")
+        print("  Processing through connector...")
 
         # Convert mask to additive format for connector attention
         connector_mask = (attention_mask.astype(encoded.dtype) - 1) * 1e9
@@ -1511,7 +1511,7 @@ def encode_with_gemma(
     # === MEMORY OPTIMIZATION ===
     # Clear Gemma and text encoder from memory after encoding
     # These are large models (~12GB for Gemma FP16) that are no longer needed
-    print(f"  Clearing Gemma from memory...")
+    print("  Clearing Gemma from memory...")
     del gemma
     del text_encoder
     del all_hidden_states
@@ -1588,7 +1588,7 @@ def encode_av_gemma_batch(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"  Loading Gemma 3 model...")
+    print("  Loading Gemma 3 model...")
     config = Gemma3Config()
     gemma = Gemma3Model(config)
     load_gemma3_weights(gemma, gemma_path)
@@ -1677,16 +1677,16 @@ def encode_av_gemma_batch(
 
         del last_hidden
 
-    print(f"  Clearing Gemma from memory before AV text encoder...")
+    print("  Clearing Gemma from memory before AV text encoder...")
     del gemma
     del tokenizer
     gc.collect()
     mx.clear_cache()
 
-    print(f"  Loading AV text encoder projection...")
+    print("  Loading AV text encoder projection...")
     config_path = ltx_config_path or ltx_weights_path
     if is_v2_model(config_path):
-        print(f"  Detected LTX-2.3 (V2) model — using V2 text encoder")
+        print("  Detected LTX-2.3 (V2) model — using V2 text encoder")
         text_encoder = create_av_text_encoder_v2_from_checkpoint(config_path)
         load_av_text_encoder_v2_weights(text_encoder, ltx_weights_path)
     else:
@@ -1732,7 +1732,7 @@ def encode_av_gemma_batch(
 
         del all_hidden_states
 
-    print(f"  Clearing AV text encoder from memory...")
+    print("  Clearing AV text encoder from memory...")
     del text_encoder
     del gemma_outputs
     gc.collect()
@@ -2923,7 +2923,7 @@ def generate_video(
     if save_run_log:
         run_metadata = {
             "schema_version": 1,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
             "argv": sys.argv[:],
             "cwd": os.getcwd(),
             "prompt": prompt,
@@ -3046,7 +3046,7 @@ def generate_video(
         }
 
     print(f"\n{'='*50}")
-    print(f"LTX-2 MLX Video Generation")
+    print("LTX-2 MLX Video Generation")
     print(f"{'='*50}")
     print(f"Prompt: {prompt}")
     print(f"Resolution: {width}x{height}, {num_frames} frames")
@@ -3076,7 +3076,7 @@ def generate_video(
     if not skip_vae:
         print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
     if skip_vae:
-        print(f"VAE decoding: SKIPPED")
+        print("VAE decoding: SKIPPED")
     elif vae_decoder_backend == "native":
         print("VAE decoder: native Conv3d")
     else:
@@ -3088,7 +3088,7 @@ def generate_video(
     if upscale_temporal:
         print(f"Temporal upscaling: 2x (frames will be ~{num_frames*2})")
     if generate_audio:
-        print(f"Audio generation: ENABLED (stereo 24kHz)")
+        print("Audio generation: ENABLED (stereo 24kHz)")
 
     # Resolve and report internal-audio state.  Validation: --internal-audio off
     # with --generate-audio is incoherent — the audio branch produces what the
@@ -3122,11 +3122,11 @@ def generate_video(
             "the audio branch entirely for a meaningful per-step speedup."
         )
     if save_latents:
-        print(f"Latent sidecar: ENABLED")
+        print("Latent sidecar: ENABLED")
     if save_text_embeddings:
-        print(f"Text conditioning sidecar: ENABLED")
+        print("Text conditioning sidecar: ENABLED")
     if save_run_log:
-        print(f"Run log sidecar: ENABLED")
+        print("Run log sidecar: ENABLED")
         save_run_log_sidecar(
             run_log_sidecar_path(output_path),
             run_metadata,
@@ -3140,9 +3140,9 @@ def generate_video(
             },
         )
     if low_memory:
-        print(f"Low memory mode: ENABLED (sequential CFG, aggressive eval)")
+        print("Low memory mode: ENABLED (sequential CFG, aggressive eval)")
     if fast_mode:
-        print(f"Fast mode: ENABLED (no intermediate evals)")
+        print("Fast mode: ENABLED (no intermediate evals)")
     if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
         print(
             "Transformer cache quantization: ENABLED "
@@ -3245,7 +3245,7 @@ def generate_video(
     elif use_gemma:
         print(f"Text encoder: Gemma 3 at {gemma_path}")
     else:
-        print(f"Text encoder: DUMMY (testing mode)")
+        print("Text encoder: DUMMY (testing mode)")
 
     # Set seed
     mx.random.seed(seed)
@@ -3262,7 +3262,7 @@ def generate_video(
     if enhance_prompt_flag and use_gemma:
         print("\n[0/5] Enhancing prompt...")
         prompt = enhance_prompt(prompt, gemma_path)
-        print(f"  Using enhanced prompt for generation")
+        print("  Using enhanced prompt for generation")
     timings.mark("setup")
 
     # Get text encoding
@@ -3324,9 +3324,9 @@ def generate_video(
         # Check if Gemma weights exist
         if not os.path.exists(gemma_path):
             print(f"\n  ERROR: Gemma weights not found at {gemma_path}")
-            print(f"\n  To download Gemma 3 12B:")
-            print(f"    python scripts/download_gemma.py")
-            print(f"\n  Or use --no-gemma flag to use dummy embeddings for testing")
+            print("\n  To download Gemma 3 12B:")
+            print("    python scripts/download_gemma.py")
+            print("\n  Or use --no-gemma flag to use dummy embeddings for testing")
             return
 
         if use_av_encoder:
@@ -3385,7 +3385,7 @@ def generate_video(
                         batch_size=1, max_tokens=text_encoding.shape[1], embed_dim=text_encoding.shape[2],
                     )
                     null_audio_encoding = null_encoding
-                print(f"  Encoded both prompts with Gemma 3 (AudioVideo, single load)")
+                print("  Encoded both prompts with Gemma 3 (AudioVideo, single load)")
         else:
             # Use video-only Gemma encoding (V1/V2.0 only)
             text_encoding, text_mask = encode_with_gemma(
@@ -3397,7 +3397,7 @@ def generate_video(
             if text_encoding is None:
                 print("  ERROR: Failed to encode prompt")
                 return
-            print(f"  Encoded with Gemma 3")
+            print("  Encoded with Gemma 3")
             # Null encoding for non-AV path
             neg_prompt = negative_prompt if negative_prompt else ""
             null_encoding, null_mask = encode_with_gemma(
@@ -3614,7 +3614,7 @@ def generate_video(
     # HOWEVER: Two-stage pipeline specifically uses CFG in Stage 1 (at low res), so we allow it there.
     if model_variant == "distilled" and cfg_scale > 1.2 and pipeline_type != "two-stage":
         print(f"  WARNING: Distilled model requires CFG=1.0 (no guidance). You requested {cfg_scale}.")
-        print(f"  Forcing CFG=1.0 to prevent visual artifacts.")
+        print("  Forcing CFG=1.0 to prevent visual artifacts.")
         cfg_scale = 1.0
         # Distilled uses single-pass for both video AND audio (no CFG at all)
         audio_cfg_scale = 1.0
@@ -3649,7 +3649,7 @@ def generate_video(
                 eta=apg_eta,
                 norm_threshold=apg_norm_threshold,
             )
-        print(f"  APG guidance enabled (replaces standard CFG)")
+        print("  APG guidance enabled (replaces standard CFG)")
 
     # Create STG guider if enabled
     stg_guider = None
@@ -3695,7 +3695,7 @@ def generate_video(
             print("\n[3/5] VAE decoder load deferred until video decode")
             vae_decoder_loader = load_video_vae_decoder
         else:
-            print(f"\n[3/5] Loading VAE decoder...")
+            print("\n[3/5] Loading VAE decoder...")
             vae_decoder = load_video_vae_decoder()
     else:
         print("\n[3/5] VAE decoder skipped by user")
@@ -3714,7 +3714,7 @@ def generate_video(
                     def parameters(self):
                         return {}
                     def __call__(self, *args, **kwargs):
-                        return mx.zeros((1))
+                        return mx.zeros(1)
                     def load_weights(self, *args):
                         pass
                 model = MockModel()
@@ -3723,7 +3723,7 @@ def generate_video(
 
         if vae_decoder is None and not use_placeholder:
             raise ValueError("Two-stage pipeline requires VAE decoder")
-        
+
         if not spatial_upscaler_weights and not use_placeholder:
             raise ValueError("Two-stage pipeline requires --spatial-upscaler-weights")
 
@@ -3731,7 +3731,7 @@ def generate_video(
         if height % 64 != 0 or width % 64 != 0:
             new_height = ((height + 63) // 64) * 64
             new_width = ((width + 63) // 64) * 64
-            print(f"  WARNING: Two-stage pipeline requires resolution divisible by 64.")
+            print("  WARNING: Two-stage pipeline requires resolution divisible by 64.")
             print(f"  Adjusting resolution from {height}x{width} to {new_height}x{new_width}")
             height = new_height
             width = new_width
@@ -3742,7 +3742,7 @@ def generate_video(
             print(f"  Guidance rescale: {guidance_rescale}")
         print(f"  Stage 2: 3 steps at {height}x{width} (distilled refinement)")
         if generate_audio:
-            print(f"  Audio generation: ENABLED")
+            print("  Audio generation: ENABLED")
 
         # Load spatial upscaler
         print("\n[3.5/5] Loading spatial upscaler...")
@@ -3844,7 +3844,7 @@ def generate_video(
             )]
 
         # Run pipeline
-        print(f"\n[5/5] Running two-stage generation...")
+        print("\n[5/5] Running two-stage generation...")
         video, audio_waveform = pipeline(
             positive_encoding=text_encoding,
             negative_encoding=null_encoding,
@@ -3980,7 +3980,7 @@ def generate_video(
             )]
 
         # Run pipeline
-        print(f"\n[5/5] Running IC-LoRA generation...")
+        print("\n[5/5] Running IC-LoRA generation...")
         video = ic_pipeline(
             text_encoding=text_encoding,
             text_mask=mx.ones((1, text_encoding.shape[1]), dtype=mx.int32),

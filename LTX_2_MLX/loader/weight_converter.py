@@ -379,7 +379,7 @@ def load_transformer_weights(
     # Load weights into model
     model.update(nested_weights)
 
-    print(f"  Successfully loaded weights into model")
+    print("  Successfully loaded weights into model")
 
 
 def _flatten_to_nested(flat_dict: Dict[str, mx.array]) -> Dict[str, Any]:

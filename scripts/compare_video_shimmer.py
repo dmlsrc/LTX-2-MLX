@@ -203,7 +203,7 @@ def main() -> None:
 
     if args.per_second:
         print()
-        print(f"=== Per-second mean TSD ===")
+        print("=== Per-second mean TSD ===")
         sec_buckets = np.arange(n) // int(round(fps))
         max_sec = int(sec_buckets.max()) + 1
         print(f"  {'sec':>4s}  {label_a:>16s}  {label_b:>16s}  {'diff':>8s}")
@@ -217,15 +217,15 @@ def main() -> None:
     diff_patches = patches_a - patches_b
     print()
     print(f"=== Per-patch shimmer ({label_a} − {label_b}, {args.grid}x{args.grid} grid) ===")
-    print(f"  (rows top→bottom, cols left→right)")
+    print("  (rows top→bottom, cols left→right)")
     for r in range(args.grid):
         row = "  "
         for c in range(args.grid):
             row += _patch_glyph(diff_patches[r, c]) + " "
         print(row)
     print(
-        f"  legend: ##≥0.10  ++≥0.05  + ≥0.02  . ≈0  "
-        f"- ≤−0.02  --≤−0.05  @@≤−0.10"
+        "  legend: ##≥0.10  ++≥0.05  + ≥0.02  . ≈0  "
+        "- ≤−0.02  --≤−0.05  @@≤−0.10"
     )
     mx_idx = np.unravel_index(int(diff_patches.argmax()), diff_patches.shape)
     mn_idx = np.unravel_index(int(diff_patches.argmin()), diff_patches.shape)

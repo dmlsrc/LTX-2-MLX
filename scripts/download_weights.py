@@ -202,7 +202,7 @@ def download_weight(key: str, info: dict, token: Optional[str] = None) -> bool:
     try:
         if info.get("filename") is None:
             # Full repo download (for Gemma)
-            console.print(f"  Downloading full repository...")
+            console.print("  Downloading full repository...")
             snapshot_download(
                 repo_id=info["repo"],
                 local_dir=str(local_path),

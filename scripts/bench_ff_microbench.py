@@ -335,7 +335,7 @@ def bench_qkv_separate_vs_packed(warmup: int, iters: int) -> None:
               f"(48 blocks × 2 steps) = {per_run:.0f} ms = "
               f"{per_run/2:.0f} ms / step ({100*per_run/2/45500:.2f} % of 45.5 s/step)")
     else:
-        print(f"  Packed is SLOWER — not worth pursuing.")
+        print("  Packed is SLOWER — not worth pursuing.")
 
 
 def bench_ff_chain(warmup: int, iters: int) -> None:
@@ -412,13 +412,13 @@ def bench_ff_chain(warmup: int, iters: int) -> None:
     print(f"  lazy {lazy_mean:.3f} ms vs compiled {compiled_mean:.3f} ms "
           f"= {delta:+.3f} ms ({100*delta/lazy_mean:+.2f} %)")
     if abs(delta) < lazy_mean * 0.02:
-        print(f"  Conclusion: ~equal. mx.compile does NOT fuse matmul+activation. "
-              f"Confirms MLX source inspection (is_fusable() excludes matmul).")
+        print("  Conclusion: ~equal. mx.compile does NOT fuse matmul+activation. "
+              "Confirms MLX source inspection (is_fusable() excludes matmul).")
     elif delta > 0:
-        print(f"  Conclusion: compile is faster — possible kernel fusion or "
-              f"better scheduling. Worth investigating further.")
+        print("  Conclusion: compile is faster — possible kernel fusion or "
+              "better scheduling. Worth investigating further.")
     else:
-        print(f"  Conclusion: compile is slower (within noise?). Re-run with more iters.")
+        print("  Conclusion: compile is slower (within noise?). Re-run with more iters.")
 
 
 def bench_sdpa_floor(warmup: int, iters: int) -> None:
@@ -665,8 +665,8 @@ def bench_bf16_layout_audio(warmup: int, iters: int) -> None:
     """
     print()
     print("=" * 100)
-    print(f"BENCH: BF16 naive vs pretranspose at LTX AUDIO FF/attention shapes  "
-          f"(input batch (1, T=502, K), BF16)")
+    print("BENCH: BF16 naive vs pretranspose at LTX AUDIO FF/attention shapes  "
+          "(input batch (1, T=502, K), BF16)")
     print("=" * 100)
 
     T_AUDIO = 502
@@ -995,9 +995,9 @@ def bench_sdpa_d_sweep(warmup: int, iters: int) -> None:
             print(f"  NO kink at D=128 boundary: D=120 (bk=32) {tflops_120:.2f} vs "
                   f"D=128 (bk=16) {tflops_128:.2f} TFlops/s "
                   f"({delta_pct:+.1f}%, within noise).")
-            print(f"  >>> FA-2 hypothesis WEAKENED.  MLX's tile choice is roughly "
-                  f"shape-insensitive across the boundary.  Custom-kernel lift "
-                  f"likely under 10% -- probably not worth 2-5 days of work.")
+            print("  >>> FA-2 hypothesis WEAKENED.  MLX's tile choice is roughly "
+                  "shape-insensitive across the boundary.  Custom-kernel lift "
+                  "likely under 10% -- probably not worth 2-5 days of work.")
         else:
             print(f"  D=128 (bk=16) is FASTER per FLOP than D=120 (bk=32): "
                   f"{tflops_128:.2f} vs {tflops_120:.2f} TFlops/s ({-delta_pct:.1f}% "
@@ -1180,7 +1180,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
           f"{(peak_stock - x.nbytes)/1e6:>+7.1f} MB  (also eliminate hidden materialization)")
 
     print()
-    print(f"  COMPUTE ROOFLINE  (steel_gemm ceiling ≈ 7.95 TFlops/s, BF16 peak ≈ 10)")
+    print("  COMPUTE ROOFLINE  (steel_gemm ceiling ≈ 7.95 TFlops/s, BF16 peak ≈ 10)")
     for label in ("stock FF (matmul→gelu→matmul)", "project_in matmul only",
                   "project_out matmul only", "both matmuls chained, no GELU"):
         mean, _, _ = results[label]
@@ -1197,7 +1197,7 @@ def bench_fused_ffn_feasibility(warmup: int, iters: int) -> None:
     per_step_b = per_run_b / 2
     per_run_c = fused_recoverable * 96
     per_step_c = per_run_c / 2
-    print(f"  EXTRAPOLATION (48 blocks × 2 steps = 96 FF calls per 2-step run)")
+    print("  EXTRAPOLATION (48 blocks × 2 steps = 96 FF calls per 2-step run)")
     print(f"    vs floor B (conservative)  per step = {per_step_b:>+6.0f} ms  "
           f"({100*per_step_b/45500:+.2f}% of 45.5 s/step)")
     print(f"    vs floor C (optimistic)    per step = {per_step_c:>+6.0f} ms  "
@@ -1300,8 +1300,8 @@ def bench_pointwise_bw(warmup: int, iters: int) -> None:
         print()
 
     print(f"  PEAK ACHIEVED: {best_gbs:.1f} GB/s  ({best_label})")
-    print(f"  (M1 Max nominal HBM = ~400 GB/s; pointwise benign-access target ~250-350 GB/s)")
-    print(f"  USE: divide any bandwidth-bound op's MB/s by this peak to grade its efficiency.")
+    print("  (M1 Max nominal HBM = ~400 GB/s; pointwise benign-access target ~250-350 GB/s)")
+    print("  USE: divide any bandwidth-bound op's MB/s by this peak to grade its efficiency.")
 
 
 def bench_adaln_residual(warmup: int, iters: int) -> None:
@@ -1613,10 +1613,10 @@ def bench_rope(warmup: int, iters: int) -> None:
         per_step_save = per_run_save / 2
         print(f"    BF16 freqs would save {per_step_save:.0f} ms / step "
               f"({100*per_step_save/45500:.2f}% of 45.5 s/step) IF precision held.")
-        print(f"    Worth a sincos-precision experiment: keep cos/sin FP32 at build time")
-        print(f"    but cast to BF16 before per-block RoPE.  Compare bakery output.")
+        print("    Worth a sincos-precision experiment: keep cos/sin FP32 at build time")
+        print("    but cast to BF16 before per-block RoPE.  Compare bakery output.")
     else:
-        print(f"    FP32 cos/sin is essentially free here.  No action.")
+        print("    FP32 cos/sin is essentially free here.  No action.")
 
     print()
     print(f"  EXTRAPOLATION ({per_run_calls} RoPE calls per stage-1 2-step run)")

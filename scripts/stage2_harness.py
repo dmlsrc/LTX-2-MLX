@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 import mlx.core as mx
@@ -45,7 +45,7 @@ def load_adjacent_run_params(latents_path: str) -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
@@ -1127,7 +1127,7 @@ def main() -> None:
     if args.save_run_log:
         run_log = {
             "schema_version": 1,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
             "argv": sys.argv[:],
             "cwd": os.getcwd(),
             "output_path": str(final_path),

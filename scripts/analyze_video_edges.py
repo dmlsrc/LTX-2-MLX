@@ -136,7 +136,7 @@ def resize_to_width(image: Image.Image, width: int) -> Image.Image:
     if image.width == width:
         return image
     height = max(1, int(round(image.height * width / image.width)))
-    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+    resampling = getattr(Image, "Resampling", Image).LANCZOS
     return image.resize((width, height), resampling)
 
 

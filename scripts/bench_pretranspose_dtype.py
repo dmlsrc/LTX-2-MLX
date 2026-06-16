@@ -147,7 +147,7 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    print(f"\nLTX-2.3 distilled production shapes")
+    print("\nLTX-2.3 distilled production shapes")
     print(f"  video M={args.m}    audio M={args.m_audio}")
     print(f"iters={args.iters} warmup={args.warmup}")
     print()

@@ -56,7 +56,7 @@ def generate_checkpoints(
     print("=" * 70)
     print("PYTORCH CHECKPOINT GENERATOR")
     print("=" * 70)
-    print(f"\nConfig:")
+    print("\nConfig:")
     print(f"  Prompt: '{prompt[:60]}...'")
     print(f"  Resolution: {height}x{width}, {num_frames} frames")
     print(f"  Steps: {num_steps}, Seed: {seed}")

@@ -632,7 +632,7 @@ class LTXModel(nn.Module):
         object.__setattr__(self, "_compiled_transformer_block_groups", {})
         self._transformer_block_compile_disabled = False
         self.cross_attention_adaln = cross_attention_adaln
-        
+
         # Eval frequency setup
         if fast_mode:
             self._eval_frequency = 0
@@ -646,12 +646,12 @@ class LTXModel(nn.Module):
         self.positional_embedding_max_pos = positional_embedding_max_pos
 
         self.num_attention_heads = num_attention_heads
-        
+
         # Video dimensions
         self.video_inner_dim = num_attention_heads * attention_head_dim
         # Map generic inner_dim to video_inner_dim for compatibility
         self.inner_dim = self.video_inner_dim
-        
+
         # Audio dimensions
         self.audio_inner_dim = self.AUDIO_ATTENTION_HEADS * self.AUDIO_HEAD_DIM
 
@@ -778,7 +778,7 @@ class LTXModel(nn.Module):
             )
             for i in range(num_layers)
         ]
-        
+
         # =================
         # PREPROCESSORS
         # =================
@@ -1379,7 +1379,7 @@ class LTXModel(nn.Module):
                 path = f"{self._audio_layer_debug_dir}/audio_layer_{i:04d}.npy"
                 _np.save(path, _np.array(audio_args.x.astype(mx.float32)))
                 if i == 0:
-                    print(f"  [debug] Capturing audio layer states...")
+                    print("  [debug] Capturing audio layer states...")
                 if i == total_blocks - 1:
                     print(f"  [debug] Saved {i+1} layer states to {self._audio_layer_debug_dir}")
                     self._audio_layer_debug_done = True
@@ -1401,7 +1401,7 @@ class LTXModel(nn.Module):
         x = x * (1 + scale) + shift
         x = self.proj_out(x)
         return x
-        
+
     def _process_audio_output(
         self,
         x: mx.array,
@@ -1573,7 +1573,7 @@ class LTXModel(nn.Module):
 class X0Model(nn.Module):
     """
     Wrapper that returns denoised outputs instead of velocities.
-    
+
     Handles both VideoOnly (returns tensor) and AudioVideo (returns tuple).
     """
 

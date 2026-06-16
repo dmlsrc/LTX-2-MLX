@@ -120,7 +120,7 @@ def pytorch_checkpoints():
 def mlx_models():
     """Load MLX models."""
     if not weights_exist():
-        pytest.skip(f"Model weights not found. See README for download instructions.")
+        pytest.skip("Model weights not found. See README for download instructions.")
 
     from transformers import AutoTokenizer
 

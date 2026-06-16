@@ -89,13 +89,13 @@ def visualize_comparison():
     diff_np = np.abs(pt_np - mlx_np)
 
     print(f"Output shape: {pt_np.shape}")
-    print(f"\nPyTorch output stats:")
+    print("\nPyTorch output stats:")
     print(f"  min={pt_np.min():.6f}, max={pt_np.max():.6f}")
     print(f"  mean={pt_np.mean():.6f}, std={pt_np.std():.6f}")
-    print(f"\nMLX output stats:")
+    print("\nMLX output stats:")
     print(f"  min={mlx_np.min():.6f}, max={mlx_np.max():.6f}")
     print(f"  mean={mlx_np.mean():.6f}, std={mlx_np.std():.6f}")
-    print(f"\nDifference stats:")
+    print("\nDifference stats:")
     print(f"  max_diff={diff_np.max():.8f}")
     print(f"  mean_diff={diff_np.mean():.8f}")
     print(f"  std_diff={diff_np.std():.8f}")
@@ -143,7 +143,7 @@ def visualize_comparison():
 
     plt.tight_layout()
     plt.savefig('upscaler_comparison.png', dpi=150)
-    print(f"\nSaved visualization to upscaler_comparison.png")
+    print("\nSaved visualization to upscaler_comparison.png")
 
     # Also create a scatter plot of PyTorch vs MLX values
     fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
@@ -173,7 +173,7 @@ def visualize_comparison():
 
     plt.tight_layout()
     plt.savefig('upscaler_correlation.png', dpi=150)
-    print(f"Saved correlation plot to upscaler_correlation.png")
+    print("Saved correlation plot to upscaler_correlation.png")
 
     # Print sample values side by side
     print("\n" + "=" * 70)

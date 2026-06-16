@@ -117,7 +117,7 @@ def _bench_int_kernel(label: str, source: str, iters: int, total_threads: int,
 
 
 def main() -> None:
-    print(f"=== ALU throughput microbench ===")
+    print("=== ALU throughput microbench ===")
     print(f"  threads = {TOTAL_THREADS:,}, iters per thread = {ITERS_PER_THREAD:,}")
     print(f"  total MACs per kernel = {ITERS_PER_THREAD * TOTAL_THREADS:,}")
     print()

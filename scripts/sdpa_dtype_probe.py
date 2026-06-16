@@ -182,10 +182,10 @@ def _dump_report():
         if m_dt is not None:
             print(f"    mask: {str(m_dt):9s} {m_sh}", flush=True)
         else:
-            print(f"    mask: None", flush=True)
+            print("    mask: None", flush=True)
         trace = _first_traces.get(sig)
         if trace:
-            print(f"    first caller stack:", flush=True)
+            print("    first caller stack:", flush=True)
             for f in trace:
                 print(f"      {f}", flush=True)
         if _TIME_SDPA and sig in _per_sig_ms:
