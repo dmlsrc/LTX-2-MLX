@@ -311,6 +311,13 @@ def fuse_loras_into_model(
     manually clear the MLX cache, or keep a RAM copy of base transformer
     weights. Temporary stage-specific restores are handled by the transformer
     cache restore-state helpers.
+
+    LoRA alpha/rank metadata is intentionally ignored here. The official LTX
+    fuser treats adapter products as already normalized and applies only the
+    requested strength. Generic PEFT/Diffusers alpha semantics are real, but
+    LTX adapter intent cannot be inferred safely from metadata alone. Verify a
+    new adapter against its model card or reference loader before changing this
+    production rule.
     """
     from .weight_converter import convert_pytorch_key_to_mlx
     from .transformer_cache import invalidate_transformer_cache_restore_state

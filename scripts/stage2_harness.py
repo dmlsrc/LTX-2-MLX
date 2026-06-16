@@ -514,14 +514,15 @@ def main() -> None:
     args = parse_args()
 
     # Opt-in attention-concentration probe (gates top-K sparse-attention
-    # work; see KinoMLX benches/attention_concentration_probe.py). Patches
+    # work). If LTX_PROBE_DIR is set, it is searched for the probe module.
+    # Patches
     # attention._sdpa to log top-K softmax-mass concentration on the first
     # LTX_CONC_CALLS D128 self-attention calls, then passes through. Off
     # unless LTX_CONCENTRATION_PROBE is set; zero impact when off.
     if os.environ.get("LTX_CONCENTRATION_PROBE"):
-        _bench = os.path.join(os.environ.get("KINO_REPO", ""), "benches")
-        if _bench and _bench not in sys.path:
-            sys.path.insert(0, _bench)
+        _probe_dir = os.environ.get("LTX_PROBE_DIR", "")
+        if _probe_dir and _probe_dir not in sys.path:
+            sys.path.insert(0, _probe_dir)
         import attention_concentration_probe as _acp
         _acp.install_capture(
             max_calls=int(os.environ.get("LTX_CONC_CALLS", "2")),
@@ -530,13 +531,13 @@ def main() -> None:
         )
 
     # Opt-in per-step contribution probe (gates the stage-2 schedule
-    # experiment; see KinoMLX benches/stage2_step_contribution_probe.py).
+    # experiment). If LTX_PROBE_DIR is set, it is searched for the probe module.
     # Logs how much each stage-2 Euler step moves the video latent. Off
     # unless LTX_STEP_PROBE is set; runs on the normal compiled path.
     if os.environ.get("LTX_STEP_PROBE"):
-        _bench = os.path.join(os.environ.get("KINO_REPO", ""), "benches")
-        if _bench and _bench not in sys.path:
-            sys.path.insert(0, _bench)
+        _probe_dir = os.environ.get("LTX_PROBE_DIR", "")
+        if _probe_dir and _probe_dir not in sys.path:
+            sys.path.insert(0, _probe_dir)
         import stage2_step_contribution_probe as _ssp
         _ssp.install_capture()
 

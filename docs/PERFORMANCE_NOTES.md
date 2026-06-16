@@ -880,7 +880,7 @@ Implementation:
 
 D128 q8k2 source-packaging follow-up (2026-06-05):
 
-- KinoMLX showed that the current best D128 kernel can be shipped through
+- Bench results showed that the current best D128 kernel can be shipped through
   `mx.fast.metal_kernel` source strings with extension parity:
   `(1,32,8784,128)` extension `178.693 ms`, packaged `178.729 ms`;
   `(1,32,16380,128)` extension `620.065 ms`, packaged `620.301 ms`.
@@ -920,7 +920,7 @@ D128 q8k2 source-packaging follow-up (2026-06-05):
 
 D128/D64 reducer+scalefold follow-up (2026-06-06):
 
-- KinoMLX found one real D128 shader-body improvement after the q8k2 packaging
+- Bench work found one real D128 shader-body improvement after the q8k2 packaging
   port: reduce all score columns first, then do one row-level reduction, and fold
   the QK scale into the `exp2` normalization path.  Quiet extension timing:
   `(1,32,8784,128)` `178.89 -> 176.36 ms`; `(1,32,16380,128)`
@@ -931,7 +931,7 @@ D128/D64 reducer+scalefold follow-up (2026-06-06):
   shared body.  `steel_attention.py` selects a config object that controls tile
   size, loader activity, kernel name, `ReduceAllCols`, and `ScaleInExp`; D64 and
   D128 no longer maintain separate body logic for the softmax rescale.
-- D64 uses the quiet KinoMLX adaptive rule instead of one fixed tile:
+- D64 uses the quiet adaptive rule instead of one fixed tile:
   self-attention keeps `BQ=64, BK=32`, audio-to-video uses
   `BQ=64, BK=24, q8k2` reducer+scalefold, and video-to-audio uses
   `BQ=64, BK=32, q8k4`.  In the common-resolution sweep this adaptive rule was
@@ -1125,7 +1125,7 @@ Split-K-tail follow-up (2026-06-01):
   stage1 D128 split-good `44.9 ms` vs prologue `46.3 ms`, stage2 D128
   split-good `680.4 ms` vs prologue `683.7 ms`.  The prologue was removed; keep
   the simpler `dd=0..TD` multiply-accumulate loop.
-- Standalone Metal/MLX extension follow-up: the KinoMLX bench-only extension
+- Standalone Metal/MLX extension follow-up: the bench-only extension
   now matches the current `mx.fast.metal_kernel` wrapper on the real D128 LTX
   shapes without leaving MLX's command stream.  Quiet-machine medians:
   `L=8784` stock MLX SDPA `233.408 ms`, precompiled extension `194.138 ms`,

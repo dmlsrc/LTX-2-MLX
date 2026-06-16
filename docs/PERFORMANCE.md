@@ -1065,7 +1065,7 @@ direction:
 
 **2026-06-06 update:** D128 moved to the faster source-packaged
 `BQ=80, BK=40, q8k2v8` reducer+scalefold path.  D64 now uses the quiet
-KinoMLX adaptive winner set: self-attention keeps `BQ=64, BK=32`,
+adaptive winner set: self-attention keeps `BQ=64, BK=32`,
 audio-to-video uses `BQ=64, BK=24, q8k2` reducer+scalefold, and
 video-to-audio uses `BQ=64, BK=32, q8k4`.  The newer D128 path is not
 latent-bit-exact against the older lean path, but visual MP4 comparison on
