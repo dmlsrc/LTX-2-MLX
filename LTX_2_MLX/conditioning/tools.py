@@ -1,22 +1,20 @@
 """Latent tools for building and managing latent states."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 import mlx.core as mx
 
+from LTX_2_MLX.components.patchifiers import (
+    AudioPatchifier,
+    VideoLatentPatchifier,
+    get_pixel_coords,
+)
 from LTX_2_MLX.types import (
     AudioLatentShape,
     LatentState,
     SpatioTemporalScaleFactors,
     VideoLatentShape,
 )
-from LTX_2_MLX.components.patchifiers import (
-    AudioPatchifier,
-    VideoLatentPatchifier,
-    get_pixel_coords,
-)
-
 
 DEFAULT_SCALE_FACTORS = SpatioTemporalScaleFactors.default()
 
@@ -39,7 +37,7 @@ class VideoLatentTools:
     def create_initial_state(
         self,
         dtype: mx.Dtype = mx.bfloat16,
-        initial_latent: Optional[mx.array] = None,
+        initial_latent: mx.array | None = None,
     ) -> LatentState:
         """
         Create an initial latent state.
@@ -181,7 +179,7 @@ class AudioLatentTools:
     def create_initial_state(
         self,
         dtype: mx.Dtype = mx.bfloat16,
-        initial_latent: Optional[mx.array] = None,
+        initial_latent: mx.array | None = None,
     ) -> LatentState:
         """
         Create an initial audio latent state.

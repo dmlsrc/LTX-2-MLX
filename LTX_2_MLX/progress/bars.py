@@ -1,7 +1,7 @@
 """Phase-accurate stacked progress bars for the VSR pipeline.
 
 Single-line bars rendered directly to stderr via carriage-return +
-ANSI cursor movement — no tqdm dependency. The layout matches
+ANSI cursor movement - no tqdm dependency. The layout matches
 scripts/generate.py's `DenoiseProgress` shape, minus the STEP1 column
 (meaningful for seconds-long denoise steps, useless for 50 ms VSR
 frames that round to "0m 00s"):
@@ -11,23 +11,23 @@ frames that round to "0m 00s"):
 
 Bar on the LEFT (right after the label), numbers on the RIGHT,
 separated by ` | `. Durations use `X.Xs` under a minute, `XmYYs`
-above — sub-second resolution where it matters, compact above.
+above - sub-second resolution where it matters, compact above.
 
 PhaseBar features beyond generate.py's DenoiseProgress:
 
-* **Wall-clock origin** — each bar's clock starts at its construction
+* **Wall-clock origin** - each bar's clock starts at its construction
   time. RUN displays wall time from origin to the bar's last tick,
   so a phase that finishes earlier than its sibling shows a smaller
-  RUN — the cross-bar finish-time delta is visible at a glance.
+  RUN - the cross-bar finish-time delta is visible at a glance.
   Pace includes any pre-first-tick warmup (the bar was alive but no
   work had reported yet); that warmup amortizes over the first ~30
   ticks and pace converges to its steady-state value.
-* **Math-consistent rate** — pace = `n / elapsed_from_origin`, so the
+* **Math-consistent rate** - pace = `n / elapsed_from_origin`, so the
   displayed pace, RUN time and count multiply out cleanly: `pace x RUN
-  == n_so_far`. ETA uses the same per-unit time, so `ETA x pace ≈
+  == n_so_far`. ETA uses the same per-unit time, so `ETA x pace ~
   remaining`. Cross-phase outliers drag the average briefly then it
-  recovers as more ticks roll in — no median sleight-of-hand.
-* **Fixed-width columns** — count uses `max(3, digits(total))` per side,
+  recovers as more ticks roll in - no median sleight-of-hand.
+* **Fixed-width columns** - count uses `max(3, digits(total))` per side,
   pct is `5.1f%`, STEP1/RUN/ETA use `format_progress_duration`'s
   `"Xm YYs"` form, pace is `"<f.1>s/<unit>"` or `"<f.2><unit>/s"`. None
   of the columns shift width as numbers grow.
@@ -43,26 +43,24 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Optional
-
 
 __all__ = ["PhaseBar", "StackedPhaseBars"]
 
 
 # ---------------------------------------------------------------------------
-# Formatting helpers — matched 1:1 to scripts/generate.py
+# Formatting helpers - matched 1:1 to scripts/generate.py
 # ---------------------------------------------------------------------------
 
 def _fmt_duration(seconds: float) -> str:
     """`HH:MM:SS` clock with empty leading-zero groups shown as `--:`
     so the "active" fields stand out:
 
-        seconds < 60       →  `--:--:SS`
-        seconds < 3600     →  `--:MM:SS`
-        seconds ≥ 3600     →  `HH:MM:SS`
+        seconds < 60       ->  `--:--:SS`
+        seconds < 3600     ->  `--:MM:SS`
+        seconds >= 3600     ->  `HH:MM:SS`
 
     Always 8 chars up to 99:59:59; grows to 9 at 100h+ (rare). Round-
-    half-up via `int(seconds + 0.5)` so 60.5 → `--:01:01`, not `--:01:00`.
+    half-up via `int(seconds + 0.5)` so 60.5 -> `--:01:01`, not `--:01:00`.
     """
     total_s = int(max(0.0, seconds) + 0.5)
     h, rem = divmod(total_s, 3600)
@@ -75,7 +73,7 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _fmt_pace(seconds_per_step: float, unit: str, number_width: int = 6) -> str:
-    """Slow → ` X.X s/<unit>`, fast → ` XX.X <unit>/s`.
+    """Slow -> ` X.X s/<unit>`, fast -> ` XX.X <unit>/s`.
 
     The number is right-justified in a `number_width`-char slot via
     `:>{number_width}.1f`.  The default 6 fits values up to 9999.9.
@@ -86,7 +84,7 @@ def _fmt_pace(seconds_per_step: float, unit: str, number_width: int = 6) -> str:
 
     Per-bar total width is `3 + number_width + len(unit)` chars: the
     number, a 1-char separator, then either `s/<unit>` or `<unit>/s`
-    — both 2 + len(unit) chars.
+    - both 2 + len(unit) chars.
     """
     if seconds_per_step >= 1.0:
         return f"{seconds_per_step:>{number_width}.1f} s/{unit}"
@@ -107,14 +105,14 @@ def _natural_pace_number_width(seconds_per_step: float) -> int:
 class _StackState:
     """Shared state for bars in the same stack.
 
-    * `total` — running count of bars; each PhaseBar uses it at render
+    * `total` - running count of bars; each PhaseBar uses it at render
       time to know how many rows up its own row sits.
-    * `count_width` — the widest "n/total" slot across all registered
+    * `count_width` - the widest "n/total" slot across all registered
       bars. When a bar with a larger total registers, the slot grows
       and all previously-registered bars are force-redrawn so the count
       column (and therefore the `|` divider following it) stays aligned
       across the stack.
-    * `bars` — references kept so we can iterate for cross-bar redraws
+    * `bars` - references kept so we can iterate for cross-bar redraws
       when `count_width` grows.
     """
 
@@ -122,13 +120,13 @@ class _StackState:
 
     def __init__(self) -> None:
         self.total: int = 0
-        self.count_width: int = 7  # n_width=3 floor → 2*3+1 = 7
+        self.count_width: int = 7  # n_width=3 floor -> 2*3+1 = 7
         # Label slot width is grown to the longest registered bar's
         # `desc` so the `[` opening every bar's progress segment lines
         # up vertically across the stack ("VAE chunks [...]" and
         # "VT encode  [...]" instead of mis-aligned brackets).
         self.label_width: int = 0
-        # Pace-number slot width — grown lazily during render when a
+        # Pace-number slot width - grown lazily during render when a
         # bar's natural pace formatting needs more digits than the
         # current slot.  Default 6 fits values up to 9999.9; bumps to
         # 7+ for high-throughput bars (38339.1 chunk/s, etc.).  When
@@ -136,9 +134,9 @@ class _StackState:
         # is force-redrawn so all pace numbers right-align to the
         # same column across rows.
         self.pace_number_width: int = 6
-        self.bars: list["PhaseBar"] = []
+        self.bars: list[PhaseBar] = []
 
-    def register(self, bar: "PhaseBar") -> int:
+    def register(self, bar: PhaseBar) -> int:
         """Add a bar, expand `count_width` / `label_width` if needed, and
         re-render any previously-registered bars so their columns match
         the new widths. Returns the bar's row index."""
@@ -178,14 +176,14 @@ class PhaseBar:
     def __init__(
         self,
         *,
-        total: Optional[int],
+        total: int | None,
         desc: str,
         unit: str = "it",
         bar_width: int = 28,
         mininterval: float = 1.0,
         indent: str = "  ",
         show_step1: bool = False,
-        _stack: Optional[_StackState] = None,
+        _stack: _StackState | None = None,
     ):
         self._total = total
         self._desc_label = desc
@@ -197,14 +195,14 @@ class PhaseBar:
 
         # Timing state.
         self._t_origin: float = time.perf_counter()
-        self._t_last: Optional[float] = None  # None until first update()
+        self._t_last: float | None = None  # None until first update()
         # Time of the first update(), captured once.  When `show_step1`
         # is enabled, the STEP1 column reports `_t_first_update - _t_origin`
-        # — the wall-clock cost of the first unit of work.  Useful for
+        # - the wall-clock cost of the first unit of work.  Useful for
         # denoise-style bars where the first step is often warmup-heavy
         # (compile cache miss, first kernel dispatch, etc.) and worth
         # surfacing separately from the running pace.
-        self._t_first_update: Optional[float] = None
+        self._t_first_update: float | None = None
         self._n: int = 0
 
         # Render bookkeeping.
@@ -225,7 +223,7 @@ class PhaseBar:
         self._render(force=True)
 
     def _natural_count_width(self) -> int:
-        """The count slot width *this* bar would need on its own —
+        """The count slot width *this* bar would need on its own -
         `2 * max(3, digits(total)) + 1`. The stack picks the max across
         all registered bars so the `|` after the count column aligns
         across the whole stack."""
@@ -252,7 +250,7 @@ class PhaseBar:
         Forwards to `update()` with the computed delta `n - self._n`,
         so timing/pace/STEP1 capture work identically.  Useful for
         callbacks that report progress as `(current_step, total_steps)`
-        tuples rather than per-update deltas — e.g.,
+        tuples rather than per-update deltas - e.g.,
         `scripts/generate.py`'s denoise stage callback.
 
         Backward steps (n < self._n) are clamped to a no-op rather
@@ -308,8 +306,8 @@ class PhaseBar:
         elapsed = (self._t_last - self._t_origin) if self._t_last is not None else 0.0
         if self._n > 0 and elapsed > 0:
             # Math-consistent triplet: pace x elapsed = work_done, and
-            # eta x pace ≈ remaining. The median-of-window approach was
-            # arithmetically dishonest — it showed an "instantaneous"
+            # eta x pace ~ remaining. The median-of-window approach was
+            # arithmetically dishonest - it showed an "instantaneous"
             # pace that didn't multiply out to the frames already done.
             # Using `n / elapsed` for both pace and ETA makes the three
             # numbers add up: at the end of a run, `pace x RUN == count`.
@@ -321,7 +319,7 @@ class PhaseBar:
                 eta_str = "      --"
             # Grow the stack's shared pace-number slot if this bar's
             # natural pace formatting needs more chars than the
-            # current slot.  Force-redraw the OTHER bars (not self —
+            # current slot.  Force-redraw the OTHER bars (not self -
             # we're about to render below) so their pace numbers
             # right-align in the new wider column.
             natural_pw = _natural_pace_number_width(sec_per_unit)
@@ -438,7 +436,7 @@ class StackedPhaseBars:
         - `"below"`:
             Treat the existing bars as frozen at their current rows
             (static screen content) and emit the message on the parked
-            row beneath them.  The bar stack is RESET — subsequent
+            row beneath them.  The bar stack is RESET - subsequent
             `bars.add()` calls land BELOW the message, in a fresh stack
             that inherits column widths from the old one (so alignment
             spans the message gap).  Use this for permanent log entries
@@ -447,11 +445,11 @@ class StackedPhaseBars:
             distilled two-stage denoise loop).
 
             CONSTRAINT: callers must not call `.update()` on the
-            now-frozen bars after a `position="below"` write — their
+            now-frozen bars after a `position="below"` write - their
             row indexes no longer match the stack's cursor accounting.
             Reaching their `total` and stopping is the expected usage.
 
-        Multi-line messages are fine — each embedded newline advances
+        Multi-line messages are fine - each embedded newline advances
         the bars (above mode) or pushes the parked cursor (below mode)
         by one more line.
 
@@ -511,7 +509,7 @@ class StackedPhaseBars:
             sys.stderr.write("\n")
         # Re-emit the bars inline (each line followed by \n), so the cursor
         # naturally advances row-by-row and the final \n parks it one row
-        # below the bottom bar — restoring the render-invariant column.
+        # below the bottom bar - restoring the render-invariant column.
         #
         # Earlier this method reserved rows via `\n * n_bars` and then
         # re-rendered each bar with the cursor-up-then-content-then-cursor-
@@ -529,7 +527,7 @@ class StackedPhaseBars:
             if i < n_bars - 1:
                 sys.stderr.write("\n")
         # One final \n so the cursor parks at col 0 of the row immediately
-        # below the bottom bar — same invariant render() relies on.
+        # below the bottom bar - same invariant render() relies on.
         sys.stderr.write("\n")
         sys.stderr.flush()
 
@@ -539,7 +537,7 @@ class StackedPhaseBars:
         During the run the logical cursor sits one row below the bottom
         bar (the row reserved by the final `\\n` printed when the last
         bar was added), but at whatever column the most recent render
-        left it — `_render` uses `\\033[<n>B` to return the cursor to
+        left it - `_render` uses `\\033[<n>B` to return the cursor to
         the parked row after writing, which preserves the *column*
         position, leaving the cursor at column `len(line+pad)` rather
         than column 0.
@@ -561,7 +559,7 @@ class StackedPhaseBars:
         sys.stderr.write("\r")
         sys.stderr.flush()
 
-    def __enter__(self) -> "StackedPhaseBars":
+    def __enter__(self) -> StackedPhaseBars:
         return self
 
     def __exit__(self, *_exc) -> None:

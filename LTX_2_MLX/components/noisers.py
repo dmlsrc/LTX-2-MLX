@@ -1,6 +1,6 @@
 """Noise injection strategies for LTX-2 diffusion sampling."""
 
-from typing import Optional, Protocol
+from typing import Protocol
 
 import mlx.core as mx
 
@@ -23,7 +23,7 @@ class GaussianNoiser:
     where mask=1 means full noise and mask=0 means original latent preserved.
     """
 
-    def __init__(self, key: Optional[mx.array] = None):
+    def __init__(self, key: mx.array | None = None):
         """
         Initialize the Gaussian noiser.
 

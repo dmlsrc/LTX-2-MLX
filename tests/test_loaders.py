@@ -1,20 +1,11 @@
 """Tests for loader module: weight conversion, LoRA, and registry."""
 
-import pytest
-import mlx.core as mx
-import mlx.nn as nn
 import threading
 
-# Import the modules under test
-from LTX_2_MLX.loader.weight_converter import (
-    convert_transformer_key,
-    convert_vae_key,
-    convert_text_encoder_key,
-    convert_pytorch_key_to_mlx,
-    transpose_linear_weights,
-    _flatten_to_nested,
-    _convert_numeric_dicts_to_lists,
-)
+import mlx.core as mx
+import mlx.nn as nn
+import pytest
+
 from LTX_2_MLX.loader.lora_loader import (
     LoRAConfig,
     _lora_key_categories,
@@ -24,16 +15,26 @@ from LTX_2_MLX.loader.lora_loader import (
     lora_configs_for_stage_delta,
     lora_configs_have_stage_strengths,
 )
+from LTX_2_MLX.loader.registry import (
+    DummyRegistry,
+    StateDictRegistry,
+)
 from LTX_2_MLX.loader.transformer_cache import (
     TRANSFORMER_CACHE_RESTORE_ATTR,
     get_transformer_cache_restore_state,
     restore_transformer_cache_state,
 )
-from LTX_2_MLX.loader.registry import (
-    DummyRegistry,
-    StateDictRegistry,
-)
 
+# Import the modules under test
+from LTX_2_MLX.loader.weight_converter import (
+    _convert_numeric_dicts_to_lists,
+    _flatten_to_nested,
+    convert_pytorch_key_to_mlx,
+    convert_text_encoder_key,
+    convert_transformer_key,
+    convert_vae_key,
+    transpose_linear_weights,
+)
 
 # ============================================================================
 # Weight Converter Tests

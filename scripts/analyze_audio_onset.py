@@ -105,7 +105,6 @@ from LTX_2_MLX.audio.onset import (  # noqa: E402
     detect_onset_spike,
 )
 
-
 # Default analysis parameters.  Picked to localize sub-100 ms transients
 # while staying readable as ASCII tables in a terminal.  The coarse window
 # size + spike threshold come from the shared onset module so the

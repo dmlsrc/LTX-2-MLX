@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the sequence-start audio onset detector + trim mitigation.
 
-Covers `LTX_2_MLX.audio.onset` — the module both encoders (ffmpeg and
+Covers `LTX_2_MLX.audio.onset` - the module both encoders (ffmpeg and
 VideoToolbox) and the diagnostic script `analyze_audio_onset.py` share.
 
 Synthetic waveform fixtures model the documented signal classes from
@@ -41,7 +41,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 # Allow running directly from the repo root without an install.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -58,7 +57,6 @@ from LTX_2_MLX.audio.onset import (  # noqa: E402
     trim_onset,
 )
 
-
 _FAILURES: list[str] = []
 
 
@@ -66,7 +64,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     if condition:
         print(f"  PASS  {name}")
     else:
-        msg = f"{name}{(' — ' + detail) if detail else ''}"
+        msg = f"{name}{(' - ' + detail) if detail else ''}"
         print(f"  FAIL  {msg}")
         _FAILURES.append(msg)
 
@@ -106,7 +104,7 @@ def make_click_signature(duration_s: float = 5.0, burst_ms: float = 60.0,
 
 
 def make_ambient_onset(duration_s: float = 5.0, amp: float = 0.02) -> np.ndarray:
-    """Quiet noise throughout — no transient at t=0."""
+    """Quiet noise throughout - no transient at t=0."""
     n = int(duration_s * SR)
     return (RNG.normal(0, 1, size=(2, n)) * amp).astype(np.float32)
 
@@ -174,7 +172,7 @@ def test_detector_accepts_shape_variants() -> None:
 def test_detector_threshold_responds_to_kwargs() -> None:
     """Bumping the threshold ratio above the click's first-window/global
     ratio must disable detection; lowering it below the loud-speech
-    ratio must (incorrectly) detect — proving the threshold is live.
+    ratio must (incorrectly) detect - proving the threshold is live.
     """
     print("\n[3] detector responds to threshold kwargs")
     click = make_click_signature()
@@ -197,7 +195,7 @@ def test_detector_threshold_responds_to_kwargs() -> None:
 # ---------------------------------------------------------------------------
 
 def test_trim_preserves_sample_count() -> None:
-    """The trim MUST mute, never drop, samples — AV sync depends on it."""
+    """The trim MUST mute, never drop, samples - AV sync depends on it."""
     print("\n[4] trim preserves sample count (mute, never drop)")
     click = make_click_signature()
     n_in = click.shape[1]
@@ -277,7 +275,7 @@ def test_mitigate_modes() -> None:
         np.allclose(r_off.samples, click),
     )
 
-    # force trims regardless of detection — even on a clean ambient clip.
+    # force trims regardless of detection - even on a clean ambient clip.
     r_force = mitigate_onset(ambient, SR, mode="force", trim_ms=80.0)
     n_zero_force = int(80.0 / 1000.0 * SR)
     check("force + ambient: applied=True", r_force.applied)
@@ -347,7 +345,7 @@ def test_parse_trim_mode() -> None:
 
 def test_constants_are_exposed() -> None:
     """The analyzer script and the mitigation share the same threshold
-    constants — verify they exist on the public surface.
+    constants - verify they exist on the public surface.
     """
     print("\n[10] documented constants are importable")
     check("DEFAULT_DETECT_WINDOW_MS == 50", DEFAULT_DETECT_WINDOW_MS == 50.0)

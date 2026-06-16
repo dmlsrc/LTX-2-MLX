@@ -38,18 +38,19 @@ import contextlib
 import io
 import itertools
 import time
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any
 
 import numpy as np
 
 from ..progress import StackedPhaseBars
+from . import pixel_buffers as _pb
 from ._compat import autorelease_pool, require_pyobjc
 from .audio import AudioTrack
-from . import pixel_buffers as _pb
 from .temporal import VtfrcSession
 from .vsr import VsrSession, scale_for_mode
-from .writer import AVWriter, HEVC_PROFILE_MAIN10, HEVC_PROFILE_MAIN422_10
+from .writer import HEVC_PROFILE_MAIN10, HEVC_PROFILE_MAIN422_10, AVWriter
 
 
 def _human_size(n: float) -> str:

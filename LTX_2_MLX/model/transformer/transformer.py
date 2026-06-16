@@ -2,19 +2,20 @@
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from .attention import Attention, rms_norm
-from .feed_forward import FeedForward
-from .rope import LTXRopeType
 from ...components.perturbations import BatchedPerturbationConfig, PerturbationType
 from ...kernels import adaln_norm_fused as _adaln_norm_fused_kernel
 from ...kernels import gated_add_fused as _gated_add_fused_kernel
-from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_barrier
+from ...utils.signpost import signpost as _signpost
+from ...utils.signpost import signpost_barrier as _sp_barrier
+from .attention import Attention, rms_norm
+from .feed_forward import FeedForward
+from .rope import LTXRopeType
 
 
 def _adaln_inline(
@@ -28,7 +29,7 @@ def _adaln_inline(
     scale/shift come from FP32 scale_shift_tables (kept FP32 for the AdaLN
     sincos compute precision).  Without the cast-back, ``normed * (1 + scale)``
     promotes a BF16 input to FP32, which then propagates through to_q/to_k/to_v
-    and forces SDPA to compile pure ``steel_attention_float32_*`` kernels —
+    and forces SDPA to compile pure ``steel_attention_float32_*`` kernels -
     a ~2x perf regression vs the BF16 path.  Match mlx-video and cast back
     to the input dtype on the way out.
     """
@@ -63,7 +64,7 @@ else:
 # Fused custom-kernel wrappers for AdaLN and residual gate.  Each kernel
 # self-validates its shape/dtype gate (production T2V broadcast: x bf16
 # (B, T, 4096) + scale/shift/gate fp32 with all-singleton leading dims)
-# and falls back to the MLX expression otherwise — so they're safe to
+# and falls back to the MLX expression otherwise - so they're safe to
 # enable globally on the perf/ab-tests branch; non-matching shapes (audio
 # C=2048, I2V per-token (B, T, C) scale/shift) route through the stock
 # MLX path automatically.
@@ -71,9 +72,9 @@ else:
 # Env-var gates default OFF for the safe-by-default story; set them to
 # turn the fused kernels on for an A/B against ``main``.
 #
-#   LTX_FUSED_ADALN=1      → use adaln_norm_fused kernel
-#   LTX_FUSED_GATED_ADD=1  → use gated_add_fused kernel
-#   LTX_FUSED_PROBE=1      → count kernel vs fallback dispatches per op
+#   LTX_FUSED_ADALN=1      -> use adaln_norm_fused kernel
+#   LTX_FUSED_GATED_ADD=1  -> use gated_add_fused kernel
+#   LTX_FUSED_PROBE=1      -> count kernel vs fallback dispatches per op
 #                            and print a summary at process exit (see
 #                            ``LTX_2_MLX.kernels.fused_ops.get_dispatch_counts``)
 #
@@ -129,17 +130,17 @@ class TransformerArgs:
     context: mx.array  # Text context for cross-attention
     timesteps: mx.array  # Timestep embeddings (for AdaLN)
     positional_embeddings: tuple  # RoPE (cos, sin)
-    context_mask: Optional[mx.array] = None
-    embedded_timestep: Optional[mx.array] = None
+    context_mask: mx.array | None = None
+    embedded_timestep: mx.array | None = None
     # Cross-modal attention fields (for AudioVideo mode)
-    cross_positional_embeddings: Optional[tuple] = None  # RoPE for cross-modal attention
-    cross_scale_shift_timestep: Optional[mx.array] = None  # AdaLN for cross-attention scale/shift
-    cross_gate_timestep: Optional[mx.array] = None  # AdaLN for cross-attention gate
+    cross_positional_embeddings: tuple | None = None  # RoPE for cross-modal attention
+    cross_scale_shift_timestep: mx.array | None = None  # AdaLN for cross-attention scale/shift
+    cross_gate_timestep: mx.array | None = None  # AdaLN for cross-attention gate
     enabled: bool = True  # Whether this modality is enabled
     # V2 cross-attention AdaLN: prompt_timestep for KV modulation
-    prompt_timestep: Optional[mx.array] = None  # Shape: (B, T, 2, D) from prompt_adaln_single
+    prompt_timestep: mx.array | None = None  # Shape: (B, T, 2, D) from prompt_adaln_single
 
-    def replace(self, **kwargs) -> "TransformerArgs":
+    def replace(self, **kwargs) -> TransformerArgs:
         """Return a new TransformerArgs with specified fields replaced."""
         return TransformerArgs(
             x=kwargs.get("x", self.x),
@@ -306,8 +307,8 @@ class BasicAVTransformerBlock(nn.Module):
     Audio-Video transformer block with cross-modal attention.
 
     Architecture:
-        1. Video: self-attention → cross-attention (text) → cross-attention (audio)
-        2. Audio: self-attention → cross-attention (text) → cross-attention (video)
+        1. Video: self-attention -> cross-attention (text) -> cross-attention (audio)
+        2. Audio: self-attention -> cross-attention (text) -> cross-attention (video)
         3. Video: FFN
         4. Audio: FFN
 
@@ -318,8 +319,8 @@ class BasicAVTransformerBlock(nn.Module):
     def __init__(
         self,
         idx: int,
-        video_config: Optional[TransformerConfig] = None,
-        audio_config: Optional[TransformerConfig] = None,
+        video_config: TransformerConfig | None = None,
+        audio_config: TransformerConfig | None = None,
         rope_type: LTXRopeType = LTXRopeType.SPLIT,
         norm_eps: float = 1e-6,
     ):
@@ -399,7 +400,7 @@ class BasicAVTransformerBlock(nn.Module):
         if self.cross_attention_adaln and audio_config is not None:
             self.audio_prompt_scale_shift_table = mx.zeros((2, audio_config.dim), dtype=mx.float32)
 
-        # Cross-modal attention (audio ↔ video)
+        # Cross-modal attention (audio <-> video)
         if audio_config is not None and video_config is not None:
             # Q: Video, K,V: Audio (audio informs video)
             self.audio_to_video_attn = Attention(
@@ -493,12 +494,12 @@ class BasicAVTransformerBlock(nn.Module):
         context: mx.array,
         attn: Attention,
         scale_shift_table: mx.array,
-        prompt_scale_shift_table: Optional[mx.array],
+        prompt_scale_shift_table: mx.array | None,
         timestep: mx.array,
-        prompt_timestep: Optional[mx.array],
-        context_mask: Optional[mx.array],
-        profile_name: Optional[str] = None,
-        mark_profile: Optional[Callable[..., None]] = None,
+        prompt_timestep: mx.array | None,
+        context_mask: mx.array | None,
+        profile_name: str | None = None,
+        mark_profile: Callable[..., None] | None = None,
     ) -> mx.array:
         """Apply text cross-attention, with optional V2 AdaLN modulation."""
         profile_attention = profile_name is not None and mark_profile is not None
@@ -547,10 +548,10 @@ class BasicAVTransformerBlock(nn.Module):
 
     def __call__(
         self,
-        video: Optional[TransformerArgs],
-        audio: Optional[TransformerArgs],
-        perturbations: Optional[BatchedPerturbationConfig] = None,
-        profile_events: Optional[List[Tuple[str, float]]] = None,
+        video: TransformerArgs | None,
+        audio: TransformerArgs | None,
+        perturbations: BatchedPerturbationConfig | None = None,
+        profile_events: list[tuple[str, float]] | None = None,
     ) -> tuple:
         """
         Forward pass through AudioVideo transformer block.
@@ -565,8 +566,8 @@ class BasicAVTransformerBlock(nn.Module):
         Returns:
             Tuple of (updated_video_args, updated_audio_args).
         """
-        vx: Optional[mx.array] = video.x if video is not None else None
-        ax: Optional[mx.array] = audio.x if audio is not None else None
+        vx: mx.array | None = video.x if video is not None else None
+        ax: mx.array | None = audio.x if audio is not None else None
         profile_started_at = time.perf_counter() if profile_events is not None else 0.0
 
         def mark_profile(name: str, *arrays: mx.array) -> None:
@@ -737,7 +738,7 @@ class BasicAVTransformerBlock(nn.Module):
             # Skip if perturbation is enabled for all samples in batch
             if run_a2v and not skip_a2v:
                 with _signpost("a2v_cross"):
-                    # Cast back to activation dtype — scale/shift come from FP32
+                    # Cast back to activation dtype - scale/shift come from FP32
                     # tables and would otherwise force SDPA into float32 kernels.
                     vx_scaled = (vx_norm3 * (1 + scale_ca_video_a2v) + shift_ca_video_a2v).astype(vx_norm3.dtype)
                     ax_scaled = (ax_norm3 * (1 + scale_ca_audio_a2v) + shift_ca_audio_a2v).astype(ax_norm3.dtype)

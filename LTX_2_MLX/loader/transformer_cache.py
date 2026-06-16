@@ -8,13 +8,12 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from .weight_converter import _flatten_to_nested, convert_pytorch_key_to_mlx
-
 
 # Schema versions for cache invalidation.  Transformer and family caches
 # are split so a family-layout bump (cheap rebuild) doesn't drag the
@@ -111,7 +110,7 @@ def _clear_cache_artifacts(cache_file: Path) -> None:
         shard.unlink()
 
 
-def _load_cache_weights(cache_file: Path) -> Dict[str, mx.array]:
+def _load_cache_weights(cache_file: Path) -> dict[str, mx.array]:
     """Load a cache, whether single-file or sharded (both lazy/mmap)."""
     if cache_file.exists():
         return mx.load(str(cache_file))
@@ -120,7 +119,7 @@ def _load_cache_weights(cache_file: Path) -> Dict[str, mx.array]:
         raise FileNotFoundError(
             f"No cache at {cache_file} and no shards beside it."
         )
-    merged: Dict[str, mx.array] = {}
+    merged: dict[str, mx.array] = {}
     for shard in shards:
         merged.update(mx.load(str(shard)))
     return merged
@@ -205,7 +204,7 @@ class TransformerBlockStreamer:
         cache_file: Path,
         *,
         transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-        video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
+        video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
         video_ff_quantize_group_size: int | None = None,
         video_ff_quantize_bits: int | None = None,
     ) -> None:
@@ -383,11 +382,11 @@ def _file_signature(path: str) -> dict[str, Any]:
     }
 
 
-def _canonical_specs(specs: Tuple[Tuple[str, str], ...]) -> list[dict[str, str]]:
+def _canonical_specs(specs: tuple[tuple[str, str], ...]) -> list[dict[str, str]]:
     return [{"target": target, "layout": layout} for target, layout in specs]
 
 
-def _canonical_quant_specs(specs: Tuple[Tuple[str, str], ...]) -> list[dict[str, str]]:
+def _canonical_quant_specs(specs: tuple[tuple[str, str], ...]) -> list[dict[str, str]]:
     return [{"target": target, "mode": mode} for target, mode in specs]
 
 
@@ -398,15 +397,15 @@ _AUDIO_FF_KEY_PATTERNS = ("audio_ff.project_in.proj", "audio_ff.project_out")
 def _ff_cache_dtype_for_key(
     mlx_key: str,
     *,
-    video_ff_dtype: Optional[mx.Dtype],
-    audio_ff_dtype: Optional[mx.Dtype] = None,
-) -> Optional[mx.Dtype]:
+    video_ff_dtype: mx.Dtype | None,
+    audio_ff_dtype: mx.Dtype | None = None,
+) -> mx.Dtype | None:
     """Return the target cache dtype for a video / audio FF projection key.
 
     Casts both `.weight` and `.bias` keys belonging to the targeted FF
     projections.  Attention projections, RMSNorm, AdaLN, etc. return
     None (kept at checkpoint dtype).  Attention dtype was tried (see
-    PERFORMANCE_NOTES.md) and dropped — at the SDPA boundary the in/out
+    PERFORMANCE_NOTES.md) and dropped - at the SDPA boundary the in/out
     cast overhead outweighs the FP16 matmul win, and attn projections
     do not hit the kernel-selection cliff that FF project_out does at
     K=16384.
@@ -438,7 +437,7 @@ def _ff_cache_dtype_for_key(
     return None
 
 
-def _dtype_to_payload_name(dtype: Optional[mx.Dtype]) -> Optional[str]:
+def _dtype_to_payload_name(dtype: mx.Dtype | None) -> str | None:
     """Map an MLX dtype to a JSON-friendly name for the payload digest."""
     if dtype is None:
         return None
@@ -454,24 +453,24 @@ def _dtype_to_payload_name(dtype: Optional[mx.Dtype]) -> Optional[str]:
 def _cache_payload(
     weights_path: str,
     *,
-    transformer_dtype: Optional[mx.Dtype] = None,
+    transformer_dtype: mx.Dtype | None = None,
     include_audio: bool,
-    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
-    video_ff_layout_layers: Tuple[int, ...],
-    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
-    video_attn_layout_layers: Tuple[int, ...],
-    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_ff_layout_layers: Tuple[int, ...] = (),
-    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_attn_layout_layers: Tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...],
+    video_ff_layout_layers: tuple[int, ...],
+    video_attn_layout_specs: tuple[tuple[str, str], ...],
+    video_attn_layout_layers: tuple[int, ...],
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
-    video_ff_quantize_layers: Tuple[int, ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_layers: tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
-    video_ff_dtype: Optional[mx.Dtype] = None,
-    audio_ff_dtype: Optional[mx.Dtype] = None,
+    video_ff_dtype: mx.Dtype | None = None,
+    audio_ff_dtype: mx.Dtype | None = None,
 ) -> dict[str, Any]:
     if transformer_cache_quantize not in TRANSFORMER_CACHE_QUANTIZE_MODES:
         raise ValueError(f"Unsupported transformer cache quantization mode: {transformer_cache_quantize}")
@@ -514,7 +513,7 @@ def _cache_payload(
             "video_ff_quantize_group_size": video_ff_quantize_group_size,
             "video_ff_quantize_bits": video_ff_quantize_bits,
         })
-    # Only include dtype keys when non-default — keeps existing BF16 caches
+    # Only include dtype keys when non-default - keeps existing BF16 caches
     # valid (their hash doesn't include these keys).
     if video_ff_dtype is not None and video_ff_dtype != mx.bfloat16:
         payload["video_ff_dtype"] = _dtype_to_payload_name(video_ff_dtype)
@@ -577,7 +576,7 @@ def _cast_for_cache(value: mx.array, target_dtype: mx.Dtype, key: str) -> mx.arr
     return value.astype(target_dtype)
 
 
-def _safetensors_header_dtypes(weights_path: str) -> Dict[str, str]:
+def _safetensors_header_dtypes(weights_path: str) -> dict[str, str]:
     """Map tensor key -> raw dtype string from a safetensors header.
 
     Reads only the JSON header (8-byte length prefix + header), never the
@@ -609,7 +608,7 @@ def checkpoint_has_fp8_tensors(weights_path: str) -> bool:
 
 
 def _fp8_scale_companions(
-    header_dtypes: Dict[str, str],
+    header_dtypes: dict[str, str],
 ) -> tuple[set, set, set, set]:
     """Classify FP8 keys and their scale/metadata companions from a header map.
 
@@ -620,12 +619,12 @@ def _fp8_scale_companions(
       has scalar F32 companions ``<base>.weight_scale`` (dequant factor) and
       ``<base>.input_scale`` (static activation-quant parameter).
     - **ComfyUI**: ``<base>.weight_scale`` plus a ``<base>.comfy_quant`` tensor
-      (U8 — a tiny JSON tag such as ``{"format": "float8_e4m3fn"}``), pure
+      (U8 - a tiny JSON tag such as ``{"format": "float8_e4m3fn"}``), pure
       metadata with no numeric payload; the real scale is still
       ``weight_scale``.
 
     ``weight_scale`` is consumed; ``input_scale`` and ``comfy_quant`` are
-    dropped (neither is a model parameter — left in, ``comfy_quant`` makes
+    dropped (neither is a model parameter - left in, ``comfy_quant`` makes
     ``model.update()`` raise "Module does not have parameter named
     comfy_quant").  A ``*_scale`` key whose base is not an FP8 tensor (e.g.
     the AdaLN ``scale_shift_table`` weights) is an ordinary tensor, left alone.
@@ -671,7 +670,7 @@ def _iter_fp8_checkpoint_weights(weights_path: str, value_dtype: mx.Dtype):
     losslessly into ``value_dtype``; scaled tensors dequantize in FP32
     (``from_fp8(w) * weight_scale``) and round once.  ``weight_scale``
     companions are consumed; ``input_scale`` and ComfyUI ``comfy_quant``
-    companions are dropped —
+    companions are dropped -
     they parameterize static activation quantization for real FP8 GEMMs,
     and after weight dequantization activations run at full precision.
     Everything stays lazy, so the build never holds an eager copy of the
@@ -717,24 +716,24 @@ def transformer_cache_paths(
     weights_path: str,
     cache_root: str | None,
     *,
-    transformer_dtype: Optional[mx.Dtype] = None,
+    transformer_dtype: mx.Dtype | None = None,
     include_audio: bool,
-    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
-    video_ff_layout_layers: Tuple[int, ...],
-    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
-    video_attn_layout_layers: Tuple[int, ...],
-    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_ff_layout_layers: Tuple[int, ...] = (),
-    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_attn_layout_layers: Tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...],
+    video_ff_layout_layers: tuple[int, ...],
+    video_attn_layout_specs: tuple[tuple[str, str], ...],
+    video_attn_layout_layers: tuple[int, ...],
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
-    video_ff_quantize_layers: Tuple[int, ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_layers: tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
-    video_ff_dtype: Optional[mx.Dtype] = None,
-    audio_ff_dtype: Optional[mx.Dtype] = None,
+    video_ff_dtype: mx.Dtype | None = None,
+    audio_ff_dtype: mx.Dtype | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     """Resolve cache artifact paths and expected metadata payload."""
     payload = _cache_payload(
@@ -781,16 +780,16 @@ def weight_family_cache_paths(
     return cache_file, metadata_file, payload
 
 
-def _selected_layers(layers: Tuple[int, ...], num_layers: int = 48) -> set[int]:
+def _selected_layers(layers: tuple[int, ...], num_layers: int = 48) -> set[int]:
     return set(layers) if layers else set(range(num_layers))
 
 
-def _has_spec(specs: Tuple[Tuple[str, str], ...], target: str) -> bool:
+def _has_spec(specs: tuple[tuple[str, str], ...], target: str) -> bool:
     return (target, "pretranspose") in specs
 
 
 def _quant_mode_for_target(
-    specs: Tuple[Tuple[str, str], ...],
+    specs: tuple[tuple[str, str], ...],
     target: str,
 ) -> str | None:
     for spec_target, mode in specs:
@@ -836,8 +835,8 @@ def _cache_quant_mode_for_key(
     mlx_key: str,
     *,
     transformer_cache_quantize: str,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...],
-    video_ff_quantize_layers: Tuple[int, ...],
+    video_ff_quantize_specs: tuple[tuple[str, str], ...],
+    video_ff_quantize_layers: tuple[int, ...],
 ) -> str | None:
     if transformer_cache_quantize not in TRANSFORMER_CACHE_QUANTIZE_MODES:
         raise ValueError(f"Unsupported transformer cache quantization mode: {transformer_cache_quantize}")
@@ -866,8 +865,8 @@ def _cache_quant_pretransposed(transformer_cache_quantize: str) -> bool:
 def _ff_quant_mode_for_key(
     mlx_key: str,
     *,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...],
-    video_ff_quantize_layers: Tuple[int, ...],
+    video_ff_quantize_specs: tuple[tuple[str, str], ...],
+    video_ff_quantize_layers: tuple[int, ...],
 ) -> str | None:
     if not video_ff_quantize_specs:
         return None
@@ -910,14 +909,14 @@ _ADALN_TOP_LEVEL_LINEARS = (
 def _layout_cache_key(
     mlx_key: str,
     *,
-    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
-    video_ff_layout_layers: Tuple[int, ...],
-    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
-    video_attn_layout_layers: Tuple[int, ...],
-    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_ff_layout_layers: Tuple[int, ...] = (),
-    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_attn_layout_layers: Tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...],
+    video_ff_layout_layers: tuple[int, ...],
+    video_attn_layout_specs: tuple[tuple[str, str], ...],
+    video_attn_layout_layers: tuple[int, ...],
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
 ) -> str | None:
     parts = mlx_key.split(".")
@@ -962,7 +961,7 @@ def _layout_cache_key(
                 if suffix == f"{module}.{proj}.weight":
                     return f"transformer_blocks.{layer}.{module}.{proj}.weight_t"
 
-    # Audio-side layouts (V2/AV models only — no-op when keys aren't present
+    # Audio-side layouts (V2/AV models only - no-op when keys aren't present
     # in the source checkpoint).
     if layer in audio_ff_layers:
         if _has_spec(audio_ff_layout_specs, "project_in") and suffix == "audio_ff.project_in.proj.weight":
@@ -1019,7 +1018,7 @@ def _write_metadata(metadata_file: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp_metadata, metadata_file)
 
 
-def _bake_conv_layout_for_family(family: str, weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+def _bake_conv_layout_for_family(family: str, weights: dict[str, mx.array]) -> dict[str, mx.array]:
     """Transpose Conv weights to MLX channels-last layout in-place at cache build.
 
     PyTorch Conv layouts are stored channels-second (NCHW / NCDHW), but
@@ -1059,7 +1058,7 @@ def _bake_conv_layout_for_family(family: str, weights: Dict[str, mx.array]) -> D
     else:
         return weights
 
-    converted: Dict[str, mx.array] = {}
+    converted: dict[str, mx.array] = {}
     for key, value in weights.items():
         if value.ndim == target_ndim and key.endswith(".weight"):
             value = mx.contiguous(value.transpose(*perm))
@@ -1072,7 +1071,7 @@ def _save_weight_family_cache(
     cache_file: Path,
     metadata_file: Path,
     payload: dict[str, Any],
-    weights: Dict[str, mx.array],
+    weights: dict[str, mx.array],
 ) -> int:
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     weights = _bake_conv_layout_for_family(family, weights)
@@ -1097,7 +1096,7 @@ def build_weight_family_caches(
             raise ValueError(f"Unsupported weight family: {family}")
 
     raw_weights = mx.load(weights_path)
-    buckets: dict[str, Dict[str, mx.array]] = {family: {} for family in families}
+    buckets: dict[str, dict[str, mx.array]] = {family: {} for family in families}
     for key, value in raw_weights.items():
         family = _weight_family_for_key(key)
         if family in buckets:
@@ -1128,24 +1127,24 @@ def build_transformer_cache(
     metadata_file: Path,
     payload: dict[str, Any],
     *,
-    transformer_dtype: Optional[mx.Dtype] = None,
+    transformer_dtype: mx.Dtype | None = None,
     include_audio: bool,
-    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
-    video_ff_layout_layers: Tuple[int, ...],
-    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
-    video_attn_layout_layers: Tuple[int, ...],
-    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_ff_layout_layers: Tuple[int, ...] = (),
-    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_attn_layout_layers: Tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...],
+    video_ff_layout_layers: tuple[int, ...],
+    video_attn_layout_specs: tuple[tuple[str, str], ...],
+    video_attn_layout_layers: tuple[int, ...],
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
-    video_ff_quantize_layers: Tuple[int, ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_layers: tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
-    video_ff_dtype: Optional[mx.Dtype] = None,
-    audio_ff_dtype: Optional[mx.Dtype] = None,
+    video_ff_dtype: mx.Dtype | None = None,
+    audio_ff_dtype: mx.Dtype | None = None,
 ) -> tuple[int, int, int]:
     """Build a converted transformer-only cache from a stock checkpoint."""
     cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1175,7 +1174,7 @@ def build_transformer_cache(
     else:
         raw_weights = mx.load(weights_path)
         raw_items = raw_weights.items()
-    cache_weights: Dict[str, mx.array] = {}
+    cache_weights: dict[str, mx.array] = {}
     loaded_count = 0
     layout_count = 0
     quant_count = 0
@@ -1293,7 +1292,7 @@ def build_transformer_cache(
         # When `--video-ff-dtype` / `--audio-ff-dtype` is set, cast the
         # cached tensor BEFORE writing so the on-disk safetensors holds
         # the target dtype.  Subsequent runs load the pretransposed
-        # FP16 weight directly — no BF16 copy ever lives in RAM.
+        # FP16 weight directly - no BF16 copy ever lives in RAM.
         # Applies to both the pretransposed `.weight_t` tensors and to
         # the plain `.bias` tensors that flow through the fall-through
         # branch.  `transformer_dtype` extends the same baking to every
@@ -1413,7 +1412,7 @@ def _restore_block_quantized_linears(
 
 
 def _quant_bases_for_block_keys(
-    quant_keys: Tuple[tuple[str, str], ...] | list[tuple[str, str]],
+    quant_keys: tuple[tuple[str, str], ...] | list[tuple[str, str]],
 ) -> set[str]:
     bases: set[str] = set()
     for _full_key, block_key in quant_keys:
@@ -1425,7 +1424,7 @@ def _quant_bases_for_block_keys(
 
 
 def _quant_params_for_base(
-    quant_keys: Tuple[tuple[str, str], ...] | list[tuple[str, str]],
+    quant_keys: tuple[tuple[str, str], ...] | list[tuple[str, str]],
     base: str,
 ) -> set[str]:
     prefix = f"{base}."
@@ -1510,7 +1509,7 @@ def _quant_mode_for_base(
     base: str,
     *,
     transformer_cache_quantize: str,
-    quantization_specs: Tuple[Tuple[str, str], ...],
+    quantization_specs: tuple[tuple[str, str], ...],
 ) -> str | None:
     if (
         transformer_cache_quantize in (
@@ -1530,11 +1529,11 @@ def _quant_mode_for_base(
 def _prepare_block_quantized_linears(
     block: nn.Module,
     quant_bases: set[str],
-    quant_keys: Tuple[tuple[str, str], ...] | list[tuple[str, str]],
-    normal_keys: Tuple[tuple[str, str], ...] | list[tuple[str, str]],
+    quant_keys: tuple[tuple[str, str], ...] | list[tuple[str, str]],
+    normal_keys: tuple[tuple[str, str], ...] | list[tuple[str, str]],
     *,
     transformer_cache_quantize: str,
-    quantization_specs: Tuple[Tuple[str, str], ...],
+    quantization_specs: tuple[tuple[str, str], ...],
     group_size: int | None,
     bits: int | None,
 ) -> None:
@@ -1620,7 +1619,7 @@ def _install_block_layout_weight(block: nn.Module, layout_key: str, value: mx.ar
                     raise ValueError(f"Missing attention module for cache key: {layout_key}")
                 setattr(attn, cache_attr, value)
                 linear = getattr(attn, proj_name, None)
-                # to_gate_logits is None on non-V2 attentions — install the
+                # to_gate_logits is None on non-V2 attentions - install the
                 # cached weight but skip the source-weight delete.
                 if linear is not None and "weight" in linear:
                     del linear.weight
@@ -1632,7 +1631,7 @@ def _install_block_layout_weight(block: nn.Module, layout_key: str, value: mx.ar
 def _install_top_level_layout_weight(model: nn.Module, layout_key: str, value: mx.array) -> None:
     """Install a top-level (non-transformer_blocks) layout tensor.
 
-    Currently used for ``<adaln>.linear.weight_t`` keys — sets the cached
+    Currently used for ``<adaln>.linear.weight_t`` keys - sets the cached
     pretransposed weight on the AdaLayerNormSingle and drops the original
     weight to keep memory flat.
     """
@@ -1673,15 +1672,15 @@ def load_transformer_cache(
     cache_file: Path,
     *,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
 ) -> tuple[int, int, int]:
     """Load a converted transformer cache into an existing model instance."""
     cached_weights = _load_cache_weights(cache_file)
-    normal_weights: Dict[str, mx.array] = {}
-    layout_weights: Dict[str, mx.array] = {}
-    quant_weights: Dict[str, mx.array] = {}
+    normal_weights: dict[str, mx.array] = {}
+    layout_weights: dict[str, mx.array] = {}
+    quant_weights: dict[str, mx.array] = {}
     normal_keys_by_block: dict[int, list[tuple[str, str]]] = {}
     quant_keys_by_block: dict[int, list[tuple[str, str]]] = {}
 
@@ -1752,26 +1751,26 @@ def load_transformer_cache(
 def ensure_transformer_cache(
     weights_path: str,
     *,
-    transformer_dtype: Optional[mx.Dtype] = None,
+    transformer_dtype: mx.Dtype | None = None,
     cache_mode: str,
     cache_root: str | None,
     include_audio: bool,
-    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
-    video_ff_layout_layers: Tuple[int, ...],
-    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
-    video_attn_layout_layers: Tuple[int, ...],
-    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_ff_layout_layers: Tuple[int, ...] = (),
-    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_attn_layout_layers: Tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...],
+    video_ff_layout_layers: tuple[int, ...],
+    video_attn_layout_specs: tuple[tuple[str, str], ...],
+    video_attn_layout_layers: tuple[int, ...],
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
-    video_ff_quantize_layers: Tuple[int, ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_layers: tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
-    video_ff_dtype: Optional[mx.Dtype] = None,
-    audio_ff_dtype: Optional[mx.Dtype] = None,
+    video_ff_dtype: mx.Dtype | None = None,
+    audio_ff_dtype: mx.Dtype | None = None,
 ) -> TransformerCacheResult:
     """Build a matching transformer cache artifact if needed."""
     if cache_mode not in {"auto", "rebuild"}:
@@ -1844,26 +1843,26 @@ def load_transformer_weights_cached(
     model: nn.Module,
     weights_path: str,
     *,
-    transformer_dtype: Optional[mx.Dtype] = None,
+    transformer_dtype: mx.Dtype | None = None,
     cache_mode: str,
     cache_root: str | None,
     include_audio: bool,
-    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
-    video_ff_layout_layers: Tuple[int, ...],
-    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
-    video_attn_layout_layers: Tuple[int, ...],
-    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_ff_layout_layers: Tuple[int, ...] = (),
-    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_attn_layout_layers: Tuple[int, ...] = (),
+    video_ff_layout_specs: tuple[tuple[str, str], ...],
+    video_ff_layout_layers: tuple[int, ...],
+    video_attn_layout_specs: tuple[tuple[str, str], ...],
+    video_attn_layout_layers: tuple[int, ...],
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
-    video_ff_quantize_layers: Tuple[int, ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_layers: tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
-    video_ff_dtype: Optional[mx.Dtype] = None,
-    audio_ff_dtype: Optional[mx.Dtype] = None,
+    video_ff_dtype: mx.Dtype | None = None,
+    audio_ff_dtype: mx.Dtype | None = None,
 ) -> TransformerCacheResult:
     """Build if needed, then load a transformer cache into ``model``."""
     result = ensure_transformer_cache(
@@ -1927,27 +1926,27 @@ def load_transformer_weights_cached_streaming(
     model: nn.Module,
     weights_path: str,
     *,
-    transformer_dtype: Optional[mx.Dtype] = None,
+    transformer_dtype: mx.Dtype | None = None,
     cache_mode: str,
     cache_root: str | None,
     include_audio: bool,
-    video_ff_layout_specs: Tuple[Tuple[str, str], ...],
-    video_ff_layout_layers: Tuple[int, ...],
-    video_attn_layout_specs: Tuple[Tuple[str, str], ...],
-    video_attn_layout_layers: Tuple[int, ...],
+    video_ff_layout_specs: tuple[tuple[str, str], ...],
+    video_ff_layout_layers: tuple[int, ...],
+    video_attn_layout_specs: tuple[tuple[str, str], ...],
+    video_attn_layout_layers: tuple[int, ...],
     resident_blocks: int,
-    audio_ff_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_ff_layout_layers: Tuple[int, ...] = (),
-    audio_attn_layout_specs: Tuple[Tuple[str, str], ...] = (),
-    audio_attn_layout_layers: Tuple[int, ...] = (),
+    audio_ff_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_ff_layout_layers: tuple[int, ...] = (),
+    audio_attn_layout_specs: tuple[tuple[str, str], ...] = (),
+    audio_attn_layout_layers: tuple[int, ...] = (),
     adaln_pretranspose: bool = False,
     transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    video_ff_quantize_specs: Tuple[Tuple[str, str], ...] = (),
-    video_ff_quantize_layers: Tuple[int, ...] = (),
+    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
+    video_ff_quantize_layers: tuple[int, ...] = (),
     video_ff_quantize_group_size: int | None = None,
     video_ff_quantize_bits: int | None = None,
-    video_ff_dtype: Optional[mx.Dtype] = None,
-    audio_ff_dtype: Optional[mx.Dtype] = None,
+    video_ff_dtype: mx.Dtype | None = None,
+    audio_ff_dtype: mx.Dtype | None = None,
 ) -> TransformerCacheResult:
     """Load non-block weights and stream transformer blocks from the cache."""
     if resident_blocks <= 0:
@@ -1985,7 +1984,7 @@ def load_transformer_weights_cached_streaming(
     model.transformer_blocks = model.transformer_blocks[:resident_blocks]
 
     cached_weights = _load_cache_weights(result.cache_path)
-    non_block_weights: Dict[str, mx.array] = {}
+    non_block_weights: dict[str, mx.array] = {}
     for key, value in cached_weights.items():
         if key.startswith(LAYOUT_KEY_PREFIX):
             logical_key = key[len(LAYOUT_KEY_PREFIX) :]

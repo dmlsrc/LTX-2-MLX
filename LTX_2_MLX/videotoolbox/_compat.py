@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 # Sentinel-typed slots so submodules can `from ._compat import av` even when
-# PyObjC isn't installed — they just get None and need to call
+# PyObjC isn't installed - they just get None and need to call
 # `require_pyobjc()` before touching anything.
 av: Any = None
 CoreAudio: Any = None
@@ -24,12 +24,12 @@ libdispatch: Any = None
 _IMPORT_ERROR: Exception | None = None
 
 try:
-    import objc as _objc  # type: ignore
     import AVFoundation as _av  # type: ignore
     import CoreAudio as _CoreAudio  # type: ignore
     import CoreMedia as _CoreMedia  # type: ignore
     import Foundation as _Foundation  # type: ignore
     import libdispatch as _libdispatch  # type: ignore
+    import objc as _objc  # type: ignore
     import Quartz as _Quartz  # type: ignore
     import VideoToolbox as _VideoToolbox  # type: ignore
 

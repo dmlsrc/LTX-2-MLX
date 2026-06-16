@@ -8,13 +8,12 @@ import hashlib
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol
+from typing import Protocol
 
 import mlx.core as mx
 
-
 # Type alias for state dict
-StateDict = Dict[str, mx.array]
+StateDict = dict[str, mx.array]
 
 
 class Registry(Protocol):
@@ -30,8 +29,8 @@ class Registry(Protocol):
 
     def add(
         self,
-        paths: List[str],
-        op_name: Optional[str],
+        paths: list[str],
+        op_name: str | None,
         state_dict: StateDict,
     ) -> str:
         """
@@ -49,9 +48,9 @@ class Registry(Protocol):
 
     def pop(
         self,
-        paths: List[str],
-        op_name: Optional[str],
-    ) -> Optional[StateDict]:
+        paths: list[str],
+        op_name: str | None,
+    ) -> StateDict | None:
         """
         Remove and return a state dictionary from the registry.
 
@@ -66,9 +65,9 @@ class Registry(Protocol):
 
     def get(
         self,
-        paths: List[str],
-        op_name: Optional[str],
-    ) -> Optional[StateDict]:
+        paths: list[str],
+        op_name: str | None,
+    ) -> StateDict | None:
         """
         Retrieve a state dictionary from the registry without removing it.
 
@@ -95,8 +94,8 @@ class DummyRegistry:
 
     def add(
         self,
-        _paths: List[str],
-        _op_name: Optional[str],
+        _paths: list[str],
+        _op_name: str | None,
         _state_dict: StateDict,
     ) -> str:
         """No-op add - returns empty string."""
@@ -104,17 +103,17 @@ class DummyRegistry:
 
     def pop(
         self,
-        _paths: List[str],
-        _op_name: Optional[str],
-    ) -> Optional[StateDict]:
+        _paths: list[str],
+        _op_name: str | None,
+    ) -> StateDict | None:
         """No-op pop - always returns None."""
         return None
 
     def get(
         self,
-        _paths: List[str],
-        _op_name: Optional[str],
-    ) -> Optional[StateDict]:
+        _paths: list[str],
+        _op_name: str | None,
+    ) -> StateDict | None:
         """No-op get - always returns None."""
         return None
 
@@ -135,10 +134,10 @@ class StateDictRegistry:
         _lock: Threading lock for thread safety.
     """
 
-    _state_dicts: Dict[str, StateDict] = field(default_factory=dict)
+    _state_dicts: dict[str, StateDict] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def _generate_id(self, paths: List[str], op_name: Optional[str]) -> str:
+    def _generate_id(self, paths: list[str], op_name: str | None) -> str:
         """Generate a unique ID from paths and operation name."""
         m = hashlib.sha256()
         parts = [str(Path(p).resolve()) for p in paths]
@@ -149,8 +148,8 @@ class StateDictRegistry:
 
     def add(
         self,
-        paths: List[str],
-        op_name: Optional[str],
+        paths: list[str],
+        op_name: str | None,
         state_dict: StateDict,
     ) -> str:
         """
@@ -179,9 +178,9 @@ class StateDictRegistry:
 
     def pop(
         self,
-        paths: List[str],
-        op_name: Optional[str],
-    ) -> Optional[StateDict]:
+        paths: list[str],
+        op_name: str | None,
+    ) -> StateDict | None:
         """
         Remove and return a state dictionary from the registry.
 
@@ -197,9 +196,9 @@ class StateDictRegistry:
 
     def get(
         self,
-        paths: List[str],
-        op_name: Optional[str],
-    ) -> Optional[StateDict]:
+        paths: list[str],
+        op_name: str | None,
+    ) -> StateDict | None:
         """
         Retrieve a state dictionary without removing it.
 
@@ -223,7 +222,7 @@ class StateDictRegistry:
         with self._lock:
             return len(self._state_dicts)
 
-    def keys(self) -> List[str]:
+    def keys(self) -> list[str]:
         """Return list of cached state dict IDs."""
         with self._lock:
             return list(self._state_dicts.keys())

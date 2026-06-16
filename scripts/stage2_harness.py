@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 import mlx.core as mx
@@ -31,8 +31,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import generate as gen  # noqa: E402
 
-from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
 from LTX_2_MLX.pipelines.common import audio_modality_from_state, modality_from_state  # noqa: E402
+from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
 
 
 def adjacent_run_log_path(latents_path: str) -> str:
@@ -936,7 +936,7 @@ def main() -> None:
         # messages from generate_distilled_stage2_from_latents (the
         # "Upsampling..." / "Distilled stage 2: ..." inter-stage notes)
         # use position="below" which freezes the bar stack and detaches
-        # subsequent bar updates from the cursor accounting — so any
+        # subsequent bar updates from the cursor accounting - so any
         # per-step bench print collides with the in-place bar redraws.
         # We don't need a polished UI for a timing-only run, and plain
         # stderr prints (no bars, no \r updates) have no clobbering risk.

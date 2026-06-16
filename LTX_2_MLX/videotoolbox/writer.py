@@ -1,7 +1,7 @@
 """AVAssetWriter wrapper: HEVC video + optional ALAC/AAC audio, no ffmpeg.
 
 The writer takes a stream of CVPixelBuffers (typically straight from
-VsrSession's adaptor pool — zero-copy from VSR output to encoder) and
+VsrSession's adaptor pool - zero-copy from VSR output to encoder) and
 encodes them as HEVC Main10 4:2:0 or Main42210 4:2:2 10-bit BT.709 at the
 target fps. Audio (if attached) is pulled by AVAssetWriter on a dedicated
 dispatch queue via requestMediaDataWhenReadyOnQueue:, so the audio encode
@@ -15,10 +15,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import pixel_buffers as _pb
 from ._compat import CoreMedia, Foundation, Quartz, av, libdispatch, require_pyobjc
 from .audio import AudioTrack, audio_writer_settings
-from . import pixel_buffers as _pb
-
 
 # HEVC profile identifiers (Apple-stable strings; not exposed as PyObjC consts)
 HEVC_PROFILE_MAIN10 = "HEVC_Main10_AutoLevel"          # 4:2:0 10-bit

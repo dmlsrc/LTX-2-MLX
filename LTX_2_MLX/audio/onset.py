@@ -53,7 +53,6 @@ from typing import Any
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Threshold constants - single source of truth for both this module and
 # scripts/analyze_audio_onset.py (which imports the same defaults so the

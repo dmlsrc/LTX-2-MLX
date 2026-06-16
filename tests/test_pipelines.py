@@ -1,10 +1,14 @@
 """Tests for pipeline module: configuration, utilities, and generation flow."""
 
 import os
-import pytest
-import mlx.core as mx
 import tempfile
+
+import mlx.core as mx
+import pytest
 from PIL import Image
+
+from LTX_2_MLX.conditioning.keyframe import VideoConditionByKeyframeIndex
+from LTX_2_MLX.conditioning.latent import VideoConditionByLatentIndex
 
 # Import the modules under test
 from LTX_2_MLX.pipelines.common import (
@@ -14,10 +18,7 @@ from LTX_2_MLX.pipelines.common import (
     post_process_latent,
     timesteps_from_mask,
 )
-from LTX_2_MLX.conditioning.keyframe import VideoConditionByKeyframeIndex
-from LTX_2_MLX.conditioning.latent import VideoConditionByLatentIndex
-from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
-
+from LTX_2_MLX.types import NATIVE_FPS, VideoLatentShape
 
 # ============================================================================
 # ImageCondition Tests

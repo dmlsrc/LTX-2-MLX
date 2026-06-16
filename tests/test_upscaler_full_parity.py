@@ -4,14 +4,15 @@ Compares outputs at each layer to identify and fix any discrepancies.
 """
 
 import sys
+
 import numpy as np
 
 sys.path.insert(0, '/Users/mcruz/Developer/LTX-2-MLX')
 sys.path.insert(0, '/Users/mcruz/Developer/LTX-2-Pytorch/packages/ltx-core/src')
 
-import torch
 import mlx.core as mx
 import mlx.nn as nn
+import torch
 from safetensors import safe_open
 
 
@@ -215,7 +216,10 @@ def test_upsampler_component():
     print("UPSAMPLER COMPONENT DETAILED TEST")
     print("=" * 70)
 
-    from ltx_core.model.upsampler.spatial_rational_resampler import SpatialRationalResampler as PT_SRR
+    from ltx_core.model.upsampler.spatial_rational_resampler import (
+        SpatialRationalResampler as PT_SRR,
+    )
+
     from LTX_2_MLX.model.upscaler.spatial import SpatialRationalResampler as MLX_SRR
 
     # Load weights

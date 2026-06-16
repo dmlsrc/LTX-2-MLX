@@ -12,8 +12,8 @@ This is the most common pipeline for high-quality video generation.
 import gc
 import os
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence, Tuple
 
 import mlx.core as mx
 import numpy as np
@@ -46,50 +46,44 @@ _PRECOMPUTE_ROPE = _env_enabled(
     "LTX_DISABLE_ROPE_PRECOMPUTE",
 )
 
-from .common import (
-    ImageCondition,
-    apply_conditionings,
-    create_image_conditionings,
-    modality_from_state,
-    audio_modality_from_state,
-    maybe_post_process_latent,
-)
 from ..components import (
+    DISTILLED_SIGMA_VALUES,
+    STAGE_2_DISTILLED_SIGMA_VALUES,
     CFGGuider,
     CFGStarRescalingGuider,
-    DISTILLED_SIGMA_VALUES,
     EulerDiffusionStep,
     GaussianNoiser,
     LTX2Scheduler,
-    STAGE_2_DISTILLED_SIGMA_VALUES,
     VideoLatentPatchifier,
 )
 from ..components.diffusion_steps import HeunDiffusionStep
-from ..components.patchifiers import AudioPatchifier
-from ..conditioning.tools import VideoLatentTools, AudioLatentTools
-from ..model.transformer import LTXModel, LTXModelType, X0Model
 from ..components.guiders import STGGuider
-from ..components.perturbations import create_batched_stg_config, BatchedPerturbationConfig
+from ..components.patchifiers import AudioPatchifier
+from ..components.perturbations import BatchedPerturbationConfig, create_batched_stg_config
+from ..conditioning.tools import AudioLatentTools, VideoLatentTools
 from ..loader import (
     LoRAConfig,
-    fuse_loras_into_model,
     format_lora_stage_scale_lines,
+    fuse_loras_into_model,
+    get_transformer_cache_restore_state,
     lora_configs_for_stage,
     lora_configs_for_stage_delta,
     restore_transformer_cache_state,
-    get_transformer_cache_restore_state,
 )
+from ..model.audio_vae import AudioDecoder, Vocoder
+from ..model.transformer import LTXModel, LTXModelType, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-from ..model.audio_vae import AudioDecoder, Vocoder
-from ..types import (
-    AudioLatentShape,
-    LatentState,
-    VideoLatentShape,
-    VideoPixelShape,
-    NATIVE_FPS
+from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
+from .common import (
+    ImageCondition,
+    apply_conditionings,
+    audio_modality_from_state,
+    create_image_conditionings,
+    maybe_post_process_latent,
+    modality_from_state,
 )
 
 
@@ -114,10 +108,10 @@ class AVCFGConfig:
     rescale_scale: float = 0.7       # Restore MLX known-good short-clip baseline
 
     # Tiling for VAE decoding (enabled by default to prevent Metal watchdog crashes on long videos)
-    tiling_config: Optional[TilingConfig] = None
+    tiling_config: TilingConfig | None = None
     auto_tiling: bool = True
 
-    def _get_tiling_config(self) -> Optional[TilingConfig]:
+    def _get_tiling_config(self) -> TilingConfig | None:
         """Return tiling config, auto-enabling."""
         if self.tiling_config is not None:
             return self.tiling_config
@@ -128,8 +122,8 @@ class AVCFGConfig:
     # Compute settings
     dtype: mx.Dtype = mx.bfloat16
     profile_transformer_once: bool = False
-    profile_transformer_steps: Tuple[int, ...] = ()
-    profile_transformer_blocks: Tuple[int, ...] = ()
+    profile_transformer_steps: tuple[int, ...] = ()
+    profile_transformer_blocks: tuple[int, ...] = ()
 
     # Audio configuration
     audio_enabled: bool = False
@@ -172,12 +166,12 @@ class AVPipeline:
     def __init__(
         self,
         transformer: LTXModel,
-        video_encoder: Optional[NativeConv3dVideoEncoder],
-        video_decoder: Optional[NativeConv3dVideoDecoder],
-        audio_decoder: Optional[AudioDecoder] = None,
-        vocoder: Optional[Vocoder] = None,
-        video_decoder_loader: Optional[Callable[[], NativeConv3dVideoDecoder]] = None,
-        audio_decoder_loader: Optional[Callable[[], tuple[AudioDecoder, object, int]]] = None,
+        video_encoder: NativeConv3dVideoEncoder | None,
+        video_decoder: NativeConv3dVideoDecoder | None,
+        audio_decoder: AudioDecoder | None = None,
+        vocoder: Vocoder | None = None,
+        video_decoder_loader: Callable[[], NativeConv3dVideoDecoder] | None = None,
+        audio_decoder_loader: Callable[[], tuple[AudioDecoder, object, int]] | None = None,
         audio_sample_rate: int = 24000,
     ):
         """
@@ -229,7 +223,7 @@ class AVPipeline:
     def _profile_next_transformer_call(
         self,
         label: str,
-        blocks: Tuple[int, ...] = (),
+        blocks: tuple[int, ...] = (),
     ) -> None:
         """Arm the inner transformer profiler for the next model call."""
         model = self._velocity_transformer()
@@ -252,8 +246,8 @@ class AVPipeline:
         cls,
         path: str,
         video_latent: mx.array,
-        audio_latent: Optional[mx.array] = None,
-        progress_message: Optional[Callable[[str], None]] = None,
+        audio_latent: mx.array | None = None,
+        progress_message: Callable[[str], None] | None = None,
     ) -> None:
         """Save final video/audio latents as a sidecar npz file.
 
@@ -284,9 +278,9 @@ class AVPipeline:
         path: str,
         stage_1_video_latent: mx.array,
         stage_2_video_latent: mx.array,
-        stage_1_audio_latent: Optional[mx.array] = None,
-        stage_2_audio_latent: Optional[mx.array] = None,
-        progress_message: Optional[Callable[[str], None]] = None,
+        stage_1_audio_latent: mx.array | None = None,
+        stage_2_audio_latent: mx.array | None = None,
+        progress_message: Callable[[str], None] | None = None,
     ) -> None:
         """Save both distilled stages while preserving the final-latent keys.
 
@@ -352,7 +346,7 @@ class AVPipeline:
 
     def _ensure_video_decoder(
         self,
-        progress_message: Optional[Callable[[str], None]] = None,
+        progress_message: Callable[[str], None] | None = None,
     ) -> tuple[float, bool]:
         """Load the video VAE decoder on demand.
 
@@ -376,7 +370,7 @@ class AVPipeline:
 
     def _ensure_audio_decoder(
         self,
-        progress_message: Optional[Callable[[str], None]] = None,
+        progress_message: Callable[[str], None] | None = None,
     ) -> tuple[float, bool]:
         """Load the audio VAE decoder + vocoder on demand."""
         if self.audio_decoder is not None and self.vocoder is not None:
@@ -454,9 +448,9 @@ class AVPipeline:
         negative_context: mx.array,
         guider,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[int, int], None]] = None,
-        stg_guider: Optional[STGGuider] = None,
-        stg_perturbations: Optional[BatchedPerturbationConfig] = None,
+        callback: Callable[[int, int], None] | None = None,
+        stg_guider: STGGuider | None = None,
+        stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
         ge_gamma: float = 0.0,
         cross_attn_scale: float = 1.0,
@@ -562,9 +556,9 @@ class AVPipeline:
         negative_context: mx.array,
         guider,
         stepper: HeunDiffusionStep,
-        callback: Optional[Callable[[int, int], None]] = None,
-        stg_guider: Optional[STGGuider] = None,
-        stg_perturbations: Optional[BatchedPerturbationConfig] = None,
+        callback: Callable[[int, int], None] | None = None,
+        stg_guider: STGGuider | None = None,
+        stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
         ge_gamma: float = 0.0,
         cross_attn_scale: float = 1.0,
@@ -694,23 +688,23 @@ class AVPipeline:
         video_guider,
         audio_guider,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[int, int], None]] = None,
-        stg_guider: Optional[STGGuider] = None,
-        stg_perturbations: Optional[BatchedPerturbationConfig] = None,
+        callback: Callable[[int, int], None] | None = None,
+        stg_guider: STGGuider | None = None,
+        stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
         ge_gamma: float = 0.0,
         cross_attn_scale: float = 1.0,
         cross_attn_start_block: int = 40,
-        profile_steps: Tuple[int, ...] = (),
-        profile_blocks: Tuple[int, ...] = (),
-    ) -> Tuple[LatentState, LatentState]:
+        profile_steps: tuple[int, ...] = (),
+        profile_blocks: tuple[int, ...] = (),
+    ) -> tuple[LatentState, LatentState]:
         """Run joint audio-video denoising loop with separate guidance per modality."""
         num_steps = len(sigmas) - 1
         need_cfg = video_guider.enabled() or audio_guider.enabled()
         prev_velocity = None
         profile_step_set = set(profile_steps)
 
-        def print_profile(step: int, events: List[Tuple[str, float]]) -> None:
+        def print_profile(step: int, events: list[tuple[str, float]]) -> None:
             total = sum(seconds for _, seconds in events)
             print(f"\n  AV denoise step {step} profile (forced eval diagnostics):")
             for name, seconds in events:
@@ -837,14 +831,14 @@ class AVPipeline:
         video_guider,
         audio_guider,
         stepper: HeunDiffusionStep,
-        callback: Optional[Callable[[int, int], None]] = None,
-        stg_guider: Optional[STGGuider] = None,
-        stg_perturbations: Optional[BatchedPerturbationConfig] = None,
+        callback: Callable[[int, int], None] | None = None,
+        stg_guider: STGGuider | None = None,
+        stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
         ge_gamma: float = 0.0,
         cross_attn_scale: float = 1.0,
         cross_attn_start_block: int = 40,
-    ) -> Tuple[LatentState, LatentState]:
+    ) -> tuple[LatentState, LatentState]:
         """Run joint audio-video denoising loop with Heun stepping."""
         from ..core_utils import to_velocity
 
@@ -978,20 +972,20 @@ class AVPipeline:
     def _denoise_loop_simple_av(
         self,
         video_state: LatentState,
-        audio_state: Optional[LatentState],
+        audio_state: LatentState | None,
         sigmas: mx.array,
         video_context: mx.array,
-        audio_context: Optional[mx.array],
+        audio_context: mx.array | None,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[int, int], None]] = None,
-        profile_steps: Tuple[int, ...] = (),
-        profile_blocks: Tuple[int, ...] = (),
-    ) -> Tuple[LatentState, Optional[LatentState]]:
+        callback: Callable[[int, int], None] | None = None,
+        profile_steps: tuple[int, ...] = (),
+        profile_blocks: tuple[int, ...] = (),
+    ) -> tuple[LatentState, LatentState | None]:
         """Run distilled denoising without CFG for video-only or AV transformers."""
         num_steps = len(sigmas) - 1
         profile_step_set = set(profile_steps)
 
-        def print_profile(step: int, events: List[Tuple[str, float]]) -> None:
+        def print_profile(step: int, events: list[tuple[str, float]]) -> None:
             total = sum(seconds for _, seconds in events)
             print(f"\n  AV denoise step {step} profile (forced eval diagnostics):")
             for name, seconds in events:
@@ -1037,7 +1031,7 @@ class AVPipeline:
                 if hasattr(self.transformer, "velocity_model")
                 else self.transformer
             )
-            rope_arrays: List[mx.array] = []
+            rope_arrays: list[mx.array] = []
             video_pre = getattr(velocity_model, "_video_args_preprocessor", None)
             if video_pre is not None:
                 video_rope = _simple_preprocessor_of(video_pre)._prepare_positional_embeddings(
@@ -1067,7 +1061,7 @@ class AVPipeline:
             dt = sigma_next - sigma
 
             profile_step = step_idx + 1
-            profile_events: Optional[List[Tuple[str, float]]] = (
+            profile_events: list[tuple[str, float]] | None = (
                 [] if profile_step in profile_step_set else None
             )
             profile_started_at = time.perf_counter() if profile_events is not None else 0.0
@@ -1224,19 +1218,19 @@ class AVPipeline:
         positive_encoding: mx.array,
         config: AVCFGConfig,
         spatial_upscaler=None,
-        spatial_upscaler_loader: Optional[Callable[[], object]] = None,
-        images: Optional[List[ImageCondition]] = None,
-        callback: Optional[Callable[[int, int], None]] = None,
-        stage_callback: Optional[Callable[[str, int, int], None]] = None,
-        progress_message: Optional[Callable[[str], None]] = None,
-        positive_audio_encoding: Optional[mx.array] = None,
-        latent_save_path: Optional[str] = None,
-        stage_1_sigmas: Optional[Sequence[float]] = None,
-        stage_2_sigmas: Optional[Sequence[float]] = None,
+        spatial_upscaler_loader: Callable[[], object] | None = None,
+        images: list[ImageCondition] | None = None,
+        callback: Callable[[int, int], None] | None = None,
+        stage_callback: Callable[[str, int, int], None] | None = None,
+        progress_message: Callable[[str], None] | None = None,
+        positive_audio_encoding: mx.array | None = None,
+        latent_save_path: str | None = None,
+        stage_1_sigmas: Sequence[float] | None = None,
+        stage_2_sigmas: Sequence[float] | None = None,
         decode_video: bool = True,
-        stage_lora_configs: Optional[List[LoRAConfig]] = None,
+        stage_lora_configs: list[LoRAConfig] | None = None,
         stage2_lora_fuse_mode: str = "fresh-total",
-    ) -> Tuple[mx.array, Optional[mx.array]]:
+    ) -> tuple[mx.array, mx.array | None]:
         """
         Generate with the distilled AV checkpoint in two stages.
 
@@ -1773,18 +1767,18 @@ class AVPipeline:
         positive_encoding: mx.array,
         config: AVCFGConfig,
         spatial_upscaler,
-        stage_1_audio_latent: Optional[mx.array] = None,
-        images: Optional[List[ImageCondition]] = None,
-        callback: Optional[Callable[[int, int], None]] = None,
-        stage_callback: Optional[Callable[[str, int, int], None]] = None,
-        progress_message: Optional[Callable[[str], None]] = None,
-        positive_audio_encoding: Optional[mx.array] = None,
-        latent_save_path: Optional[str] = None,
+        stage_1_audio_latent: mx.array | None = None,
+        images: list[ImageCondition] | None = None,
+        callback: Callable[[int, int], None] | None = None,
+        stage_callback: Callable[[str, int, int], None] | None = None,
+        progress_message: Callable[[str], None] | None = None,
+        positive_audio_encoding: mx.array | None = None,
+        latent_save_path: str | None = None,
         burn_stage1_rng: bool = True,
         decode_video: bool = True,
-        stage2_state_probe: Optional[Callable[[LatentState, Optional[LatentState], mx.array], None]] = None,
-        stage_lora_configs: Optional[List[LoRAConfig]] = None,
-    ) -> Tuple[mx.array, Optional[mx.array]]:
+        stage2_state_probe: Callable[[LatentState, LatentState | None, mx.array], None] | None = None,
+        stage_lora_configs: list[LoRAConfig] | None = None,
+    ) -> tuple[mx.array, mx.array | None]:
         """
         Resume the distilled two-stage pipeline from saved stage-1 latents.
 
@@ -2144,15 +2138,15 @@ class AVPipeline:
     def __call__(
         self,
         positive_encoding: mx.array,
-        negative_encoding: Optional[mx.array] = None,
+        negative_encoding: mx.array | None = None,
         config: AVCFGConfig = None,
-        images: Optional[List[ImageCondition]] = None,
-        callback: Optional[Callable[[int, int], None]] = None,
-        progress_message: Optional[Callable[[str], None]] = None,
-        positive_audio_encoding: Optional[mx.array] = None,
-        negative_audio_encoding: Optional[mx.array] = None,
+        images: list[ImageCondition] | None = None,
+        callback: Callable[[int, int], None] | None = None,
+        progress_message: Callable[[str], None] | None = None,
+        positive_audio_encoding: mx.array | None = None,
+        negative_audio_encoding: mx.array | None = None,
         stg_scale: float = 0.0,
-        stg_blocks: Optional[List[int]] = None,
+        stg_blocks: list[int] | None = None,
         stg_cutoff: float = 1.0,
         guider_override=None,
         ge_gamma: float = 0.0,
@@ -2160,9 +2154,9 @@ class AVPipeline:
         temporal_upscaler=None,
         cross_attn_scale: float = 1.0,
         cross_attn_start_block: int = 40,
-        latent_save_path: Optional[str] = None,
+        latent_save_path: str | None = None,
         decode_video: bool = True,
-    ) -> Tuple[mx.array, Optional[mx.array]]:
+    ) -> tuple[mx.array, mx.array | None]:
         """
         Generate video (and optionally audio) using single-stage CFG pipeline.
 
@@ -2597,12 +2591,12 @@ class AVPipeline:
 
 def create_av_pipeline(
     transformer: LTXModel,
-    video_encoder: Optional[NativeConv3dVideoEncoder],
-    video_decoder: Optional[NativeConv3dVideoDecoder],
-    audio_decoder: Optional[AudioDecoder] = None,
-    vocoder: Optional[Vocoder] = None,
-    video_decoder_loader: Optional[Callable[[], NativeConv3dVideoDecoder]] = None,
-    audio_decoder_loader: Optional[Callable[[], tuple[AudioDecoder, object, int]]] = None,
+    video_encoder: NativeConv3dVideoEncoder | None,
+    video_decoder: NativeConv3dVideoDecoder | None,
+    audio_decoder: AudioDecoder | None = None,
+    vocoder: Vocoder | None = None,
+    video_decoder_loader: Callable[[], NativeConv3dVideoDecoder] | None = None,
+    audio_decoder_loader: Callable[[], tuple[AudioDecoder, object, int]] | None = None,
     audio_sample_rate: int = 24000,
 ) -> AVPipeline:
     """

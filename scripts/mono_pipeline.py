@@ -34,7 +34,6 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -50,7 +49,6 @@ from LTX_2_MLX.model.transformer.rope import (  # noqa: E402
     apply_rotary_emb,
     precompute_freqs_cis,
 )
-
 
 # --- Constants (V2.3 distilled, hardcoded for happy path) --------------------
 
@@ -82,7 +80,7 @@ def rms_norm(x: mx.array, eps: float = NORM_EPS) -> mx.array:
     return mx.fast.rms_norm(x, None, eps)
 
 
-def linear(x: mx.array, weight: mx.array, bias: Optional[mx.array] = None) -> mx.array:
+def linear(x: mx.array, weight: mx.array, bias: mx.array | None = None) -> mx.array:
     """Linear projection.  ``weight`` is row-major (out, in)."""
     # Match nn.Linear math: x @ weight.T + bias.  MLX will lazily handle the .T.
     if bias is not None:
@@ -93,7 +91,7 @@ def linear(x: mx.array, weight: mx.array, bias: Optional[mx.array] = None) -> mx
 def linear_pretransposed(
     x: mx.array,
     weight_t: mx.array,
-    bias: Optional[mx.array] = None,
+    bias: mx.array | None = None,
 ) -> mx.array:
     """Linear with a pre-transposed weight (shape (in, out), contiguous).
 
@@ -112,7 +110,7 @@ def attention(
     v: mx.array,
     heads: int,
     dim_head: int,
-    mask: Optional[mx.array] = None,
+    mask: mx.array | None = None,
 ) -> mx.array:
     """Reshape -> SDPA -> reshape, same as our ``_attention_core``."""
     b, t_q, _ = q.shape
@@ -136,7 +134,7 @@ def get_ada_values(
     timestep: mx.array,
     start: int,
     end: int,
-) -> Tuple[mx.array, ...]:
+) -> tuple[mx.array, ...]:
     """Slice ``[start:end]`` rows of an AdaLN table, add the timestep slice.
 
     table:    (num_params, D)
@@ -153,7 +151,7 @@ def get_av_ca_ada(
     scale_shift_timestep: mx.array,
     gate_timestep: mx.array,
     num_ss: int = AV_CA_NUM_SCALE_SHIFT,
-) -> Tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array]:
     """AV cross-modal AdaLN: 4 scale/shift values + 1 gate."""
     ss_slice = table[:num_ss]
     ss = ss_slice[None, None, :, :] + scale_shift_timestep  # (B, 1, 4, D)
@@ -182,19 +180,19 @@ def av_block_forward(
     a_timestep_emb: mx.array,         # (B, T, 9, D_a)
     v_prompt_timestep: mx.array,      # (B, T, 2, D_v)
     a_prompt_timestep: mx.array,      # (B, T, 2, D_a)
-    v_pe: Tuple[mx.array, mx.array],
-    a_pe: Tuple[mx.array, mx.array],
-    v_cross_pe: Tuple[mx.array, mx.array],
-    a_cross_pe: Tuple[mx.array, mx.array],
+    v_pe: tuple[mx.array, mx.array],
+    a_pe: tuple[mx.array, mx.array],
+    v_cross_pe: tuple[mx.array, mx.array],
+    a_cross_pe: tuple[mx.array, mx.array],
     v_cross_ss_ts: mx.array,          # (B, 1, 4, D_v)
     v_cross_gate_ts: mx.array,        # (B, 1, 1, D_v)
     a_cross_ss_ts: mx.array,          # (B, 1, 4, D_a)
     a_cross_gate_ts: mx.array,        # (B, 1, 1, D_a)
-    v_context_mask: Optional[mx.array],
-    a_context_mask: Optional[mx.array],
+    v_context_mask: mx.array | None,
+    a_context_mask: mx.array | None,
     # Block weights (flat dict, pretransposed for every Linear)
     w: dict,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """Single AV block forward, inlined.
 
     Mirrors ``BasicAVTransformerBlock.__call__`` math exactly with V2.3
@@ -384,7 +382,7 @@ def av_block_forward(
 # --- Weight extraction: pull every per-block weight into a flat list of dicts ---
 
 
-def extract_block_weights(model) -> List[dict]:
+def extract_block_weights(model) -> list[dict]:
     """Walk the modular model and produce 48 dicts, one per block.
 
     Each dict holds the exact weight arrays the inlined block forward needs,
@@ -464,20 +462,20 @@ def transformer_step(
     audio_timestep_scalar: mx.array,  # (B,), fp32
     video_context: mx.array,
     audio_context: mx.array,
-    video_context_mask: Optional[mx.array],
-    audio_context_mask: Optional[mx.array],
-    video_pe: Tuple[mx.array, mx.array],
-    audio_pe: Tuple[mx.array, mx.array],
-    video_cross_pe: Tuple[mx.array, mx.array],
-    audio_cross_pe: Tuple[mx.array, mx.array],
+    video_context_mask: mx.array | None,
+    audio_context_mask: mx.array | None,
+    video_pe: tuple[mx.array, mx.array],
+    audio_pe: tuple[mx.array, mx.array],
+    video_cross_pe: tuple[mx.array, mx.array],
+    audio_cross_pe: tuple[mx.array, mx.array],
     video_cross_ss_ts: mx.array,
     video_cross_gate_ts: mx.array,
     audio_cross_ss_ts: mx.array,
     audio_cross_gate_ts: mx.array,
     weights: dict,
-    block_weights: List[dict],
+    block_weights: list[dict],
     compute_dtype: mx.Dtype,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """Run one full transformer forward and return raw velocities.
 
     Inputs are latents at the current sigma; outputs are raw velocities (the
@@ -584,7 +582,7 @@ def transformer_step(
     return v_out, a_out
 
 
-def _prepare_mask(mask: Optional[mx.array], dtype: mx.Dtype) -> Optional[mx.array]:
+def _prepare_mask(mask: mx.array | None, dtype: mx.Dtype) -> mx.array | None:
     if mask is None:
         return None
     return mask.astype(dtype)
@@ -598,7 +596,7 @@ def _adaln_single_forward(
     num_emb: int,
     inner_dim: int,
     dtype: mx.Dtype,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """Inline of ``AdaLayerNormSingle.__call__``.
 
     ``emb_module`` is the timestep embedding submodule (sinusoidal + MLP);
@@ -617,8 +615,8 @@ def _output_project(
     x: mx.array,
     embedded_ts: mx.array,
     scale_shift_table: mx.array,
-    norm_weight: Optional[mx.array],
-    norm_bias: Optional[mx.array],
+    norm_weight: mx.array | None,
+    norm_bias: mx.array | None,
     proj_weight: mx.array,
     proj_bias: mx.array,
     inner_dim: int,
@@ -686,7 +684,7 @@ def prep_cross_attention_timestep(
     gate_adaln_module,
     inner_dim: int,
     dtype: mx.Dtype,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """Inline of ``MultiModalTransformerArgsPreprocessor._prepare_cross_attention_timestep``."""
     scaled = cross_sigma * TIMESTEP_SCALE
     av_ca_factor = AV_CA_TIMESTEP_SCALE / TIMESTEP_SCALE
@@ -703,10 +701,10 @@ def prep_cross_attention_timestep(
 def precompute_stage_rope(
     positions: mx.array,
     inner_dim: int,
-    max_pos: List[int],
+    max_pos: list[int],
     num_attention_heads: int,
     use_middle_indices_grid: bool,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     return precompute_freqs_cis(
         indices_grid=positions,
         dim=inner_dim,
@@ -723,7 +721,7 @@ def precompute_cross_rope(
     positions: mx.array,           # (B, n_dims, T) from the per-modality state
     audio_cross_attention_dim: int,
     num_attention_heads: int,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     # Only temporal axis; matches MultiModalTransformerArgsPreprocessor.prepare
     temporal = positions[:, 0:1, :]
     return precompute_freqs_cis(

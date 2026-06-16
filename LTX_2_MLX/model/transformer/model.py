@@ -5,18 +5,17 @@ import os
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
 
+from ...components.perturbations import BatchedPerturbationConfig
 from .rope import LTXRopeType, precompute_freqs_cis
 from .timestep_embedding import AdaLayerNormSingle
 from .transformer import BasicAVTransformerBlock, TransformerArgs, TransformerConfig
-from ...components.perturbations import BatchedPerturbationConfig
 
 
-def _pack_transformer_args(args: Optional[TransformerArgs]) -> Optional[tuple]:
+def _pack_transformer_args(args: TransformerArgs | None) -> tuple | None:
     """Flatten TransformerArgs for mx.compile boundaries."""
     if args is None:
         return None
@@ -34,7 +33,7 @@ def _pack_transformer_args(args: Optional[TransformerArgs]) -> Optional[tuple]:
     )
 
 
-def _unpack_transformer_args(packed: Optional[tuple]) -> Optional[TransformerArgs]:
+def _unpack_transformer_args(packed: tuple | None) -> TransformerArgs | None:
     """Restore TransformerArgs after an mx.compile boundary."""
     if packed is None:
         return None
@@ -65,11 +64,11 @@ def _unpack_transformer_args(packed: Optional[tuple]) -> Optional[TransformerArg
     )
 
 
-def _compile_transformer_block_group(blocks: List[nn.Module]):
+def _compile_transformer_block_group(blocks: list[nn.Module]):
     """Compile a resident block window while treating parameters as dynamic inputs."""
     blocks = list(blocks)
 
-    def _call(video_packed: Optional[tuple], audio_packed: Optional[tuple]) -> tuple:
+    def _call(video_packed: tuple | None, audio_packed: tuple | None) -> tuple:
         video_args = _unpack_transformer_args(video_packed)
         audio_args = _unpack_transformer_args(audio_packed)
         for block in blocks:
@@ -109,7 +108,7 @@ class PixArtAlphaTextProjection(nn.Module):
         self,
         in_features: int,
         hidden_size: int,
-        out_features: Optional[int] = None,
+        out_features: int | None = None,
     ):
         super().__init__()
         if out_features is None:
@@ -131,16 +130,16 @@ class Modality:
 
     latent: mx.array  # Shape: (B, T, C) - patchified latents
     context: mx.array  # Shape: (B, S, C_ctx) - text context
-    context_mask: Optional[mx.array]  # Shape: (B, S) or (B, 1, S, S)
+    context_mask: mx.array | None  # Shape: (B, S) or (B, 1, S, S)
     timesteps: mx.array  # Shape: (B,) or (B, T) - timestep values
     positions: mx.array  # Shape: (B, n_dims, T) - position indices
     enabled: bool = True
-    sigma: Optional[mx.array] = None  # Shape: (B,) - scalar noise level for V2 prompt_adaln
+    sigma: mx.array | None = None  # Shape: (B,) - scalar noise level for V2 prompt_adaln
     # Optional precomputed (cos, sin) RoPE.  When set, the preprocessor skips
     # the per-step ``precompute_freqs_cis`` call.  Caller is responsible for
     # invalidation when positions/max_pos/theta change between stages.
-    positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None
-    cross_positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None
+    positional_embeddings: tuple[mx.array, mx.array] | None = None
+    cross_positional_embeddings: tuple[mx.array, mx.array] | None = None
 
 
 class TransformerArgsPreprocessor:
@@ -158,16 +157,16 @@ class TransformerArgsPreprocessor:
         self,
         patchify_proj: nn.Linear,
         adaln: AdaLayerNormSingle,
-        caption_projection: Optional[PixArtAlphaTextProjection],
+        caption_projection: PixArtAlphaTextProjection | None,
         inner_dim: int,
-        max_pos: List[int],
+        max_pos: list[int],
         num_attention_heads: int,
         use_middle_indices_grid: bool = True,
         timestep_scale_multiplier: int = 1000,
         positional_embedding_theta: float = 10000.0,
         rope_type: LTXRopeType = LTXRopeType.SPLIT,  # LTX-2 distilled uses SPLIT
         compute_dtype: mx.Dtype = mx.bfloat16,
-        prompt_adaln: Optional[AdaLayerNormSingle] = None,
+        prompt_adaln: AdaLayerNormSingle | None = None,
         use_double_precision: bool = False,
     ):
         self.patchify_proj = patchify_proj
@@ -189,7 +188,7 @@ class TransformerArgsPreprocessor:
         timestep: mx.array,
         adaln: AdaLayerNormSingle,
         batch_size: int,
-    ) -> Tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array]:
         """
         Prepare timestep embeddings.
 
@@ -236,9 +235,9 @@ class TransformerArgsPreprocessor:
 
     def _prepare_attention_mask(
         self,
-        attention_mask: Optional[mx.array],
+        attention_mask: mx.array | None,
         target_dtype: mx.Dtype = mx.float32,
-    ) -> Optional[mx.array]:
+    ) -> mx.array | None:
         """
         Prepare attention mask for cross-attention.
 
@@ -285,7 +284,7 @@ class TransformerArgsPreprocessor:
     def _prepare_positional_embeddings(
         self,
         positions: mx.array,
-    ) -> Tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array]:
         """
         Prepare RoPE positional embeddings.
 
@@ -351,7 +350,7 @@ class TransformerArgsPreprocessor:
         )
 
         # Prepare positional embeddings (RoPE).  Skip the precompute_freqs_cis
-        # call when the caller supplied a precomputed (cos, sin) tuple — this
+        # call when the caller supplied a precomputed (cos, sin) tuple - this
         # mirrors mlx-video's per-stage RoPE precompute pattern.
         if modality.positional_embeddings is not None:
             pe = modality.positional_embeddings
@@ -421,7 +420,7 @@ class MultiModalTransformerArgsPreprocessor:
     def _prepare_cross_positional_embeddings(
         self,
         positions: mx.array,
-    ) -> Tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array]:
         """
         Prepare cross-modal positional embeddings.
 
@@ -449,7 +448,7 @@ class MultiModalTransformerArgsPreprocessor:
         scale_shift_timestep: mx.array,
         gate_timestep: mx.array,
         batch_size: int,
-    ) -> Tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array]:
         """
         Prepare cross-attention timestep embeddings.
 
@@ -474,7 +473,7 @@ class MultiModalTransformerArgsPreprocessor:
     def prepare(
         self,
         modality: Modality,
-        cross_modality: Optional[Modality] = None,
+        cross_modality: Modality | None = None,
     ) -> TransformerArgs:
         """
         Prepare all inputs for AudioVideo transformer blocks.
@@ -559,9 +558,9 @@ class LTXModel(nn.Module):
         num_layers: int = 48,
         cross_attention_dim: int = 4096,
         norm_eps: float = 1e-6,
-        caption_channels: Optional[int] = 3840,
+        caption_channels: int | None = 3840,
         positional_embedding_theta: float = 10000.0,
-        positional_embedding_max_pos: Optional[List[int]] = None,
+        positional_embedding_max_pos: list[int] | None = None,
         timestep_scale_multiplier: int = 1000,
         # AV cross-attn timestep scale: PyTorch defaults to 1, giving av_ca_factor = 1/1000
         # This controls the timestep scaling for audio-video cross attention
@@ -624,8 +623,8 @@ class LTXModel(nn.Module):
             av_cross_timestep_mode
         )
         self.profile_transformer_once = profile_transformer_once
-        self.profile_transformer_label: Optional[str] = None
-        self.profile_transformer_blocks: Tuple[int, ...] = ()
+        self.profile_transformer_label: str | None = None
+        self.profile_transformer_blocks: tuple[int, ...] = ()
         self.transformer_block_streamer = None
         self.transformer_block_compile = False
         self.transformer_block_compile_group_size = 0
@@ -763,7 +762,7 @@ class LTXModel(nn.Module):
                 dim=self.audio_inner_dim,
                 heads=self.AUDIO_ATTENTION_HEADS,
                 d_head=self.AUDIO_HEAD_DIM,
-                context_dim=self.audio_inner_dim,  # 2048, not 4096 — matches PyTorch audio_cross_attention_dim
+                context_dim=self.audio_inner_dim,  # 2048, not 4096 - matches PyTorch audio_cross_attention_dim
                 cross_attention_adaln=cross_attention_adaln,
                 apply_gated_attention=apply_gated_attention,
             )
@@ -851,13 +850,13 @@ class LTXModel(nn.Module):
 
     def enable_video_ff_quantization(
         self,
-        quantization_specs: Tuple[Tuple[str, str], ...],
+        quantization_specs: tuple[tuple[str, str], ...],
         group_size: int | None = None,
         bits: int | None = None,
-        layers: Tuple[int, ...] = (),
+        layers: tuple[int, ...] = (),
     ) -> int:
         """Quantize selected video feed-forward projections in-place for experiments."""
-        arrays: List[mx.array] = []
+        arrays: list[mx.array] = []
         count = 0
         selected_layers = set(layers)
         for i, block in enumerate(self.transformer_blocks):
@@ -881,8 +880,8 @@ class LTXModel(nn.Module):
 
     def apply_video_ff_layout(
         self,
-        layout_specs: Tuple[Tuple[str, str], ...],
-        layers: Tuple[int, ...] = (),
+        layout_specs: tuple[tuple[str, str], ...],
+        layers: tuple[int, ...] = (),
     ) -> int:
         """Apply selected same-math video feed-forward layout transforms."""
         count = 0
@@ -905,8 +904,8 @@ class LTXModel(nn.Module):
 
     def apply_video_attn_layout(
         self,
-        layout_specs: Tuple[Tuple[str, str], ...],
-        layers: Tuple[int, ...] = (),
+        layout_specs: tuple[tuple[str, str], ...],
+        layers: tuple[int, ...] = (),
     ) -> int:
         """Apply selected same-math video attention layout transforms."""
         _SUPPORTED = {"to_out", "to_q", "to_k", "to_v"}
@@ -949,8 +948,8 @@ class LTXModel(nn.Module):
 
     def apply_audio_ff_layout(
         self,
-        layout_specs: Tuple[Tuple[str, str], ...],
-        layers: Tuple[int, ...] = (),
+        layout_specs: tuple[tuple[str, str], ...],
+        layers: tuple[int, ...] = (),
     ) -> int:
         """Apply selected same-math audio feed-forward layout transforms.
 
@@ -978,8 +977,8 @@ class LTXModel(nn.Module):
 
     def apply_audio_attn_layout(
         self,
-        layout_specs: Tuple[Tuple[str, str], ...],
-        layers: Tuple[int, ...] = (),
+        layout_specs: tuple[tuple[str, str], ...],
+        layers: tuple[int, ...] = (),
     ) -> int:
         """Apply selected same-math audio attention layout transforms.
 
@@ -1033,7 +1032,7 @@ class LTXModel(nn.Module):
 
         Walks self.adaln_single, self.prompt_adaln_single, audio counterparts,
         and the four av_ca_*_adaln_single modules.  Each holds a single Linear
-        whose weight matmul runs once per denoise step — pretransposing the
+        whose weight matmul runs once per denoise step - pretransposing the
         weight saves the implicit ``weight.T`` op on every call.
 
         Not currently persisted to the on-disk transformer cache (the win is
@@ -1052,7 +1051,7 @@ class LTXModel(nn.Module):
             "av_ca_a2v_gate_adaln_single",
             "av_ca_v2a_gate_adaln_single",
         )
-        arrays: List[mx.array] = []
+        arrays: list[mx.array] = []
         for name in candidates:
             module = getattr(self, name, None)
             if module is None or not isinstance(module, AdaLayerNormSingle):
@@ -1064,13 +1063,13 @@ class LTXModel(nn.Module):
         return count
 
     # Audio layer debug: set to a directory path to capture per-layer audio states
-    _audio_layer_debug_dir: Optional[str] = None
+    _audio_layer_debug_dir: str | None = None
     _audio_layer_debug_done: bool = False
 
     def _collect_profile_arrays(
         self,
-        args: Optional[TransformerArgs],
-    ) -> List[mx.array]:
+        args: TransformerArgs | None,
+    ) -> list[mx.array]:
         """Collect representative arrays that materialize a preprocessor/output stage."""
         if args is None:
             return []
@@ -1090,7 +1089,7 @@ class LTXModel(nn.Module):
             arrays.append(args.prompt_timestep)
         return arrays
 
-    def _print_transformer_profile(self, events: List[Tuple[str, float]]) -> None:
+    def _print_transformer_profile(self, events: list[tuple[str, float]]) -> None:
         """Print a compact selected-call transformer profile."""
         total = sum(seconds for _, seconds in events)
         label = f" {self.profile_transformer_label}" if self.profile_transformer_label else ""
@@ -1103,7 +1102,7 @@ class LTXModel(nn.Module):
 
     def _print_transformer_block_profiles(
         self,
-        traces: List[Tuple[int, List[Tuple[str, float]]]],
+        traces: list[tuple[int, list[tuple[str, float]]]],
     ) -> None:
         """Print detailed profiles for selected transformer blocks."""
         if not traces:
@@ -1119,12 +1118,12 @@ class LTXModel(nn.Module):
 
     def _process_transformer_blocks(
         self,
-        video_args: Optional[TransformerArgs] = None,
-        audio_args: Optional[TransformerArgs] = None,
-        perturbations: Optional[BatchedPerturbationConfig] = None,
-        profile_events: Optional[List[Tuple[str, float]]] = None,
-        profile_block_traces: Optional[List[Tuple[int, List[Tuple[str, float]]]]] = None,
-    ) -> Tuple[Optional[TransformerArgs], Optional[TransformerArgs]]:
+        video_args: TransformerArgs | None = None,
+        audio_args: TransformerArgs | None = None,
+        perturbations: BatchedPerturbationConfig | None = None,
+        profile_events: list[tuple[str, float]] | None = None,
+        profile_block_traces: list[tuple[int, list[tuple[str, float]]]] | None = None,
+    ) -> tuple[TransformerArgs | None, TransformerArgs | None]:
         """Process transformer blocks."""
         capture = (
             self._audio_layer_debug_dir is not None
@@ -1148,7 +1147,7 @@ class LTXModel(nn.Module):
             else len(self.transformer_blocks)
         )
         resident_blocks = len(self.transformer_blocks)
-        previous_slot_layers: List[Optional[int]] = [None] * resident_blocks
+        previous_slot_layers: list[int | None] = [None] * resident_blocks
 
         # LTX_COMPILE_BLOCK_GROUPS=N enables block-group mx.compile for the
         # *non-streaming* path.  N is the group size; ceil(48/N) groups are
@@ -1420,10 +1419,10 @@ class LTXModel(nn.Module):
 
     def __call__(
         self,
-        video: Optional[Modality] = None,
-        audio: Optional[Modality] = None,
-        perturbations: Optional[BatchedPerturbationConfig] = None,
-    ) -> Union[mx.array, Tuple[mx.array, mx.array]]:
+        video: Modality | None = None,
+        audio: Modality | None = None,
+        perturbations: BatchedPerturbationConfig | None = None,
+    ) -> mx.array | tuple[mx.array, mx.array]:
         """
         Forward pass.
 
@@ -1441,8 +1440,8 @@ class LTXModel(nn.Module):
         """
         profile_this_call = self.profile_transformer_once
         self.profile_transformer_once = False
-        profile_events: Optional[List[Tuple[str, float]]] = [] if profile_this_call else None
-        profile_block_traces: Optional[List[Tuple[int, List[Tuple[str, float]]]]] = (
+        profile_events: list[tuple[str, float]] | None = [] if profile_this_call else None
+        profile_block_traces: list[tuple[int, list[tuple[str, float]]]] | None = (
             [] if profile_this_call and self.profile_transformer_blocks else None
         )
         profile_started_at = time.perf_counter() if profile_events is not None else 0.0
@@ -1583,10 +1582,10 @@ class X0Model(nn.Module):
 
     def __call__(
         self,
-        video: Optional[Modality] = None,
-        audio: Optional[Modality] = None,
-        perturbations: Optional[BatchedPerturbationConfig] = None,
-    ) -> Union[mx.array, Tuple[mx.array, mx.array]]:
+        video: Modality | None = None,
+        audio: Modality | None = None,
+        perturbations: BatchedPerturbationConfig | None = None,
+    ) -> mx.array | tuple[mx.array, mx.array]:
         """
         Compute denoised outputs.
 
@@ -1613,7 +1612,7 @@ class X0Model(nn.Module):
             if audio is not None:
                 denoised_audio = denoise(audio, audio_vel)
             else:
-                # Video-only inference on AV model — return video only
+                # Video-only inference on AV model - return video only
                 return denoised_video
             return denoised_video, denoised_audio
         else:

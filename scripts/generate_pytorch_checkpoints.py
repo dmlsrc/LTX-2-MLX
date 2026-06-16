@@ -192,10 +192,10 @@ def generate_checkpoints(
 
     # Patchify setup
     from ltx_core.components.patchifiers import VideoLatentPatchifier, get_pixel_coords
-    from ltx_core.types import VideoLatentShape, SpatioTemporalScaleFactors
+    from ltx_core.guidance.perturbations import BatchedPerturbationConfig
     from ltx_core.model.transformer.modality import Modality
     from ltx_core.model.transformer.model import X0Model
-    from ltx_core.guidance.perturbations import BatchedPerturbationConfig
+    from ltx_core.types import SpatioTemporalScaleFactors, VideoLatentShape
 
     # Wrap transformer with X0Model to get denoised (x0) outputs instead of velocity
     x0_model = X0Model(transformer)

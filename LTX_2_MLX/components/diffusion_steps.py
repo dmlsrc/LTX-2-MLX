@@ -1,7 +1,7 @@
 """Diffusion stepping strategies for LTX-2 sampling."""
 
 import math
-from typing import Optional, Protocol, Tuple
+from typing import Protocol
 
 import mlx.core as mx
 
@@ -79,7 +79,7 @@ class EulerDiffusionStep:
 
 class EulerAncestralDiffusionStep:
     """
-    Euler ancestral sampler — adds noise injection at each step.
+    Euler ancestral sampler - adds noise injection at each step.
 
     Matches ComfyUI's euler_ancestral_cfg_pp sampler behavior.
     At each step:
@@ -212,10 +212,10 @@ class Res2sDiffusionStep:
     @staticmethod
     def get_sde_coeff(
         sigma_next: float,
-        sigma_up: Optional[float] = None,
-        sigma_down: Optional[float] = None,
-        sigma_max: Optional[float] = None,
-    ) -> Tuple[float, float, float]:
+        sigma_up: float | None = None,
+        sigma_down: float | None = None,
+        sigma_max: float | None = None,
+    ) -> tuple[float, float, float]:
         """
         Compute SDE coefficients (alpha_ratio, sigma_down, sigma_up) for the step.
 
@@ -264,7 +264,7 @@ class Res2sDiffusionStep:
         denoised_sample: mx.array,
         sigmas: mx.array,
         step_index: int,
-        noise: Optional[mx.array] = None,
+        noise: mx.array | None = None,
     ) -> mx.array:
         """
         Advance one step with SDE noise injection.

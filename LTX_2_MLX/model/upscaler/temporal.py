@@ -10,7 +10,6 @@ Architecture matches PyTorch reference:
 - PixelShuffle for temporal upsampling (dims=1)
 """
 
-from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -21,7 +20,7 @@ import mlx.nn as nn
 def conv3d(
     x: mx.array,
     weight: mx.array,
-    bias: Optional[mx.array] = None,
+    bias: mx.array | None = None,
     stride: int = 1,
     padding: int = 0,
 ) -> mx.array:
@@ -98,7 +97,7 @@ class ResBlock3d(nn.Module):
     Architecture: conv1 -> norm1 -> act -> conv2 -> norm2 -> act(x + residual)
     """
 
-    def __init__(self, channels: int, mid_channels: Optional[int] = None, num_groups: int = 32):
+    def __init__(self, channels: int, mid_channels: int | None = None, num_groups: int = 32):
         super().__init__()
         if mid_channels is None:
             mid_channels = channels

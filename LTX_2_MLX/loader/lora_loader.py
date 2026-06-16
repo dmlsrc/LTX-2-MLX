@@ -4,10 +4,8 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import mlx.core as mx
-
 
 # A LoRA target can be filtered by several overlapping tag families; excluding
 # any tag drops every target that carries it. Each target carries one tag from
@@ -113,9 +111,9 @@ class LoRAConfig:
 
     path: str
     strength: float = 1.0
-    stage_1_strength: Optional[float] = None
-    stage_2_strength: Optional[float] = None
-    exclude: Tuple[str, ...] = ()
+    stage_1_strength: float | None = None
+    stage_2_strength: float | None = None
+    exclude: tuple[str, ...] = ()
 
     def __post_init__(self):
         for name, value in (
@@ -144,18 +142,18 @@ class LoRAConfig:
             return self.strength if self.stage_2_strength is None else self.stage_2_strength
         raise ValueError(f"LoRA stage must be 1 or 2, got {stage}")
 
-    def with_strength(self, strength: float) -> "LoRAConfig":
+    def with_strength(self, strength: float) -> LoRAConfig:
         return LoRAConfig(path=self.path, strength=strength, exclude=self.exclude)
 
 
-def lora_configs_have_stage_strengths(lora_configs: Optional[List[LoRAConfig]]) -> bool:
+def lora_configs_have_stage_strengths(lora_configs: list[LoRAConfig] | None) -> bool:
     return any(cfg.has_stage_strengths() for cfg in (lora_configs or ()))
 
 
 def lora_configs_for_stage(
-    lora_configs: Optional[List[LoRAConfig]],
+    lora_configs: list[LoRAConfig] | None,
     stage: int,
-) -> List[LoRAConfig]:
+) -> list[LoRAConfig]:
     return [
         cfg.with_strength(cfg.strength_for_stage(stage))
         for cfg in (lora_configs or ())
@@ -164,12 +162,12 @@ def lora_configs_for_stage(
 
 
 def lora_configs_for_stage_delta(
-    lora_configs: Optional[List[LoRAConfig]],
+    lora_configs: list[LoRAConfig] | None,
     *,
     from_stage: int,
     to_stage: int,
-) -> List[LoRAConfig]:
-    out: List[LoRAConfig] = []
+) -> list[LoRAConfig]:
+    out: list[LoRAConfig] = []
     for cfg in lora_configs or ():
         delta = cfg.strength_for_stage(to_stage) - cfg.strength_for_stage(from_stage)
         if delta != 0.0:
@@ -178,14 +176,14 @@ def lora_configs_for_stage_delta(
 
 
 def format_lora_stage_scale_lines(
-    lora_configs: Optional[List[LoRAConfig]],
+    lora_configs: list[LoRAConfig] | None,
     stage: int,
     *,
-    from_stage: Optional[int] = None,
+    from_stage: int | None = None,
     include_unchanged: bool = False,
-) -> List[str]:
+) -> list[str]:
     """Return human-readable stage LoRA total/change lines."""
-    lines: List[str] = []
+    lines: list[str] = []
     for cfg in lora_configs or ():
         total = cfg.strength_for_stage(stage)
         name = Path(cfg.path).name
@@ -237,8 +235,8 @@ def _guard_fused_range(fused_f32: mx.array, target_dtype, mlx_key: str) -> None:
 
 
 def _lora_base_to_ab(
-    lora_weights: Dict[str, mx.array],
-) -> Dict[str, Tuple[str, str]]:
+    lora_weights: dict[str, mx.array],
+) -> dict[str, tuple[str, str]]:
     """Map each LoRA base key to its (A, B) weight keys."""
     suffixes = [
         (".lora_A.weight", ".lora_B.weight"),
@@ -246,7 +244,7 @@ def _lora_base_to_ab(
         (".lora_A", ".lora_B"),
         (".lora_down", ".lora_up"),
     ]
-    out: Dict[str, Tuple[str, str]] = {}
+    out: dict[str, tuple[str, str]] = {}
     for key in lora_weights:
         for suf_a, suf_b in suffixes:
             if key.endswith(suf_a):
@@ -297,7 +295,7 @@ def _pretransposed_target(root, key: str):
 
 def fuse_loras_into_model(
     model,
-    lora_configs: List[LoRAConfig],
+    lora_configs: list[LoRAConfig],
     *,
     include_audio: bool = True,
     min_coverage: float = 0.5,
@@ -319,15 +317,15 @@ def fuse_loras_into_model(
     new adapter against its model card or reference loader before changing this
     production rule.
     """
-    from .weight_converter import convert_pytorch_key_to_mlx
     from .transformer_cache import invalidate_transformer_cache_restore_state
+    from .weight_converter import convert_pytorch_key_to_mlx
 
     target = getattr(model, "velocity_model", model)
     range_guard_enabled = _lora_fuse_range_guard_enabled()
     if verbose and range_guard_enabled:
         print(f"  LoRA fused-range guard: enabled ({_LORA_FUSE_RANGE_GUARD_ENV}=1)")
 
-    table: Dict[str, list] = {}
+    table: dict[str, list] = {}
     unresolved = 0
     excluded = 0
 
@@ -384,7 +382,7 @@ def fuse_loras_into_model(
             acc = term if acc is None else acc + term
         return acc
 
-    def fused_value(weight: mx.array, d: mx.array, mlx_key: str) -> Optional[mx.array]:
+    def fused_value(weight: mx.array, d: mx.array, mlx_key: str) -> mx.array | None:
         if tuple(weight.shape) == tuple(d.shape):
             fused = weight.astype(mx.float32) + d
         elif tuple(weight.shape) == tuple(reversed(d.shape)):
@@ -396,7 +394,7 @@ def fuse_loras_into_model(
         return fused.astype(weight.dtype)
 
     applied = set()
-    shape_skipped: List[str] = []
+    shape_skipped: list[str] = []
     for key in table:
         target_ref = _navigate_existing(target, key) or _pretransposed_target(target, key)
         if target_ref is None:

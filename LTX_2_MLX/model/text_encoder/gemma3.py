@@ -18,13 +18,11 @@ Architecture:
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from LTX_2_MLX.kernels import silu_mul
-
 
 # Gemma3 layer type pattern: every 6th layer (5, 11, 17, 23, 29, 35, 41, 47) is full attention
 GEMMA3_LAYER_TYPES = [
@@ -52,7 +50,7 @@ class Gemma3Config:
     sliding_rope_scaling_factor: float = 1.0  # No scaling for sliding
     full_rope_theta: float = 1000000.0
     full_rope_scaling_factor: float = 8.0  # Linear scaling for full attention
-    layer_types: List[str] = field(default_factory=lambda: list(GEMMA3_LAYER_TYPES))
+    layer_types: list[str] = field(default_factory=lambda: list(GEMMA3_LAYER_TYPES))
 
 
 def rms_norm(x: mx.array, weight: mx.array, eps: float = 1e-6) -> mx.array:
@@ -99,7 +97,7 @@ class Gemma3RotaryEmbedding:
         inv_freq = 1.0 / (base ** (mx.arange(0, dim, 2, dtype=mx.float32) / dim))
         self.inv_freq = inv_freq
 
-    def __call__(self, positions: mx.array) -> Tuple[mx.array, mx.array]:
+    def __call__(self, positions: mx.array) -> tuple[mx.array, mx.array]:
         """Compute cos and sin for rotary embeddings."""
         # Apply linear scaling (1.0 for sliding = no-op, 8.0 for full)
         positions = positions.astype(mx.float32) / self.scaling_factor
@@ -119,7 +117,7 @@ def apply_rotary_pos_emb(
     k: mx.array,
     cos: mx.array,
     sin: mx.array,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """Apply rotary position embeddings to query and key tensors.
 
     Matches HF Gemma3's `apply_rotary_pos_emb`: keep cos/sin in FP32, let the
@@ -194,8 +192,8 @@ class Gemma3Attention(nn.Module):
     def __call__(
         self,
         hidden_states: mx.array,
-        attention_mask: Optional[mx.array] = None,
-        position_ids: Optional[mx.array] = None,
+        attention_mask: mx.array | None = None,
+        position_ids: mx.array | None = None,
     ) -> mx.array:
         batch_size, seq_len, _ = hidden_states.shape
 
@@ -281,8 +279,8 @@ class Gemma3DecoderLayer(nn.Module):
     def __call__(
         self,
         hidden_states: mx.array,
-        attention_mask: Optional[mx.array] = None,
-        position_ids: Optional[mx.array] = None,
+        attention_mask: mx.array | None = None,
+        position_ids: mx.array | None = None,
     ) -> mx.array:
         # Self-attention block
         residual = hidden_states
@@ -331,10 +329,10 @@ class Gemma3Model(nn.Module):
     def __call__(
         self,
         input_ids: mx.array,
-        attention_mask: Optional[mx.array] = None,
-        position_ids: Optional[mx.array] = None,
+        attention_mask: mx.array | None = None,
+        position_ids: mx.array | None = None,
         output_hidden_states: bool = True,
-    ) -> Tuple[mx.array, Optional[List[mx.array]]]:
+    ) -> tuple[mx.array, list[mx.array] | None]:
         """
         Forward pass.
 
@@ -505,7 +503,7 @@ def load_gemma3_weights(
     print(f"  Loaded {loaded_count} weight tensors")
 
 
-def create_gemma3_model(weights_dir: Optional[str] = None) -> Gemma3Model:
+def create_gemma3_model(weights_dir: str | None = None) -> Gemma3Model:
     """
     Create and optionally load a Gemma 3 model.
 

@@ -4,11 +4,11 @@
 import argparse
 import gc
 import json
-import os
 import math
+import os
 import sys
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 import mlx.core as mx
@@ -17,16 +17,30 @@ import numpy as np
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from LTX_2_MLX.model.transformer import (
-    LTXAVModel,
-    LTXModel,
-    LTXModelType,
-    LTXRopeType,
-    Modality,
-    X0Model,
+from LTX_2_MLX.components import (
+    DISTILLED_SIGMA_VALUES,
+    STAGE_2_DISTILLED_SIGMA_VALUES,
+    VideoLatentPatchifier,
+    get_sigma_schedule,
 )
+from LTX_2_MLX.components.guiders import LegacyStatefulAPGGuider, LtxAPGGuider, STGGuider
 from LTX_2_MLX.components.patchifiers import get_pixel_coords
-from LTX_2_MLX.types import SpatioTemporalScaleFactors
+from LTX_2_MLX.components.perturbations import create_batched_stg_config
+from LTX_2_MLX.core_utils import to_velocity
+from LTX_2_MLX.loader import (
+    TRANSFORMER_CACHE_QUANTIZE_MODES,
+    TRANSFORMER_CACHE_QUANTIZE_OFF,
+    LoRAConfig,
+    checkpoint_has_fp8_tensors,
+    ensure_weight_family_caches,
+    get_transformer_cache_restore_state,
+    load_av_transformer_weights,
+    load_transformer_weights,
+    load_transformer_weights_cached,
+    load_transformer_weights_cached_streaming,
+    lora_configs_have_stage_strengths,
+)
+from LTX_2_MLX.loader.lora_loader import fuse_loras_into_model
 from LTX_2_MLX.model.audio_vae import (
     AudioDecoder,
     Vocoder,
@@ -36,29 +50,14 @@ from LTX_2_MLX.model.audio_vae import (
     load_vocoder_with_bwe_weights,
 )
 from LTX_2_MLX.model.audio_vae.vocoder import MelSTFT
-from LTX_2_MLX.components import (
-    DISTILLED_SIGMA_VALUES,
-    STAGE_2_DISTILLED_SIGMA_VALUES,
-    VideoLatentPatchifier,
-    get_sigma_schedule,
+from LTX_2_MLX.model.transformer import (
+    LTXAVModel,
+    LTXModel,
+    LTXModelType,
+    LTXRopeType,
+    Modality,
+    X0Model,
 )
-from LTX_2_MLX.components.guiders import LtxAPGGuider, LegacyStatefulAPGGuider, STGGuider
-from LTX_2_MLX.components.perturbations import create_batched_stg_config
-from LTX_2_MLX.types import VideoLatentShape, NATIVE_FPS
-from LTX_2_MLX.loader import (
-    LoRAConfig,
-    TRANSFORMER_CACHE_QUANTIZE_MODES,
-    TRANSFORMER_CACHE_QUANTIZE_OFF,
-    checkpoint_has_fp8_tensors,
-    ensure_weight_family_caches,
-    get_transformer_cache_restore_state,
-    lora_configs_have_stage_strengths,
-    load_av_transformer_weights,
-    load_transformer_weights,
-    load_transformer_weights_cached,
-    load_transformer_weights_cached_streaming,
-)
-from LTX_2_MLX.loader.lora_loader import fuse_loras_into_model
 from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
 from LTX_2_MLX.model.video_vae.native_decoder import (
     NativeConv3dVideoDecoder,
@@ -69,10 +68,9 @@ from LTX_2_MLX.model.video_vae.tiling import (
     TemporalTilingConfig,
     TilingConfig,
 )
-from LTX_2_MLX.core_utils import to_velocity
 from LTX_2_MLX.progress import PhaseBar, StackedPhaseBars
-from LTX_2_MLX.video_encoder import encode_video, TIERS
-
+from LTX_2_MLX.types import NATIVE_FPS, SpatioTemporalScaleFactors, VideoLatentShape
+from LTX_2_MLX.video_encoder import TIERS, encode_video
 
 # Tiers that map cleanly onto AVAssetWriter's HEVC outputs.  Auto-mode
 # routes these through the VideoToolbox backend; everything else stays
@@ -954,7 +952,7 @@ def save_text_conditioning_sidecar(
 def save_run_log_sidecar(
     path: str,
     payload: dict,
-    timings: "RunTimings",
+    timings: RunTimings,
     status: str,
     outputs: dict | None = None,
 ) -> None:
@@ -1069,44 +1067,24 @@ def batched_cfg_forward(
     uncond_output = batched_output[1:2]
 
     return cond_output, uncond_output
+from LTX_2_MLX.model.text_encoder.encoder import (
+    create_av_text_encoder,
+    create_av_text_encoder_v2_from_checkpoint,
+    create_text_encoder,
+    load_av_text_encoder_v2_weights,
+    load_av_text_encoder_weights,
+    load_text_encoder_weights,
+)
 from LTX_2_MLX.model.text_encoder.gemma3 import (
     Gemma3Config,
     Gemma3Model,
     load_gemma3_weights,
 )
-from LTX_2_MLX.model.text_encoder.encoder import (
-    create_text_encoder,
-    load_text_encoder_weights,
-    create_av_text_encoder,
-    load_av_text_encoder_weights,
-    create_av_text_encoder_v2_from_checkpoint,
-    load_av_text_encoder_v2_weights,
-)
 from LTX_2_MLX.model.upscaler import (
     SpatialUpscaler,
-    load_spatial_upscaler_weights,
     TemporalUpscaler,
+    load_spatial_upscaler_weights,
     load_temporal_upscaler_weights,
-)
-from LTX_2_MLX.pipelines.two_stage import (
-    TwoStagePipeline,
-    TwoStageCFGConfig,
-)
-from LTX_2_MLX.pipelines.av_pipeline import (
-    AVPipeline,
-    AVCFGConfig,
-)
-from LTX_2_MLX.pipelines.common import ImageCondition
-from LTX_2_MLX.pipelines.ic_lora import (
-    ControlType,
-    VideoCondition,
-    ICLoraPipeline,
-    ICLoraConfig,
-)
-from LTX_2_MLX.pipelines.keyframe_interpolation import (
-    KeyframeInterpolationPipeline,
-    KeyframeInterpolationConfig,
-    Keyframe,
 )
 from LTX_2_MLX.model.video_vae.native_encoder import (
     NativeConv3dVideoEncoder,
@@ -1114,6 +1092,27 @@ from LTX_2_MLX.model.video_vae.native_encoder import (
     load_native_vae_encoder_statistics,
     load_native_vae_encoder_weights,
 )
+from LTX_2_MLX.pipelines.av_pipeline import (
+    AVCFGConfig,
+    AVPipeline,
+)
+from LTX_2_MLX.pipelines.common import ImageCondition
+from LTX_2_MLX.pipelines.ic_lora import (
+    ControlType,
+    ICLoraConfig,
+    ICLoraPipeline,
+    VideoCondition,
+)
+from LTX_2_MLX.pipelines.keyframe_interpolation import (
+    Keyframe,
+    KeyframeInterpolationConfig,
+    KeyframeInterpolationPipeline,
+)
+from LTX_2_MLX.pipelines.two_stage import (
+    TwoStageCFGConfig,
+    TwoStagePipeline,
+)
+
 
 def _read_checkpoint_config(checkpoint_path: str) -> dict:
     """Read the JSON config from checkpoint metadata."""
@@ -1268,6 +1267,7 @@ def get_vae_config(checkpoint_path: str) -> dict:
     """Read VAE config from checkpoint metadata."""
     try:
         import json
+
         from safetensors import safe_open
         with safe_open(checkpoint_path, framework="numpy") as f:
             metadata = f.metadata() or {}
@@ -2648,7 +2648,7 @@ def generate_video(
     image_strength: float = 0.95,
     lora_path: str = None,
     lora_strength: float = 1.0,
-    lora_configs: "list | None" = None,
+    lora_configs: list | None = None,
     lora_allow_partial: bool = False,
     stage2_lora_fuse_mode: str = "fresh-total",
     tiled_vae: bool = False,
@@ -4394,7 +4394,9 @@ def generate_video(
             # stack a "VAE chunks" bar above the encoder's "VT encode"
             # frames bar - same UX as scripts/vsr_harness.py.
             from LTX_2_MLX.pipelines.streaming import (
-                iter_decoded_chunks, latent_dims, plan_vae_tiling,
+                iter_decoded_chunks,
+                latent_dims,
+                plan_vae_tiling,
             )
 
             final_video_latent = video

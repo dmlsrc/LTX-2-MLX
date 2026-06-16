@@ -1,4 +1,4 @@
-"""Retake pipeline — regenerate a time region of an existing video.
+"""Retake pipeline - regenerate a time region of an existing video.
 
 Given a source video file and a time window [start_time, end_time] in seconds,
 this pipeline keeps content outside that window unchanged and regenerates the
@@ -8,18 +8,13 @@ content inside using a text prompt. Supports both distilled (8-step) and guided
 
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from .common import (
-    modality_from_state,
-    audio_modality_from_state,
-    maybe_post_process_latent,
-)
 from ..components import (
     DISTILLED_SIGMA_VALUES,
     EulerDiffusionStep,
@@ -28,16 +23,21 @@ from ..components import (
     VideoLatentPatchifier,
 )
 from ..conditioning.tools import VideoLatentTools
-from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model
+from ..model.audio_vae import AudioDecoder, Vocoder
+from ..model.transformer import LTXAVModel, LTXModel, LTXModelType, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-from ..model.audio_vae import AudioDecoder, Vocoder
 from ..types import (
     LatentState,
     VideoLatentShape,
     VideoPixelShape,
+)
+from .common import (
+    audio_modality_from_state,
+    maybe_post_process_latent,
+    modality_from_state,
 )
 
 
@@ -53,7 +53,7 @@ class RetakeConfig:
     num_inference_steps: int = 40
     cfg_scale: float = 3.0
     seed: int = 42
-    tiling_config: Optional[TilingConfig] = None
+    tiling_config: TilingConfig | None = None
     dtype: mx.Dtype = mx.bfloat16
 
     def __post_init__(self):
@@ -61,7 +61,7 @@ class RetakeConfig:
             raise ValueError(f"start_time ({self.start_time}) must be < end_time ({self.end_time})")
 
 
-def get_video_metadata(video_path: str) -> Tuple[float, int, int, int]:
+def get_video_metadata(video_path: str) -> tuple[float, int, int, int]:
     """Get video metadata using ffprobe.
 
     Returns:
@@ -205,11 +205,11 @@ class RetakePipeline:
 
     def __init__(
         self,
-        transformer: Union[LTXModel, LTXAVModel],
+        transformer: LTXModel | LTXAVModel,
         video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
-        audio_decoder: Optional[AudioDecoder] = None,
-        vocoder: Optional[Vocoder] = None,
+        audio_decoder: AudioDecoder | None = None,
+        vocoder: Vocoder | None = None,
     ):
         if isinstance(transformer, X0Model):
             self.transformer = transformer
@@ -294,10 +294,10 @@ class RetakePipeline:
         text_encoding: mx.array,
         text_mask: mx.array,
         config: RetakeConfig,
-        negative_text_encoding: Optional[mx.array] = None,
-        audio_encoding: Optional[mx.array] = None,
-        negative_audio_encoding: Optional[mx.array] = None,
-        callback: Optional[Callable[[str, int, int], None]] = None,
+        negative_text_encoding: mx.array | None = None,
+        audio_encoding: mx.array | None = None,
+        negative_audio_encoding: mx.array | None = None,
+        callback: Callable[[str, int, int], None] | None = None,
     ) -> mx.array:
         """
         Regenerate a time region of the source video.
@@ -362,7 +362,7 @@ class RetakePipeline:
         else:
             sigmas = LTX2Scheduler().execute(steps=config.num_inference_steps)
 
-        # Audio state (placeholder — audio retake needs audio encoder)
+        # Audio state (placeholder - audio retake needs audio encoder)
         audio_state = None
 
         def progress_cb(step, total):

@@ -9,7 +9,6 @@ import numpy as np
 
 from ._compat import CoreAudio, CoreMedia, require_pyobjc
 
-
 # CoreAudio FormatID constants (avoid importing the whole module just for these)
 AUDIO_FORMAT_LPCM = 1819304813     # 'lpcm' kAudioFormatLinearPCM
 AUDIO_FORMAT_AAC = 1633772320      # 'aac ' kAudioFormatMPEG4AAC
@@ -22,7 +21,7 @@ class AudioTrack:
 
     Constructed from a (channels, samples) float32 ndarray. Builds
     CMSampleBuffers on demand via `make_sample_buffer(start_frame, end_frame)`
-    — the AVWriter's GCD audio pump pulls these in chunks as the encoder
+    - the AVWriter's GCD audio pump pulls these in chunks as the encoder
     drains.
 
     Format: interleaved 32-bit float PCM in the source sample rate. The

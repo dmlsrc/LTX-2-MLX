@@ -19,14 +19,13 @@ import mlx.core as mx
 import pytest
 
 from LTX_2_MLX.kernels.fused_ops import (
+    _adaln_norm_mlx,
+    _adaln_t2v_broadcast_compatible,
+    _gated_add_mlx,
+    _gated_add_t2v_broadcast_compatible,
     adaln_norm_fused,
     gated_add_fused,
-    _adaln_norm_mlx,
-    _gated_add_mlx,
-    _adaln_t2v_broadcast_compatible,
-    _gated_add_t2v_broadcast_compatible,
 )
-
 
 # Production T2V video shape: B=1, T=14640, C=4096.  C derives from
 # num_attention_heads (32) x attention_head_dim (128) in

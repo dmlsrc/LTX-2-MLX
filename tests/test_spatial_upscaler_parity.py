@@ -1,14 +1,15 @@
 """Parity test for Spatial Upscaler between PyTorch and MLX implementations."""
 
 import sys
+
 import numpy as np
 
 # Add both repos to path
 sys.path.insert(0, '/Users/mcruz/Developer/LTX-2-MLX')
 sys.path.insert(0, '/Users/mcruz/Developer/LTX-2-Pytorch/packages/ltx-core/src')
 
-import torch
 import mlx.core as mx
+import torch
 from einops import rearrange
 
 
@@ -50,7 +51,7 @@ def test_pixel_shuffle_parity():
     print(f"MLX output[0, 0, :4, :4]:\n{mlx_output_nchw[0, 0, :4, :4]}")
 
     match = np.allclose(pt_output_np, mlx_output_nchw, atol=1e-5)
-    print(f"\n✓ PixelShuffle match: {match}")
+    print(f"\nOK PixelShuffle match: {match}")
     if not match:
         diff = np.abs(pt_output_np - mlx_output_nchw).max()
         print(f"  Max difference: {diff}")
@@ -137,7 +138,7 @@ def test_mlx_pixel_shuffle_manual():
     print(f"MLX output:\n{mlx_output_nchw[0, 0]}")
 
     match = np.allclose(pt_output.numpy(), mlx_output_nchw)
-    print(f"\n✓ Manual MLX PixelShuffle matches PyTorch: {match}")
+    print(f"\nOK Manual MLX PixelShuffle matches PyTorch: {match}")
 
     return match
 
@@ -148,7 +149,10 @@ def test_spatial_resampler_parity():
     print("Testing SpatialRationalResampler Parity")
     print("=" * 60)
 
-    from ltx_core.model.upsampler.spatial_rational_resampler import SpatialRationalResampler as PT_SRR
+    from ltx_core.model.upsampler.spatial_rational_resampler import (
+        SpatialRationalResampler as PT_SRR,
+    )
+
     from LTX_2_MLX.model.upscaler.spatial import SpatialRationalResampler as MLX_SRR
 
     # Create PyTorch model
@@ -195,7 +199,7 @@ def test_spatial_resampler_parity():
     print(f"MLX output sample [0,0,0,:4,:4]:\n{mlx_output_np[0,0,0,:4,:4]}")
 
     match = np.allclose(pt_output_np, mlx_output_np, atol=1e-4)
-    print(f"\n✓ SpatialRationalResampler match: {match}")
+    print(f"\nOK SpatialRationalResampler match: {match}")
     if not match:
         diff = np.abs(pt_output_np - mlx_output_np)
         print(f"  Max difference: {diff.max()}")
@@ -211,8 +215,10 @@ def test_full_upsampler_parity():
     print("=" * 60)
 
     from ltx_core.model.upsampler.model import LatentUpsampler as PT_Upsampler
-    from LTX_2_MLX.model.upscaler.spatial import SpatialUpscaler as MLX_Upsampler, load_spatial_upscaler_weights
     from safetensors import safe_open
+
+    from LTX_2_MLX.model.upscaler.spatial import SpatialUpscaler as MLX_Upsampler
+    from LTX_2_MLX.model.upscaler.spatial import load_spatial_upscaler_weights
 
     weights_path = "weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors"
 
@@ -296,7 +302,7 @@ def test_full_upsampler_parity():
     print(f"MLX output sample [0,0,0,:4,:4]:\n{mlx_output_np[0,0,0,:4,:4]}")
 
     match = np.allclose(pt_output_np, mlx_output_np, atol=1e-3)
-    print(f"\n✓ Full Upsampler match: {match}")
+    print(f"\nOK Full Upsampler match: {match}")
     if not match:
         diff = np.abs(pt_output_np - mlx_output_np)
         print(f"  Max difference: {diff.max()}")
@@ -328,7 +334,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"Manual MLX PixelShuffle: {'✓ PASS' if test2_pass else '✗ FAIL'}")
-    print(f"PixelShuffle parity: {'✓ PASS' if test3_pass else '✗ FAIL'}")
-    print(f"SpatialRationalResampler parity: {'✓ PASS' if test4_pass else '✗ FAIL'}")
-    print(f"Full Upsampler parity: {'✓ PASS' if test5_pass else '✗ FAIL'}")
+    print(f"Manual MLX PixelShuffle: {'PASS' if test2_pass else 'FAIL'}")
+    print(f"PixelShuffle parity: {'PASS' if test3_pass else 'FAIL'}")
+    print(f"SpatialRationalResampler parity: {'PASS' if test4_pass else 'FAIL'}")
+    print(f"Full Upsampler parity: {'PASS' if test5_pass else 'FAIL'}")

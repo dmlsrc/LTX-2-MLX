@@ -1,10 +1,10 @@
 """Conditioning item protocol for modifying latent state during diffusion."""
 
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from LTX_2_MLX.types import LatentState
     from LTX_2_MLX.conditioning.tools import VideoLatentTools
+    from LTX_2_MLX.types import LatentState
 
 
 class ConditioningItem(Protocol):
@@ -12,9 +12,9 @@ class ConditioningItem(Protocol):
 
     def apply_to(
         self,
-        latent_state: "LatentState",
-        latent_tools: "VideoLatentTools",
-    ) -> "LatentState":
+        latent_state: LatentState,
+        latent_tools: VideoLatentTools,
+    ) -> LatentState:
         """
         Apply the conditioning to the latent state.
 

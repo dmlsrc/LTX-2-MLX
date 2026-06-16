@@ -7,21 +7,15 @@ Uses a two-stage approach:
   Stage 2: Upsample 2x and refine WITHOUT IC-LoRA (clean model)
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Union
+from typing import Any
 
 import mlx.core as mx
 import numpy as np
 
-from .common import (
-    ImageCondition,
-    apply_conditionings,
-    create_image_conditionings,
-    modality_from_state,
-    maybe_post_process_latent,
-)
 from ..components import (
     DISTILLED_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -34,16 +28,18 @@ from ..conditioning.keyframe import VideoConditionByKeyframeIndex
 from ..conditioning.tools import VideoLatentTools
 from ..loader import LoRAConfig, fuse_loras_into_model, restore_transformer_cache_state
 from ..model.transformer import LTXModel, X0Model
+from ..model.upscaler import SpatialUpscaler
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-from ..model.upscaler import SpatialUpscaler
-from ..types import (
-    LatentState,
-    VideoLatentShape,
-    VideoPixelShape,
-    NATIVE_FPS
+from ..types import NATIVE_FPS, LatentState, VideoLatentShape, VideoPixelShape
+from .common import (
+    ImageCondition,
+    apply_conditionings,
+    create_image_conditionings,
+    maybe_post_process_latent,
+    modality_from_state,
 )
 
 
@@ -54,13 +50,13 @@ class ControlType(Enum):
 
 
 def preprocess_canny(
-    video_path: Union[str, Path],
+    video_path: str | Path,
     height: int,
     width: int,
     num_frames: int,
     low_threshold: int = 100,
     high_threshold: int = 200,
-    output_path: Optional[Union[str, Path]] = None,
+    output_path: str | Path | None = None,
 ) -> np.ndarray:
     """
     Apply Canny edge detection to a video, creating a control signal.
@@ -146,12 +142,12 @@ def _save_control_video(
 
 
 def preprocess_control_signal(
-    video_path: Union[str, Path],
+    video_path: str | Path,
     control_type: ControlType,
     height: int,
     width: int,
     num_frames: int,
-    output_path: Optional[Union[str, Path]] = None,
+    output_path: str | Path | None = None,
     **kwargs,
 ) -> np.ndarray:
     """
@@ -255,7 +251,7 @@ class ICLoraConfig:
     fps: float = NATIVE_FPS
 
     # Tiling
-    tiling_config: Optional[TilingConfig] = None
+    tiling_config: TilingConfig | None = None
 
     # Compute settings
     dtype: mx.Dtype = mx.bfloat16
@@ -346,13 +342,13 @@ def load_video_tensor(
 
 
 def create_video_conditionings(
-    videos: List[VideoCondition],
+    videos: list[VideoCondition],
     video_encoder: NativeConv3dVideoEncoder,
     height: int,
     width: int,
     num_frames: int,
     dtype: mx.Dtype = mx.float32,
-) -> List[ConditioningItem]:
+) -> list[ConditioningItem]:
     """
     Create conditionings for control videos (depth, pose, canny, etc.).
 
@@ -438,7 +434,7 @@ class ICLoraPipeline:
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
         transformer_cache_restore_state: Any,
-        lora_configs: Optional[List[LoRAConfig]] = None,
+        lora_configs: list[LoRAConfig] | None = None,
     ):
         """
         Initialize the IC-LoRA pipeline.
@@ -507,7 +503,7 @@ class ICLoraPipeline:
         context: mx.array,
         context_mask: mx.array,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[int, int], None]] = None,
+        callback: Callable[[int, int], None] | None = None,
     ) -> LatentState:
         """
         Run the denoising loop (no CFG for IC-LoRA, as it uses simple denoising).
@@ -560,9 +556,9 @@ class ICLoraPipeline:
         text_encoding: mx.array,
         text_mask: mx.array,
         config: ICLoraConfig,
-        images: Optional[List[ImageCondition]] = None,
-        video_conditioning: Optional[List[VideoCondition]] = None,
-        callback: Optional[Callable[[str, int, int], None]] = None,
+        images: list[ImageCondition] | None = None,
+        video_conditioning: list[VideoCondition] | None = None,
+        callback: Callable[[str, int, int], None] | None = None,
     ) -> mx.array:
         """
         Generate video with IC-LoRA control.
@@ -757,7 +753,7 @@ def create_ic_lora_pipeline(
     video_decoder: NativeConv3dVideoDecoder,
     spatial_upscaler: SpatialUpscaler,
     transformer_cache_restore_state: Any,
-    lora_configs: Optional[List[LoRAConfig]] = None,
+    lora_configs: list[LoRAConfig] | None = None,
 ) -> ICLoraPipeline:
     """
     Create an IC-LoRA pipeline.

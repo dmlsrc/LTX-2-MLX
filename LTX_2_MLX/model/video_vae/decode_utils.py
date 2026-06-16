@@ -5,7 +5,7 @@ Typed ``Any`` to keep this module concrete-class-free.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import mlx.core as mx
 
@@ -13,11 +13,11 @@ import mlx.core as mx
 def decode_latent(
     latent: mx.array,
     decoder: Any,
-    timestep: Optional[float] = 0.05,
-    key: Optional[mx.array] = None,
+    timestep: float | None = 0.05,
+    key: mx.array | None = None,
     temporal_chunk_size: int = 7,
     temporal_overlap: int = 2,
-    dtype: Optional[Any] = None,
+    dtype: Any | None = None,
 ) -> mx.array:
     """
     Decode latent to video frames.
@@ -40,7 +40,7 @@ def decode_latent(
         dtype: Output precision.
                None (default) or mx.uint8: clip + scale to [0, 255], cast to
                uint8, return (T, H, W, 3). The common case for ffmpeg / PNG
-               consumers — backward-compatible.
+               consumers - backward-compatible.
                A float type (mx.float16 / mx.float32 / mx.bfloat16): return
                the raw decoder output (B, C, T, H, W) in [-1, 1] cast to that
                dtype. Lets higher-precision consumers (VSR's RGBAHalf source,
@@ -52,7 +52,7 @@ def decode_latent(
                higher-bit-depth tiers in scripts/encode_modes_harness.py
                (h265_10bit_*, h265_rgb_lossless, prores_*) and the pipelines
                under LTX_2_MLX/pipelines/ that hand their decoded video into
-               video_encoder.encode_video with tier=hq / export / reference —
+               video_encoder.encode_video with tier=hq / export / reference -
                those all currently take uint8 here and then promote back to
                10/16-bit downstream, wasting precision the decoder produced.
                Web/default tiers (8-bit YUV 4:2:0) should keep the uint8
@@ -108,10 +108,10 @@ def decode_latent(
             t += stride
 
         if len(decoded_chunks) == 1:
-            # Only one chunk — trim to expected length
+            # Only one chunk - trim to expected length
             video = decoded_chunks[0][2][:, :, :total_pixel_frames, :, :]
         else:
-            # Multiple chunks — stitch with overlap blending.
+            # Multiple chunks - stitch with overlap blending.
             # Compute overlap in pixel space by decoding the overlap latent count
             # as a standalone chunk to get its exact pixel length.
             overlap_pixel_ref = latent_t_to_pixel_t(temporal_overlap)
@@ -127,7 +127,7 @@ def decode_latent(
                 overlap_pixels = min(overlap_pixel_ref, curr_pixel_len, video.shape[2])
 
                 if overlap_pixels <= 1:
-                    # No meaningful overlap — just concatenate
+                    # No meaningful overlap - just concatenate
                     video = mx.concatenate([video, curr_video], axis=2)
                     continue
 

@@ -7,12 +7,11 @@ audio components, and upscalers.
 
 import gc
 from dataclasses import dataclass, field
-from typing import Optional, List, Any
+from typing import Any
 
 import mlx.core as mx
 
 from ..loader import LoRAConfig
-
 
 SUPPORTED_COMPUTE_DTYPES = {
     "bfloat16": mx.bfloat16,
@@ -48,24 +47,24 @@ class ModelLedger:
         compute_dtype: Computation dtype.
     """
 
-    checkpoint_path: Optional[str] = None
-    gemma_path: Optional[str] = None
-    spatial_upscaler_path: Optional[str] = None
-    temporal_upscaler_path: Optional[str] = None
-    loras: List[LoRAConfig] = field(default_factory=list)
+    checkpoint_path: str | None = None
+    gemma_path: str | None = None
+    spatial_upscaler_path: str | None = None
+    temporal_upscaler_path: str | None = None
+    loras: list[LoRAConfig] = field(default_factory=list)
     compute_dtype: mx.Dtype = mx.bfloat16
 
     # Cached model instances
-    _transformer: Optional[Any] = field(default=None, repr=False)
-    _video_encoder: Optional[Any] = field(default=None, repr=False)
-    _video_decoder: Optional[Any] = field(default=None, repr=False)
-    _audio_encoder: Optional[Any] = field(default=None, repr=False)
-    _audio_decoder: Optional[Any] = field(default=None, repr=False)
-    _vocoder: Optional[Any] = field(default=None, repr=False)
-    _text_encoder: Optional[Any] = field(default=None, repr=False)
-    _gemma: Optional[Any] = field(default=None, repr=False)
-    _spatial_upscaler: Optional[Any] = field(default=None, repr=False)
-    _temporal_upscaler: Optional[Any] = field(default=None, repr=False)
+    _transformer: Any | None = field(default=None, repr=False)
+    _video_encoder: Any | None = field(default=None, repr=False)
+    _video_decoder: Any | None = field(default=None, repr=False)
+    _audio_encoder: Any | None = field(default=None, repr=False)
+    _audio_decoder: Any | None = field(default=None, repr=False)
+    _vocoder: Any | None = field(default=None, repr=False)
+    _text_encoder: Any | None = field(default=None, repr=False)
+    _gemma: Any | None = field(default=None, repr=False)
+    _spatial_upscaler: Any | None = field(default=None, repr=False)
+    _temporal_upscaler: Any | None = field(default=None, repr=False)
 
     def transformer(self, force_reload: bool = False):
         """
@@ -83,8 +82,8 @@ class ModelLedger:
         if self.checkpoint_path is None:
             raise ValueError("checkpoint_path is required to load transformer")
 
+        from ..loader import fuse_loras_into_model, load_transformer_weights
         from ..model.transformer import LTXModel, LTXModelType
-        from ..loader import load_transformer_weights, fuse_loras_into_model
 
         print(f"Loading transformer from {self.checkpoint_path}...")
         model = LTXModel(
@@ -298,7 +297,7 @@ class ModelLedger:
         gc.collect()
         mx.metal.clear_cache()
 
-    def with_loras(self, loras: List[LoRAConfig]) -> "ModelLedger":
+    def with_loras(self, loras: list[LoRAConfig]) -> ModelLedger:
         """
         Create a new ModelLedger with additional LoRAs.
 
@@ -322,10 +321,10 @@ class ModelLedger:
 
 def create_model_ledger(
     checkpoint_path: str,
-    gemma_path: Optional[str] = None,
-    spatial_upscaler_path: Optional[str] = None,
-    temporal_upscaler_path: Optional[str] = None,
-    loras: Optional[List[LoRAConfig]] = None,
+    gemma_path: str | None = None,
+    spatial_upscaler_path: str | None = None,
+    temporal_upscaler_path: str | None = None,
+    loras: list[LoRAConfig] | None = None,
     dtype: str | mx.Dtype = "bfloat16",
 ) -> ModelLedger:
     """

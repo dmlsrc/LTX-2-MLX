@@ -4,7 +4,6 @@ import math
 import os
 from enum import Enum
 from functools import lru_cache
-from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import numpy as np
@@ -32,7 +31,7 @@ class LTXRopeType(Enum):
 
 def apply_rotary_emb(
     input_tensor: mx.array,
-    freqs_cis: Tuple[mx.array, mx.array],
+    freqs_cis: tuple[mx.array, mx.array],
     rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
 ) -> mx.array:
     """
@@ -80,7 +79,7 @@ def apply_interleaved_rotary_emb(
         return _fused_interleaved_rope(input_tensor, cos_freqs, sin_freqs)
 
     # Fallback to naive implementation
-    input_dtype = input_tensor.dtype  # cos/sin are FP32 — cast result back
+    input_dtype = input_tensor.dtype  # cos/sin are FP32 - cast result back
     shape = input_tensor.shape
     t_dup = input_tensor.reshape(*shape[:-1], shape[-1] // 2, 2)
 
@@ -220,7 +219,7 @@ def generate_freq_grid(
 
 def get_fractional_positions(
     indices_grid: mx.array,
-    max_pos: List[int],
+    max_pos: list[int],
 ) -> mx.array:
     """
     Convert position indices to fractional positions in [0, 1].
@@ -249,7 +248,7 @@ def get_fractional_positions(
 def generate_freqs(
     indices: mx.array,
     indices_grid: mx.array,
-    max_pos: List[int],
+    max_pos: list[int],
     use_middle_indices_grid: bool,
 ) -> mx.array:
     """
@@ -300,7 +299,7 @@ def split_freqs_cis(
     freqs: mx.array,
     pad_size: int,
     num_attention_heads: int,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """
     Compute cos/sin frequencies for split RoPE format.
 
@@ -338,7 +337,7 @@ def split_freqs_cis(
 def interleaved_freqs_cis(
     freqs: mx.array,
     pad_size: int,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """
     Compute cos/sin frequencies for interleaved RoPE format.
 
@@ -374,12 +373,12 @@ def precompute_freqs_cis(
     dim: int,
     out_dtype: mx.Dtype = mx.float32,
     theta: float = 10000.0,
-    max_pos: Optional[List[int]] = None,
+    max_pos: list[int] | None = None,
     use_middle_indices_grid: bool = False,
     num_attention_heads: int = 32,
     rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
     use_double_precision: bool = False,
-) -> Tuple[mx.array, mx.array]:
+) -> tuple[mx.array, mx.array]:
     """
     Precompute cosine and sine frequencies for RoPE.
 

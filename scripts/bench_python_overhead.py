@@ -20,7 +20,6 @@ gap, Python overhead can't be the cause and we look elsewhere.
 
 import time
 from dataclasses import dataclass, replace
-from typing import Optional
 
 
 @dataclass
@@ -64,8 +63,8 @@ class FakeBlock:
 
     def __call__(
         self,
-        video: Optional[FakeArgs] = None,
-        audio: Optional[FakeArgs] = None,
+        video: FakeArgs | None = None,
+        audio: FakeArgs | None = None,
         perturbations=None,
         profile_events=None,
     ):

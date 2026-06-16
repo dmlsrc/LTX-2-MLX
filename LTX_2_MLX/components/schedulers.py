@@ -2,7 +2,7 @@
 
 import math
 from functools import lru_cache
-from typing import Optional, Protocol
+from typing import Protocol
 
 import mlx.core as mx
 import numpy as np
@@ -30,7 +30,7 @@ class LTX2Scheduler:
     def execute(
         self,
         steps: int,
-        latent: Optional[mx.array] = None,
+        latent: mx.array | None = None,
         max_shift: float = 2.05,
         base_shift: float = 0.95,
         stretch: bool = True,
@@ -114,7 +114,7 @@ class LinearQuadraticScheduler:
         self,
         steps: int,
         threshold_noise: float = 0.025,
-        linear_steps: Optional[int] = None,
+        linear_steps: int | None = None,
         **_kwargs,
     ) -> mx.array:
         """
@@ -256,7 +256,7 @@ STAGE_2_DISTILLED_SIGMA_VALUES = [
 def get_sigma_schedule(
     num_steps: int,
     distilled: bool = False,
-    latent: Optional[mx.array] = None,
+    latent: mx.array | None = None,
 ) -> mx.array:
     """
     Get sigma schedule for diffusion sampling.

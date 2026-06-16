@@ -10,19 +10,11 @@ Default: 15 inference steps (vs 30 for Euler two-stage).
 import gc
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
 
 import mlx.core as mx
 
-from .common import (
-    ImageCondition,
-    apply_conditionings,
-    create_image_conditionings,
-    modality_from_state,
-    audio_modality_from_state,
-    maybe_post_process_latent,
-)
 from ..components import (
     STAGE_2_DISTILLED_SIGMA_VALUES,
     EulerDiffusionStep,
@@ -33,29 +25,31 @@ from ..components import (
     get_res2s_coefficients,
 )
 from ..components.patchifiers import AudioPatchifier
-from ..conditioning.tools import VideoLatentTools, AudioLatentTools
-from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model
+from ..conditioning.tools import AudioLatentTools, VideoLatentTools
+from ..loader import (
+    LoRAConfig,
+    format_lora_stage_scale_lines,
+    fuse_loras_into_model,
+    get_transformer_cache_restore_state,
+    lora_configs_for_stage,
+    lora_configs_for_stage_delta,
+    restore_transformer_cache_state,
+)
+from ..model.audio_vae import AudioDecoder, Vocoder
+from ..model.transformer import LTXAVModel, LTXModel, LTXModelType, X0Model
+from ..model.upscaler import SpatialUpscaler
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-from ..model.upscaler import SpatialUpscaler
-from ..model.audio_vae import AudioDecoder, Vocoder
-from ..loader import (
-    LoRAConfig,
-    fuse_loras_into_model,
-    format_lora_stage_scale_lines,
-    lora_configs_for_stage,
-    lora_configs_for_stage_delta,
-    restore_transformer_cache_state,
-    get_transformer_cache_restore_state,
-)
-from ..types import (
-    AudioLatentShape,
-    LatentState,
-    VideoLatentShape,
-    VideoPixelShape,
-    NATIVE_FPS
+from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
+from .common import (
+    ImageCondition,
+    apply_conditionings,
+    audio_modality_from_state,
+    create_image_conditionings,
+    maybe_post_process_latent,
+    modality_from_state,
 )
 
 
@@ -75,11 +69,11 @@ class TI2VidHQConfig:
     fps: float = NATIVE_FPS
 
     # LoRA for stage 2 refinement
-    distilled_lora_config: Optional[LoRAConfig] = None
-    stage_lora_configs: Optional[List[LoRAConfig]] = None
+    distilled_lora_config: LoRAConfig | None = None
+    stage_lora_configs: list[LoRAConfig] | None = None
     stage2_lora_fuse_mode: str = "fresh-total"
 
-    tiling_config: Optional[TilingConfig] = None
+    tiling_config: TilingConfig | None = None
     dtype: mx.Dtype = mx.bfloat16
 
     audio_enabled: bool = False
@@ -91,7 +85,7 @@ class TI2VidHQConfig:
     audio_downsample_factor: int = 4
     audio_output_sample_rate: int = 24000
 
-    def _get_tiling_config(self) -> Optional[TilingConfig]:
+    def _get_tiling_config(self) -> TilingConfig | None:
         if self.tiling_config is not None:
             return self.tiling_config
         latent_frames = (self.num_frames - 1) // 8 + 1
@@ -119,12 +113,12 @@ class TI2VidHQPipeline:
 
     def __init__(
         self,
-        transformer: Union[LTXModel, LTXAVModel],
+        transformer: LTXModel | LTXAVModel,
         video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
-        audio_decoder: Optional[AudioDecoder] = None,
-        vocoder: Optional[Vocoder] = None,
+        audio_decoder: AudioDecoder | None = None,
+        vocoder: Vocoder | None = None,
     ):
         if isinstance(transformer, X0Model):
             self.transformer = transformer
@@ -165,16 +159,16 @@ class TI2VidHQPipeline:
     def _res2s_denoise_loop(
         self,
         video_state: LatentState,
-        audio_state: Optional[LatentState],
+        audio_state: LatentState | None,
         sigmas: mx.array,
         video_context: mx.array,
-        audio_context: Optional[mx.array],
-        negative_video_context: Optional[mx.array],
-        negative_audio_context: Optional[mx.array],
+        audio_context: mx.array | None,
+        negative_video_context: mx.array | None,
+        negative_audio_context: mx.array | None,
         cfg_scale: float,
         audio_cfg_scale: float,
-        callback: Optional[Callable] = None,
-    ) -> Tuple[LatentState, Optional[LatentState]]:
+        callback: Callable | None = None,
+    ) -> tuple[LatentState, LatentState | None]:
         """Run Res2s second-order denoising loop with CFG."""
         num_steps = len(sigmas) - 1
 
@@ -198,7 +192,7 @@ class TI2VidHQPipeline:
             sigma = sigmas_list[step_idx]
             sigma_next = sigmas_list[step_idx + 1]
 
-            # ── Stage 1: Evaluate at current point with CFG ──
+            # -- Stage 1: Evaluate at current point with CFG --
             denoised_v, denoised_a = self._denoise_with_cfg(
                 video_state, audio_state, sigma,
                 video_context, audio_context,
@@ -213,7 +207,7 @@ class TI2VidHQPipeline:
             h = hs[step_idx]
 
             if h == 0.0 or sigma_next <= 0.001:
-                # Final step — just use denoised directly
+                # Final step - just use denoised directly
                 video_state = video_state.replace(latent=denoised_v)
                 if audio_state is not None and denoised_a is not None:
                     audio_state = audio_state.replace(latent=denoised_a)
@@ -225,7 +219,7 @@ class TI2VidHQPipeline:
             # Compute substep sigma (geometric mean for c2=0.5)
             sub_sigma = math.sqrt(sigma * sigma_next)
 
-            # ── Compute midpoint ──
+            # -- Compute midpoint --
             anchor_v = video_state.latent.astype(mx.float32)
             eps_1_v = denoised_v.astype(mx.float32) - anchor_v
             x_mid_v = anchor_v + h * a21 * eps_1_v
@@ -240,7 +234,7 @@ class TI2VidHQPipeline:
                 x_mid_a = anchor_a + h * a21 * eps_1_a
                 mx.eval(x_mid_a)
 
-            # ── Bong iteration for stability ──
+            # -- Bong iteration for stability --
             if h < 0.5 and sigma > 0.03:
                 for _ in range(100):
                     anchor_v = x_mid_v - h * a21 * eps_1_v
@@ -249,7 +243,7 @@ class TI2VidHQPipeline:
                         anchor_a = x_mid_a - h * a21 * eps_1_a
                         eps_1_a = denoised_a.astype(mx.float32) - anchor_a
 
-            # ── Stage 2: Evaluate at midpoint ──
+            # -- Stage 2: Evaluate at midpoint --
             mid_video_state = video_state.replace(latent=x_mid_v.astype(video_state.latent.dtype))
             mid_audio_state = None
             if audio_state is not None and x_mid_a is not None:
@@ -266,7 +260,7 @@ class TI2VidHQPipeline:
             if audio_state is not None and denoised_a2 is not None:
                 denoised_a2 = maybe_post_process_latent(denoised_a2, audio_state)
 
-            # ── Final combination with RK coefficients ──
+            # -- Final combination with RK coefficients --
             eps_2_v = denoised_v2.astype(mx.float32) - anchor_v
             x_next_v = anchor_v + h * (b1 * eps_1_v + b2 * eps_2_v)
 
@@ -295,7 +289,7 @@ class TI2VidHQPipeline:
         video_mod = modality_from_state(video_state, pos_v_ctx, sigma)
 
         if self.is_av_model and audio_state is not None:
-            # AV model always needs audio context — fall back to video context if None
+            # AV model always needs audio context - fall back to video context if None
             effective_a_ctx = pos_a_ctx if pos_a_ctx is not None else pos_v_ctx
             audio_mod = audio_modality_from_state(audio_state, effective_a_ctx, sigma)
             result = self.transformer(video_mod, audio_mod)
@@ -374,11 +368,11 @@ class TI2VidHQPipeline:
         positive_encoding: mx.array,
         negative_encoding: mx.array,
         config: TI2VidHQConfig,
-        images: Optional[List[ImageCondition]] = None,
-        callback: Optional[Callable[[str, int, int], None]] = None,
-        positive_audio_encoding: Optional[mx.array] = None,
-        negative_audio_encoding: Optional[mx.array] = None,
-    ) -> Union[mx.array, Tuple[mx.array, Optional[mx.array]]]:
+        images: list[ImageCondition] | None = None,
+        callback: Callable[[str, int, int], None] | None = None,
+        positive_audio_encoding: mx.array | None = None,
+        negative_audio_encoding: mx.array | None = None,
+    ) -> mx.array | tuple[mx.array, mx.array | None]:
         """Generate video using HQ two-stage Res2s pipeline."""
         images = images or []
         mx.random.seed(config.seed)

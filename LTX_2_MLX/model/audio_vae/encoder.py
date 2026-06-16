@@ -3,7 +3,6 @@
 Encodes audio spectrograms into latent representations.
 """
 
-from typing import Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -12,10 +11,10 @@ from LTX_2_MLX.components.patchifiers import AudioPatchifier
 from LTX_2_MLX.types import AudioLatentShape
 
 from .decoder import (
+    LATENT_DOWNSAMPLE_FACTOR,
     CausalConv2d,
     PerChannelStatistics,
     SimpleResBlock2d,
-    LATENT_DOWNSAMPLE_FACTOR,
 )
 
 
@@ -53,7 +52,7 @@ class AudioEncoder(nn.Module):
         self,
         ch: int = 128,
         in_ch: int = 2,  # Stereo audio
-        ch_mult: Tuple[int, ...] = (1, 2, 4),  # 3 levels
+        ch_mult: tuple[int, ...] = (1, 2, 4),  # 3 levels
         num_res_blocks: int = 3,
         z_channels: int = 8,
         mel_bins: int = 16,  # Latent mel bins (64/4 = 16)
@@ -78,7 +77,7 @@ class AudioEncoder(nn.Module):
         # PyTorch AudioEncoder uses ch (128) for the stats, which equals z_channels * mel_bins
         self.per_channel_statistics = PerChannelStatistics(ch)
 
-        # Patchifier for normalization pipeline (patchify → normalize → unpatchify)
+        # Patchifier for normalization pipeline (patchify -> normalize -> unpatchify)
         self.patchifier = AudioPatchifier(
             patch_size=1,
             audio_latent_downsample_factor=LATENT_DOWNSAMPLE_FACTOR,
@@ -172,7 +171,7 @@ class AudioEncoder(nn.Module):
         """
         Normalize encoder latents using per-channel statistics.
 
-        Follows PyTorch pipeline: patchify → normalize → unpatchify.
+        Follows PyTorch pipeline: patchify -> normalize -> unpatchify.
         When double_z=True, we only normalize the mean part (first half).
         """
         # Extract mean latent when double_z
@@ -189,7 +188,7 @@ class AudioEncoder(nn.Module):
             mel_bins=mean_latent.shape[3],
         )
 
-        # PyTorch pipeline: patchify → normalize → unpatchify
+        # PyTorch pipeline: patchify -> normalize -> unpatchify
         # Patchify: (B, C, T, F) -> (B, T, C*F)
         latent_patched = self.patchifier.patchify(mean_latent)
 

@@ -2,7 +2,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import NamedTuple, Tuple
+from typing import NamedTuple
 
 import mlx.core as mx
 
@@ -34,7 +34,7 @@ class SpatioTemporalScaleFactors(NamedTuple):
     height: int
 
     @classmethod
-    def default(cls) -> "SpatioTemporalScaleFactors":
+    def default(cls) -> SpatioTemporalScaleFactors:
         return cls(time=8, width=32, height=32)
 
 
@@ -55,11 +55,11 @@ class VideoLatentShape(NamedTuple):
     height: int
     width: int
 
-    def to_tuple(self) -> Tuple[int, int, int, int, int]:
+    def to_tuple(self) -> tuple[int, int, int, int, int]:
         return (self.batch, self.channels, self.frames, self.height, self.width)
 
     @staticmethod
-    def from_shape(shape: Tuple[int, ...]) -> "VideoLatentShape":
+    def from_shape(shape: tuple[int, ...]) -> VideoLatentShape:
         return VideoLatentShape(
             batch=shape[0],
             channels=shape[1],
@@ -68,7 +68,7 @@ class VideoLatentShape(NamedTuple):
             width=shape[4],
         )
 
-    def mask_shape(self) -> "VideoLatentShape":
+    def mask_shape(self) -> VideoLatentShape:
         return self._replace(channels=1)
 
     @staticmethod
@@ -76,7 +76,7 @@ class VideoLatentShape(NamedTuple):
         shape: VideoPixelShape,
         latent_channels: int = 128,
         scale_factors: SpatioTemporalScaleFactors = VIDEO_SCALE_FACTORS,
-    ) -> "VideoLatentShape":
+    ) -> VideoLatentShape:
         frames = (shape.frames - 1) // scale_factors.time + 1
         height = shape.height // scale_factors.height
         width = shape.width // scale_factors.width
@@ -91,7 +91,7 @@ class VideoLatentShape(NamedTuple):
 
     def upscale(
         self, scale_factors: SpatioTemporalScaleFactors = VIDEO_SCALE_FACTORS
-    ) -> "VideoLatentShape":
+    ) -> VideoLatentShape:
         return self._replace(
             channels=3,
             frames=(self.frames - 1) * scale_factors.time + 1,
@@ -111,14 +111,14 @@ class AudioLatentShape(NamedTuple):
     frames: int
     mel_bins: int
 
-    def to_tuple(self) -> Tuple[int, int, int, int]:
+    def to_tuple(self) -> tuple[int, int, int, int]:
         return (self.batch, self.channels, self.frames, self.mel_bins)
 
-    def mask_shape(self) -> "AudioLatentShape":
+    def mask_shape(self) -> AudioLatentShape:
         return self._replace(channels=1, mel_bins=1)
 
     @staticmethod
-    def from_shape(shape: Tuple[int, ...]) -> "AudioLatentShape":
+    def from_shape(shape: tuple[int, ...]) -> AudioLatentShape:
         return AudioLatentShape(
             batch=shape[0],
             channels=shape[1],
@@ -135,7 +135,7 @@ class AudioLatentShape(NamedTuple):
         sample_rate: int = 16000,
         hop_length: int = 160,
         audio_latent_downsample_factor: int = 4,
-    ) -> "AudioLatentShape":
+    ) -> AudioLatentShape:
         latents_per_second = (
             float(sample_rate) / float(hop_length) / float(audio_latent_downsample_factor)
         )
@@ -155,7 +155,7 @@ class AudioLatentShape(NamedTuple):
         sample_rate: int = 16000,
         hop_length: int = 160,
         audio_latent_downsample_factor: int = 4,
-    ) -> "AudioLatentShape":
+    ) -> AudioLatentShape:
         return AudioLatentShape.from_duration(
             batch=shape.batch,
             duration=float(shape.frames) / float(shape.fps),
@@ -192,10 +192,10 @@ class LatentState:
     # (keyframe conditioning, retake, frozen audio, image strength < 1).
     uniform_mask: bool = True
 
-    def replace(self, **kwargs) -> "LatentState":
+    def replace(self, **kwargs) -> LatentState:
         """Return a new LatentState with specified fields replaced.
 
-        IMPORTANT — uniform_mask footgun:
+        IMPORTANT - uniform_mask footgun:
         If you replace ``denoise_mask`` with a non-all-ones mask you MUST also
         pass ``uniform_mask=False``.  This method cannot infer uniformity from
         the mask values without forcing an MLX eval in the hot path, so it
@@ -206,7 +206,7 @@ class LatentState:
             # correct
             state = state.replace(denoise_mask=new_mask, uniform_mask=False)
 
-            # WRONG — fastpath stays active with a non-uniform mask
+            # WRONG - fastpath stays active with a non-uniform mask
             state = state.replace(denoise_mask=new_mask)
 
         Patchify/unpatchify are safe because they reshape without changing values.

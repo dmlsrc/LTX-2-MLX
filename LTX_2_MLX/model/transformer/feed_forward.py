@@ -1,6 +1,5 @@
 """Feed-forward networks for LTX-2 Transformer."""
 
-from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -68,8 +67,8 @@ class FeedForward(nn.Module):
         # When the cached pre-transposed weight has a different dtype than the
         # input (e.g. cache was built with `--video-ff-dtype float16` so the
         # weight is FP16 while the residual stream stays BF16), do the cast
-        # at the FF boundary so the interior — including the huge inner_dim
-        # hidden activation — lives in the weight dtype.  Output is cast back
+        # at the FF boundary so the interior - including the huge inner_dim
+        # hidden activation - lives in the weight dtype.  Output is cast back
         # at exit so the residual stream is unchanged.
         target_dtype = self._target_compute_dtype()
         if target_dtype is None or x.dtype == target_dtype:
@@ -82,7 +81,7 @@ class FeedForward(nn.Module):
         x = self._project_out(x)
         return x.astype(orig_dtype)
 
-    def _target_compute_dtype(self) -> Optional[mx.Dtype]:
+    def _target_compute_dtype(self) -> mx.Dtype | None:
         """The dtype of the cached pre-transposed weights, or None when both
         slots are empty (i.e. fall back to `nn.Linear` BF16 path)."""
         if self._project_in_weight_t is not None:

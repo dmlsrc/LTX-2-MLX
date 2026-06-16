@@ -30,7 +30,7 @@ Output formats
                    per-frame list shape generate.py used to build by
                    hand before passing to `encode_video()` (ffmpeg path).
 - "fp16_rgba"   -> list[(H, W, 4) float16] per chunk.  Matches VSR's
-                   RGBAHalf source format — the encoder pushes these
+                   RGBAHalf source format - the encoder pushes these
                    straight into the VSR session's source pool without
                    any further casting.
 
@@ -46,15 +46,14 @@ from __future__ import annotations
 
 import gc
 import os
-from typing import Any, Iterator, List, Optional
-
-import numpy as np
+from collections.abc import Iterator
+from typing import Any
 
 import mlx.core as mx
+import numpy as np
 
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-
 
 # Per-frame list vs. single (T,H,W,C) ndarray.  Default is the
 # per-frame list because the downstream loop can null each entry as
@@ -65,7 +64,7 @@ from ..model.video_vae.tiling import TilingConfig, decode_tiled
 _CHUNK_AS_ARRAY = os.environ.get("LTX_STREAM_CHUNK_AS_ARRAY", "0") == "1"
 
 
-def chunk_to_uint8_frames(chunk: Any) -> List[np.ndarray]:
+def chunk_to_uint8_frames(chunk: Any) -> list[np.ndarray]:
     """(B, C, T, H, W) bf16/fp32 in [-1, 1] -> list[(H, W, 3) uint8].
 
     Rescale + clip + cast happens in MLX so we never materialize a
@@ -92,7 +91,7 @@ def chunk_to_uint8_frames(chunk: Any) -> List[np.ndarray]:
     return result
 
 
-def chunk_to_rgba_fp16_frames(chunk: Any) -> List[np.ndarray]:
+def chunk_to_rgba_fp16_frames(chunk: Any) -> list[np.ndarray]:
     """(B, C, T, H, W) bf16/fp32 in [-1, 1] -> list[(H, W, 4) float16].
 
     Direct path for VSR's RGBAHalf source format.  Skips the uint8
@@ -136,10 +135,10 @@ def iter_decoded_chunks(
     latent: Any,
     decoder: Any,
     *,
-    tiling: Optional[TilingConfig],
+    tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
     compute_dtype: Any = mx.bfloat16,
-) -> Iterator[List[np.ndarray]]:
+) -> Iterator[list[np.ndarray]]:
     """Yield decoded chunks as per-frame numpy lists.
 
     Each yield delivers one VAE chunk's worth of frames; the caller
@@ -189,14 +188,14 @@ def iter_decoded_frames(
     latent: Any,
     decoder: Any,
     *,
-    tiling: Optional[TilingConfig],
+    tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
     compute_dtype: Any = mx.bfloat16,
 ) -> Iterator[np.ndarray]:
     """Flat per-frame iterator over the chunked decode.
 
     Wraps `iter_decoded_chunks` and chains the inner lists into a
-    single stream of per-frame ndarrays — the shape that
+    single stream of per-frame ndarrays - the shape that
     `encode_video_videotoolbox`'s iterator input expects.  As each
     frame is consumed the caller's reference drops, and at chunk
     boundaries the cache-clear / gc.collect pair runs to keep
@@ -214,7 +213,7 @@ def iter_decoded_frames(
     ):
         # `pop(0)` lets the inner list shrink as frames are yielded,
         # so the per-chunk peak resident frame count drops linearly as
-        # the consumer drains the chunk — even though Python's list
+        # the consumer drains the chunk - even though Python's list
         # backing array won't shrink physically until the list is
         # destroyed at end-of-iteration.
         while chunk_frames:
@@ -236,11 +235,11 @@ def latent_dims(latent: Any) -> tuple[int, int, int]:
 
 
 def plan_vae_tiling(
-    latent: Any, tiling: Optional[TilingConfig],
+    latent: Any, tiling: TilingConfig | None,
 ) -> tuple[int, str]:
     """Describe a (latent, tiling) pair: returns (n_chunks, description).
 
-    Pure CPU arithmetic — no GPU work — so callers can use the result
+    Pure CPU arithmetic - no GPU work - so callers can use the result
     to size a progress bar (or print a status line) before any chunk
     decode runs.
 

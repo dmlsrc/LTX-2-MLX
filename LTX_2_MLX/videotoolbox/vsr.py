@@ -14,8 +14,8 @@ from typing import Any
 
 import numpy as np
 
-from ._compat import vt, require_pyobjc
 from . import pixel_buffers as _pb
+from ._compat import require_pyobjc, vt
 
 
 def scale_for_mode(mode: str) -> int:
@@ -111,11 +111,11 @@ class VsrSession:
                   RGBAHalf source. Per-frame deterministic upscale, no
                   prev-frame feedback.  Apple documents this as for stills,
                   but on real video it produces measurably lower temporal
-                  second-difference than balanced — a legitimate alternative
+                  second-difference than balanced - a legitimate alternative
                   if you prefer the smoother / less-edge-boosted trade-off.
 
     The previous-frame state can be reset at hard cuts via
-    `reset_temporal_context()` — useful for `--video` input that may contain
+    `reset_temporal_context()` - useful for `--video` input that may contain
     edits. LTX latents are single-shot generations so this never matters for
     `--latent`.
     """
@@ -178,7 +178,7 @@ class VsrSession:
         self._dst_pool: Any = None
 
     def use_dst_pool(self, pool: Any) -> None:
-        """Wire the writer's adaptor pixelBufferPool() as VSR's dst source —
+        """Wire the writer's adaptor pixelBufferPool() as VSR's dst source -
         zero-copy from VSR output straight into the encoder's queue.
         """
         self._dst_pool = pool
@@ -190,7 +190,7 @@ class VsrSession:
 
     def flush_pools(self) -> None:
         """Release excess cached buffers in the src pool (and dst pool if we
-        own it — we usually don't; the writer's adaptor owns the dst pool).
+        own it - we usually don't; the writer's adaptor owns the dst pool).
 
         Pool caching is what makes hot-path buffer allocation fast, but at
         steady state the cache should be ~3 buffers. Periodic flushing

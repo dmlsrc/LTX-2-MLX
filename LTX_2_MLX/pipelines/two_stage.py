@@ -9,58 +9,52 @@ This combines the quality of CFG guidance with the speed of distilled refinement
 
 import gc
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
 
 import mlx.core as mx
 
-from .common import (
-    ImageCondition,
-    apply_conditionings,
-    create_image_conditionings,
-    modality_from_state,
-    audio_modality_from_state,
-    maybe_post_process_latent,
-)
 from ..components import (
+    STAGE_2_DISTILLED_SIGMA_VALUES,
     CFGGuider,
     EulerDiffusionStep,
     GaussianNoiser,
     LTX2Scheduler,
-    STAGE_2_DISTILLED_SIGMA_VALUES,
     VideoLatentPatchifier,
 )
 from ..components.guiders import MultiModalGuider, MultiModalGuiderParams
+from ..components.patchifiers import AudioPatchifier
 from ..components.perturbations import (
     BatchedPerturbationConfig,
     Perturbation,
     PerturbationConfig,
     PerturbationType,
 )
-from ..components.patchifiers import AudioPatchifier
-from ..conditioning.tools import VideoLatentTools, AudioLatentTools
+from ..conditioning.tools import AudioLatentTools, VideoLatentTools
 from ..loader import (
     LoRAConfig,
-    fuse_loras_into_model,
     format_lora_stage_scale_lines,
+    fuse_loras_into_model,
+    get_transformer_cache_restore_state,
     lora_configs_for_stage,
     lora_configs_for_stage_delta,
     restore_transformer_cache_state,
-    get_transformer_cache_restore_state,
 )
+from ..model.audio_vae import AudioDecoder, Vocoder
 from ..model.transformer import LTXModel, LTXModelType, X0Model
+from ..model.upscaler import SpatialUpscaler
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-from ..model.upscaler import SpatialUpscaler
-from ..model.audio_vae import AudioDecoder, Vocoder
-from ..types import (
-    AudioLatentShape,
-    LatentState,
-    VideoLatentShape,
-    VideoPixelShape,
-    NATIVE_FPS
+from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
+from .common import (
+    ImageCondition,
+    apply_conditionings,
+    audio_modality_from_state,
+    create_image_conditionings,
+    maybe_post_process_latent,
+    modality_from_state,
 )
 
 
@@ -111,22 +105,22 @@ class TwoStageCFGConfig:
     fps: float = NATIVE_FPS
     num_inference_steps: int = 30
 
-    # Guidance parameters (for stage 1) — matching Reddit/ComfyUI working config
+    # Guidance parameters (for stage 1) - matching Reddit/ComfyUI working config
     cfg_scale: float = 3.0
     audio_cfg_scale: float = 7.0
     guidance_rescale: float = 0.0  # 0=off (Reddit working config), 0.7=paper default
     modality_scale: float = 3.0   # Cross-modal guidance (Reddit: 3.0 for both, critical for audio)
 
     # LoRA config for stage 2 (distilled refinement)
-    distilled_lora_config: Optional[LoRAConfig] = None
-    stage_lora_configs: Optional[List[LoRAConfig]] = None
+    distilled_lora_config: LoRAConfig | None = None
+    stage_lora_configs: list[LoRAConfig] | None = None
     stage2_lora_fuse_mode: str = "fresh-total"
 
     # Custom stage 2 sigmas (None = use default STAGE_2_DISTILLED_SIGMA_VALUES)
-    stage_2_sigmas: Optional[list] = None
+    stage_2_sigmas: list | None = None
 
     # Tiling for VAE decoding
-    tiling_config: Optional[TilingConfig] = None
+    tiling_config: TilingConfig | None = None
 
     # Compute settings
     dtype: mx.Dtype = mx.bfloat16
@@ -175,8 +169,8 @@ class TwoStagePipeline:
         video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
-        audio_decoder: Optional[AudioDecoder] = None,
-        vocoder: Optional[Vocoder] = None,
+        audio_decoder: AudioDecoder | None = None,
+        vocoder: Vocoder | None = None,
     ):
         """
         Initialize the two-stage pipeline.
@@ -209,7 +203,7 @@ class TwoStagePipeline:
         self.diffusion_step = EulerDiffusionStep()
         self.scheduler = LTX2Scheduler()
 
-        self._transformer_cache_restore_state: Optional[dict] = None
+        self._transformer_cache_restore_state: dict | None = None
 
     def _create_video_tools(
         self,
@@ -262,7 +256,7 @@ class TwoStagePipeline:
         video_guider: CFGGuider,
         stepper: EulerDiffusionStep,
         guidance_rescale: float = 0.0,
-        callback: Optional[Callable[[str, int, int], None]] = None,
+        callback: Callable[[str, int, int], None] | None = None,
     ) -> LatentState:
         """Run the denoising loop with CFG guidance (Stage 1)."""
         num_steps = len(sigmas) - 1
@@ -322,15 +316,15 @@ class TwoStagePipeline:
         video_guider: MultiModalGuider,
         audio_guider: MultiModalGuider,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[str, int, int], None]] = None,
-    ) -> Tuple[LatentState, LatentState]:
+        callback: Callable[[str, int, int], None] | None = None,
+    ) -> tuple[LatentState, LatentState]:
         """
         Run joint audio-video denoising with multi-modal guidance (Stage 1).
 
         Passes per step (matching Reddit/ComfyUI working config):
           1. cond: conditioned (positive context)
-          2. uncond: unconditioned (negative context) — for CFG
-          3. mod: modality-isolated (cross-attn A<>V skipped) — for modality CFG
+          2. uncond: unconditioned (negative context) - for CFG
+          3. mod: modality-isolated (cross-attn A<>V skipped) - for modality CFG
 
         STG and rescale disabled (stg=0, rescale=0) per Reddit working config.
         """
@@ -401,7 +395,7 @@ class TwoStagePipeline:
         sigmas: mx.array,
         context: mx.array,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[str, int, int], None]] = None,
+        callback: Callable[[str, int, int], None] | None = None,
     ) -> LatentState:
         """Run simple denoising loop without CFG (Stage 2)."""
         num_steps = len(sigmas) - 1
@@ -439,8 +433,8 @@ class TwoStagePipeline:
         video_context: mx.array,
         audio_context: mx.array,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[str, int, int], None]] = None,
-    ) -> Tuple[LatentState, LatentState]:
+        callback: Callable[[str, int, int], None] | None = None,
+    ) -> tuple[LatentState, LatentState]:
         """Run simple joint audio-video denoising loop without CFG (Stage 2)."""
         num_steps = len(sigmas) - 1
 
@@ -486,11 +480,11 @@ class TwoStagePipeline:
         positive_encoding: mx.array,
         negative_encoding: mx.array,
         config: TwoStageCFGConfig,
-        images: Optional[List[ImageCondition]] = None,
-        callback: Optional[Callable[[str, int, int], None]] = None,
-        positive_audio_encoding: Optional[mx.array] = None,
-        negative_audio_encoding: Optional[mx.array] = None,
-    ) -> Tuple[mx.array, Optional[mx.array]]:
+        images: list[ImageCondition] | None = None,
+        callback: Callable[[str, int, int], None] | None = None,
+        positive_audio_encoding: mx.array | None = None,
+        negative_audio_encoding: mx.array | None = None,
+    ) -> tuple[mx.array, mx.array | None]:
         """
         Generate video (and optionally audio) using two-stage CFG pipeline.
 
@@ -889,8 +883,8 @@ def create_two_stage_pipeline(
     video_encoder: NativeConv3dVideoEncoder,
     video_decoder: NativeConv3dVideoDecoder,
     spatial_upscaler: SpatialUpscaler,
-    audio_decoder: Optional[AudioDecoder] = None,
-    vocoder: Optional[Vocoder] = None,
+    audio_decoder: AudioDecoder | None = None,
+    vocoder: Vocoder | None = None,
 ) -> TwoStagePipeline:
     """
     Create a two-stage CFG pipeline.

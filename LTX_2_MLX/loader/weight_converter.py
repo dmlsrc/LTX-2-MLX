@@ -1,13 +1,13 @@
 """Weight conversion from PyTorch safetensors to MLX format."""
 
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
 
 
-def load_safetensors(path: str) -> Dict[str, mx.array]:
+def load_safetensors(path: str) -> dict[str, mx.array]:
     """
     Load weights from a safetensors file.
 
@@ -20,7 +20,7 @@ def load_safetensors(path: str) -> Dict[str, mx.array]:
     return dict(mx.load(path))
 
 
-def transpose_linear_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+def transpose_linear_weights(weights: dict[str, mx.array]) -> dict[str, mx.array]:
     """
     Transpose 2D weight matrices in a weights dictionary.
 
@@ -51,7 +51,7 @@ def transpose_linear_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.array
     return transposed
 
 
-def convert_transformer_key(pytorch_key: str) -> Optional[str]:
+def convert_transformer_key(pytorch_key: str) -> str | None:
     """
     Convert a PyTorch transformer key to MLX format.
 
@@ -94,7 +94,7 @@ def convert_transformer_key(pytorch_key: str) -> Optional[str]:
     return key
 
 
-def convert_vae_key(pytorch_key: str) -> Optional[str]:
+def convert_vae_key(pytorch_key: str) -> str | None:
     """
     Convert a PyTorch VAE key to MLX format.
 
@@ -117,7 +117,7 @@ def convert_vae_key(pytorch_key: str) -> Optional[str]:
     return key
 
 
-def convert_text_encoder_key(pytorch_key: str) -> Optional[str]:
+def convert_text_encoder_key(pytorch_key: str) -> str | None:
     """
     Convert text encoder weight key.
 
@@ -156,7 +156,7 @@ def convert_text_encoder_key(pytorch_key: str) -> Optional[str]:
     return None
 
 
-def convert_upsampler_key(pytorch_key: str) -> Optional[str]:
+def convert_upsampler_key(pytorch_key: str) -> str | None:
     """
     Convert upsampler weight key.
 
@@ -172,8 +172,8 @@ def convert_upsampler_key(pytorch_key: str) -> Optional[str]:
 
 
 def extract_transformer_weights(
-    weights: Dict[str, mx.array],
-) -> Dict[str, mx.array]:
+    weights: dict[str, mx.array],
+) -> dict[str, mx.array]:
     """
     Extract and convert transformer model weights.
 
@@ -204,8 +204,8 @@ def extract_transformer_weights(
 
 
 def extract_vae_weights(
-    weights: Dict[str, mx.array],
-) -> Tuple[Dict[str, mx.array], Dict[str, mx.array]]:
+    weights: dict[str, mx.array],
+) -> tuple[dict[str, mx.array], dict[str, mx.array]]:
     """
     Extract encoder and decoder weights from VAE.
 
@@ -240,8 +240,8 @@ def extract_vae_weights(
 
 
 def extract_text_encoder_weights(
-    weights: Dict[str, mx.array],
-) -> Dict[str, mx.array]:
+    weights: dict[str, mx.array],
+) -> dict[str, mx.array]:
     """
     Extract text encoder weights.
 
@@ -266,7 +266,7 @@ def extract_text_encoder_weights(
     return converted
 
 
-def convert_pytorch_key_to_mlx(pytorch_key: str, include_audio: bool = False) -> Optional[str]:
+def convert_pytorch_key_to_mlx(pytorch_key: str, include_audio: bool = False) -> str | None:
     """
     Convert PyTorch weight key to MLX model key path.
 
@@ -382,7 +382,7 @@ def load_transformer_weights(
     print("  Successfully loaded weights into model")
 
 
-def _flatten_to_nested(flat_dict: Dict[str, mx.array]) -> Dict[str, Any]:
+def _flatten_to_nested(flat_dict: dict[str, mx.array]) -> dict[str, Any]:
     """
     Convert flat dict with dotted keys to nested dict for model.update().
 
@@ -436,7 +436,7 @@ def _convert_numeric_dicts_to_lists(obj: Any) -> Any:
     return obj
 
 
-def save_mlx_weights(weights: Dict[str, mx.array], path: str) -> None:
+def save_mlx_weights(weights: dict[str, mx.array], path: str) -> None:
     """
     Save weights in MLX format (npz).
 
@@ -447,7 +447,7 @@ def save_mlx_weights(weights: Dict[str, mx.array], path: str) -> None:
     mx.savez(path, **weights)
 
 
-def load_mlx_weights(path: str) -> Dict[str, mx.array]:
+def load_mlx_weights(path: str) -> dict[str, mx.array]:
     """
     Load weights from MLX format (npz).
 

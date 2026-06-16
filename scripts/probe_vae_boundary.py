@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 np = None
@@ -60,17 +59,41 @@ def load_runtime_deps() -> None:
     if RunTimings is None:
         from scripts.decode_latent_debug import (
             RunTimings as _RunTimings,
+        )
+        from scripts.decode_latent_debug import (
             Timer as _Timer,
-            encode_frames_dir as _encode_frames_dir,
-            frames_from_video_tensor as _frames_from_video_tensor,
-            load_latents as _load_latents,
-            make_audio_decoder_and_vocoder as _make_audio_decoder_and_vocoder,
-            make_decoder as _make_decoder,
-            mlx_mem_summary as _mlx_mem_summary,
-            parse_dtype as _parse_dtype,
-            tiling_config_for_mode as _tiling_config_for_mode,
-            write_frames as _write_frames,
+        )
+        from scripts.decode_latent_debug import (
             decode_audio_latent as _decode_audio_latent,
+        )
+        from scripts.decode_latent_debug import (
+            encode_frames_dir as _encode_frames_dir,
+        )
+        from scripts.decode_latent_debug import (
+            frames_from_video_tensor as _frames_from_video_tensor,
+        )
+        from scripts.decode_latent_debug import (
+            load_latents as _load_latents,
+        )
+        from scripts.decode_latent_debug import (
+            make_audio_decoder_and_vocoder as _make_audio_decoder_and_vocoder,
+        )
+        from scripts.decode_latent_debug import (
+            make_decoder as _make_decoder,
+        )
+        from scripts.decode_latent_debug import (
+            mlx_mem_summary as _mlx_mem_summary,
+        )
+        from scripts.decode_latent_debug import (
+            parse_dtype as _parse_dtype,
+        )
+        from scripts.decode_latent_debug import (
+            tiling_config_for_mode as _tiling_config_for_mode,
+        )
+        from scripts.decode_latent_debug import (
+            write_frames as _write_frames,
+        )
+        from scripts.decode_latent_debug import (
             write_wav as _write_wav,
         )
 

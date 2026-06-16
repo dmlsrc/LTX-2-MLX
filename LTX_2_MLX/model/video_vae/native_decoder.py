@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import gc
 import math
-from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -89,7 +88,7 @@ class NativeConv3dVideoDecoder(nn.Module):
 
     def __init__(
         self,
-        decoder_blocks: Optional[list] = None,
+        decoder_blocks: list | None = None,
         base_channels: int = 128,
         timestep_conditioning: bool = False,
         compute_dtype: mx.Dtype = mx.bfloat16,
@@ -169,9 +168,9 @@ class NativeConv3dVideoDecoder(nn.Module):
     def __call__(
         self,
         latent: mx.array,
-        timestep: Optional[float] = 0.05,
+        timestep: float | None = 0.05,
         show_progress: bool = True,
-        causal: Optional[bool] = None,
+        causal: bool | None = None,
     ) -> mx.array:
         del timestep, show_progress
         causal = self.causal if causal is None else causal

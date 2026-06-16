@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import atexit
 import os
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import mlx.core as mx
 
@@ -74,7 +74,7 @@ def _shape_sample(
     q: mx.array,
     k: mx.array,
     v: mx.array,
-    mask: Optional[mx.array],
+    mask: mx.array | None,
 ) -> str:
     mask_shape = None if mask is None else tuple(mask.shape)
     return (
@@ -97,7 +97,7 @@ def _probe_fallback(
     q: mx.array,
     k: mx.array,
     v: mx.array,
-    mask: Optional[mx.array],
+    mask: mx.array | None,
 ) -> None:
     if not _PROBE_ENABLED:
         return
@@ -208,7 +208,7 @@ def _template(
     ]
 
 
-def _scale_supported(scale: Optional[float], dim: int) -> bool:
+def _scale_supported(scale: float | None, dim: int) -> bool:
     expected = 1.0 / (dim**0.5)
     return scale is None or abs(float(scale) - expected) < 1e-7
 
@@ -217,9 +217,9 @@ def _select_config(
     q: mx.array,
     k: mx.array,
     v: mx.array,
-    scale: Optional[float],
-    mask: Optional[mx.array],
-) -> tuple[Optional[int], str]:
+    scale: float | None,
+    mask: mx.array | None,
+) -> tuple[int | None, str]:
     if mask is not None:
         return None, "mask"
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
@@ -253,9 +253,9 @@ def maybe_steel_attention(
     k: mx.array,
     v: mx.array,
     *,
-    scale: Optional[float] = None,
-    mask: Optional[mx.array] = None,
-) -> Optional[mx.array]:
+    scale: float | None = None,
+    mask: mx.array | None = None,
+) -> mx.array | None:
     """Return custom STEEL attention output when this call matches the gate."""
     bd, reason = _select_config(q, k, v, scale, mask)
     if bd is None:

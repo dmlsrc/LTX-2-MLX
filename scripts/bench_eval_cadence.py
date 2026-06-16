@@ -50,8 +50,8 @@ from LTX_2_MLX.types import (
 # Reuse the production loader so the bench has the exact same layout/quant
 # pipeline (pretranspose, V2 cross_attention_adaln, gated attention, etc).
 from scripts.generate import (
-    DEFAULT_VIDEO_FF_LAYOUT_SPECS,
     DEFAULT_VIDEO_ATTN_LAYOUT_SPECS,
+    DEFAULT_VIDEO_FF_LAYOUT_SPECS,
     load_av_transformer,
 )
 

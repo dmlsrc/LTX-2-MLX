@@ -20,10 +20,11 @@ Cleanly handles arbitrary float fps both sides:
 
 from __future__ import annotations
 
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
-from ._compat import vt, require_pyobjc
 from . import pixel_buffers as _pb
+from ._compat import require_pyobjc, vt
 
 
 class VtfrcSession:

@@ -1,7 +1,7 @@
 """Video encoding for LTX-2 outputs.
 
 Five tiers cover the practical use cases. Pick by *destination*, not by
-encoder flags — the flags are an implementation detail.
+encoder flags - the flags are an implementation detail.
 
   web        Browser <video> tags, social uploads, platforms that don't
              re-transcode. Universal compat from old browsers to current.
@@ -14,7 +14,7 @@ encoder flags — the flags are an implementation detail.
 
   hq         Local viewing where 4:4:4 chroma is wanted (sharp color edges,
              neon, skin against bright backgrounds). Won't play in any
-             browser — IINA / QuickTime / FCP only.
+             browser - IINA / QuickTime / FCP only.
              HEVC SW 10-bit 4:4:4 CRF 14 + ALAC.
 
   export     Hand off to an editor or colorist. Industry-standard ProRes 422
@@ -35,7 +35,7 @@ Encoder-choice details that aren't obvious from the flags alone:
     needs ffmpeg built against zimg, which isn't shipped on every machine.
     Behavior for our 8/10-bit BT.709 conversions is equivalent.
   - For RGB-domain streams (the harness has one; none of the five tiers do),
-    color tagging must go inside `-x265-params` — the global `-colorspace`
+    color tagging must go inside `-x265-params` - the global `-colorspace`
     flag is forwarded to libx265 under a parameter name the encoder rejects.
   - For ProRes 4444 the alpha plane is filled implicitly with opaque; we
     feed yuva444p10le even though the source has no real alpha.
@@ -47,9 +47,10 @@ import struct
 import subprocess
 import time
 import wave
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -340,7 +341,7 @@ def encode_video(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if verbose:
-        print(f"  encode tier: {tier} — {preset.notes}")
+        print(f"  encode tier: {tier} - {preset.notes}")
         print(f"  -> {output_path}")
 
     audio_path: Path | None = None

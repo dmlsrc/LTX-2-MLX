@@ -7,7 +7,6 @@ This is used for STG guidance to compute perturbed predictions.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
 
 import mlx.core as mx
 
@@ -33,7 +32,7 @@ class Perturbation:
     """
 
     type: PerturbationType
-    blocks: Optional[List[int]] = None  # None means all blocks
+    blocks: list[int] | None = None  # None means all blocks
 
     def is_perturbed(self, perturbation_type: PerturbationType, block: int) -> bool:
         """
@@ -64,7 +63,7 @@ class PerturbationConfig:
         perturbations: List of perturbations to apply, or None/empty for no perturbations.
     """
 
-    perturbations: Optional[List[Perturbation]] = None
+    perturbations: list[Perturbation] | None = None
 
     def is_perturbed(self, perturbation_type: PerturbationType, block: int) -> bool:
         """
@@ -86,7 +85,7 @@ class PerturbationConfig:
         )
 
     @staticmethod
-    def empty() -> "PerturbationConfig":
+    def empty() -> PerturbationConfig:
         """Create an empty perturbation config (no perturbations)."""
         return PerturbationConfig(perturbations=[])
 
@@ -102,7 +101,7 @@ class BatchedPerturbationConfig:
         perturbations: List of PerturbationConfig, one per batch sample.
     """
 
-    perturbations: List[PerturbationConfig]
+    perturbations: list[PerturbationConfig]
 
     def mask(
         self,
@@ -186,7 +185,7 @@ class BatchedPerturbationConfig:
         )
 
     @staticmethod
-    def empty(batch_size: int) -> "BatchedPerturbationConfig":
+    def empty(batch_size: int) -> BatchedPerturbationConfig:
         """
         Create an empty batched perturbation config.
 
@@ -203,7 +202,7 @@ class BatchedPerturbationConfig:
 
 def create_stg_perturbation(
     skip_video_self_attn: bool = True,
-    blocks: Optional[List[int]] = None,
+    blocks: list[int] | None = None,
 ) -> PerturbationConfig:
     """
     Create a typical STG perturbation config.
@@ -232,7 +231,7 @@ def create_stg_perturbation(
 def create_batched_stg_config(
     batch_size: int,
     skip_video_self_attn: bool = True,
-    blocks: Optional[List[int]] = None,
+    blocks: list[int] | None = None,
 ) -> BatchedPerturbationConfig:
     """
     Create a batched STG perturbation config where all samples have the same perturbation.

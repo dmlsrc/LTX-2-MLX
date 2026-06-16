@@ -7,8 +7,6 @@ Zero spatial padding only.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -34,7 +32,7 @@ def to_native_conv3d_layout(value: mx.array, expected_shape: tuple[int, ...]) ->
     raise ValueError(f"Cannot load Conv3d weight with shape {value.shape}; expected {expected_shape}")
 
 
-def lookup_weight(weights: dict, *keys: str) -> Optional[mx.array]:
+def lookup_weight(weights: dict, *keys: str) -> mx.array | None:
     """First-hit lookup across alternative key names (handles both stock
     LTX safetensors layout ``vae.encoder.*`` / ``vae.decoder.*`` and
     pre-split safetensors layout ``vae_encoder.*`` / ``vae_decoder.*``)."""
@@ -77,7 +75,7 @@ class NativeConv3dBlock(nn.Module):
             bias=True,
         )
 
-    def __call__(self, x: mx.array, causal: Optional[bool] = None) -> mx.array:
+    def __call__(self, x: mx.array, causal: bool | None = None) -> mx.array:
         """Apply convolution to BFHWC input."""
         causal = self.causal if causal is None else causal
         p = self.padding
@@ -150,7 +148,7 @@ class NativeResBlockGroup(nn.Module):
         self,
         x: mx.array,
         causal: bool = False,
-        timestep: Optional[mx.array] = None,
+        timestep: mx.array | None = None,
     ) -> mx.array:
         del timestep  # Unconditional; LTX 2.3 has no per-block timestep injection.
         for block in self.res_blocks:

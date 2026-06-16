@@ -2,9 +2,9 @@
 
 import mlx.core as mx
 
-from LTX_2_MLX.types import LatentState, VideoLatentShape
 from LTX_2_MLX.components.patchifiers import get_pixel_coords
 from LTX_2_MLX.conditioning.tools import VideoLatentTools
+from LTX_2_MLX.types import LatentState, VideoLatentShape
 
 
 class VideoConditionByKeyframeIndex:

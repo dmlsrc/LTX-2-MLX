@@ -1,6 +1,6 @@
 """Utility functions for LTX-2 MLX."""
 
-from typing import Any, Union
+from typing import Any
 
 import mlx.core as mx
 
@@ -33,7 +33,7 @@ def check_config_value(config: dict, key: str, expected: Any) -> None:
 
 def to_velocity(
     sample: mx.array,
-    sigma: Union[float, mx.array],
+    sigma: float | mx.array,
     denoised_sample: mx.array,
 ) -> mx.array:
     """
@@ -64,7 +64,7 @@ def to_velocity(
 def to_denoised(
     sample: mx.array,
     velocity: mx.array,
-    sigma: Union[float, mx.array],
+    sigma: float | mx.array,
 ) -> mx.array:
     """
     Convert the sample and its denoising velocity to denoised sample.

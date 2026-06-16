@@ -15,8 +15,8 @@ from typing import Any
 
 import numpy as np
 
-from ._compat import Foundation, Quartz, require_pyobjc
 from . import pixel_buffers as _pb
+from ._compat import Foundation, Quartz, require_pyobjc
 
 
 def render_comparison(
@@ -34,7 +34,7 @@ def render_comparison(
     in_h, in_w = pre_frame.shape[:2]
     out_w, out_h = in_w * scale, in_h * scale
 
-    # NEAREST upscale via np.repeat — exact integer-replicated pixels.
+    # NEAREST upscale via np.repeat - exact integer-replicated pixels.
     pre_up = np.repeat(np.repeat(pre_frame, scale, axis=0), scale, axis=1)
 
     # Coerce to uint8 RGBA8 for CIImage(kCIFormatRGBA8). The pre half is a
@@ -60,7 +60,7 @@ def render_comparison(
         Quartz.kCIFormatRGBA8, _pb.srgb_colorspace(),
     )
 
-    # Post comes in via its CVPixelBuffer — CoreImage reads it at whatever
+    # Post comes in via its CVPixelBuffer - CoreImage reads it at whatever
     # bit depth the format provides (fp16 for RGBAHalf, 8-bit for NV12).
     post_ci = Quartz.CIImage.alloc().initWithCVPixelBuffer_(post_pb)
     post_ci_translated = post_ci.imageByApplyingTransform_(

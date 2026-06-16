@@ -49,6 +49,7 @@ accounts, survives reboots), otherwise falls back to ${TMPDIR:-/tmp}.
 """
 
 from __future__ import annotations
+
 import json
 import os
 import sys
@@ -239,6 +240,7 @@ def _dump_report():
 
 
 import atexit
+
 atexit.register(_dump_report)
 
 

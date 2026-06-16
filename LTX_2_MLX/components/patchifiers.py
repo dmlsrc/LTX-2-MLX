@@ -1,7 +1,7 @@
 """Patchification strategies for LTX-2 latent tensors."""
 
 import math
-from typing import Protocol, Tuple
+from typing import Protocol
 
 import mlx.core as mx
 
@@ -16,7 +16,7 @@ class PatchifierProtocol(Protocol):
     """Protocol for patchification strategies."""
 
     @property
-    def patch_size(self) -> Tuple[int, int, int]:
+    def patch_size(self) -> tuple[int, int, int]:
         """Return the patch size (temporal, height, width)."""
         ...
 
@@ -53,7 +53,7 @@ class VideoLatentPatchifier:
         self._patch_size = (1, patch_size, patch_size)
 
     @property
-    def patch_size(self) -> Tuple[int, int, int]:
+    def patch_size(self) -> tuple[int, int, int]:
         """Return the patch size tuple (temporal, height, width)."""
         return self._patch_size
 
@@ -276,7 +276,7 @@ class AudioPatchifier:
         self._patch_size = (1, patch_size, patch_size)
 
     @property
-    def patch_size(self) -> Tuple[int, int, int]:
+    def patch_size(self) -> tuple[int, int, int]:
         """Return the patch size tuple."""
         return self._patch_size
 

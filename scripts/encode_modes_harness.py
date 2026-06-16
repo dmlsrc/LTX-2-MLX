@@ -36,20 +36,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from scripts.decode_latent_debug import (  # noqa: E402
-    RunTimings,
-    Timer,
-    decode_audio_latent,
-    load_latents,
-    make_audio_decoder_and_vocoder,
-    parse_dtype,
-)
 from LTX_2_MLX.video_encoder import (  # noqa: E402
     COLOR_TAGS_BT709,
     COLOR_TAGS_RGB,
@@ -62,6 +55,14 @@ from LTX_2_MLX.video_encoder import (  # noqa: E402
     write_wav_float32,
     write_wav_int16,
 )
+from scripts.decode_latent_debug import (  # noqa: E402
+    RunTimings,
+    Timer,
+    decode_audio_latent,
+    load_latents,
+    make_audio_decoder_and_vocoder,
+    parse_dtype,
+)
 
 
 def make_video_decoder(
@@ -71,10 +72,11 @@ def make_video_decoder(
     backend: str = "native",
 ):
     """Build a VAE decoder matching scripts/generate.py's happy-path defaults."""
-    from scripts.generate import get_vae_config
     from LTX_2_MLX.model.video_vae.native_decoder import (
-        NativeConv3dVideoDecoder, load_native_vae_decoder_weights,
+        NativeConv3dVideoDecoder,
+        load_native_vae_decoder_weights,
     )
+    from scripts.generate import get_vae_config
 
     cfg = get_vae_config(weights_path)
     decoder_blocks = cfg.get("decoder_blocks")
@@ -416,8 +418,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     # needed) and the decode runs as a single pass through decode_latent -
     # NO spatial seams. The legacy simple-decoder branch always splits
     # spatially for width > 512, which is what was creating edge artifacts.
-    from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_tiled
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
+    from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_tiled
     tiling_cfg = TilingConfig.auto(
         height=height, width=width, num_frames=n_frames,
         decoder_backend=args.vae_decoder_backend,

@@ -1,12 +1,10 @@
 """HiFi-GAN Vocoder for LTX-2 MLX."""
 
 import math
-from typing import List, Optional, Tuple
 
-import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
-
+import numpy as np
 
 LRELU_SLOPE = 0.1
 
@@ -123,7 +121,7 @@ class ResBlock1(nn.Module):
         self,
         channels: int,
         kernel_size: int = 3,
-        dilations: Tuple[int, ...] = (1, 3, 5),
+        dilations: tuple[int, ...] = (1, 3, 5),
     ):
         super().__init__()
         self.channels = channels
@@ -307,7 +305,7 @@ class UpSample1d(nn.Module):
     def __init__(
         self,
         ratio: int = 2,
-        kernel_size: Optional[int] = None,
+        kernel_size: int | None = None,
         window_type: str = "kaiser",
     ) -> None:
         super().__init__()
@@ -371,7 +369,7 @@ class DownSample1d(nn.Module):
     """Anti-aliased downsampling wrapping LowPassFilter1d with stride."""
 
     def __init__(
-        self, ratio: int = 2, kernel_size: Optional[int] = None
+        self, ratio: int = 2, kernel_size: int | None = None
     ) -> None:
         super().__init__()
         self.ratio = ratio
@@ -418,7 +416,7 @@ class AMPBlock1(nn.Module):
         self,
         channels: int,
         kernel_size: int = 3,
-        dilations: Tuple[int, ...] = (1, 3, 5),
+        dilations: tuple[int, ...] = (1, 3, 5),
         activation: str = "snake",
     ) -> None:
         super().__init__()
@@ -476,7 +474,7 @@ class _STFTFn(nn.Module):
 
     def __call__(
         self, y: mx.array
-    ) -> Tuple[mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array]:
         """Compute magnitude and phase from waveform.
 
         Args:
@@ -531,7 +529,7 @@ class MelSTFT(nn.Module):
 
     def mel_spectrogram(
         self, y: mx.array
-    ) -> Tuple[mx.array, mx.array, mx.array, mx.array]:
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
         """Compute log-mel spectrogram.
 
         Args:
@@ -568,8 +566,8 @@ class VocoderWithBWE(nn.Module):
 
     def __init__(
         self,
-        vocoder: "Vocoder",
-        bwe_generator: "Vocoder",
+        vocoder: Vocoder,
+        bwe_generator: Vocoder,
         mel_stft: MelSTFT,
         input_sampling_rate: int,
         output_sampling_rate: int,
@@ -683,10 +681,10 @@ class Vocoder(nn.Module):
 
     def __init__(
         self,
-        resblock_kernel_sizes: Optional[List[int]] = None,
-        upsample_rates: Optional[List[int]] = None,
-        upsample_kernel_sizes: Optional[List[int]] = None,
-        resblock_dilation_sizes: Optional[List[List[int]]] = None,
+        resblock_kernel_sizes: list[int] | None = None,
+        upsample_rates: list[int] | None = None,
+        upsample_kernel_sizes: list[int] | None = None,
+        resblock_dilation_sizes: list[list[int]] | None = None,
         upsample_initial_channel: int = 1024,
         stereo: bool = True,
         output_sample_rate: int = 24000,

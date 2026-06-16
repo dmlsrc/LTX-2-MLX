@@ -12,11 +12,10 @@ from __future__ import annotations
 
 import gc
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Tuple
 
 import mlx.core as mx
-
 
 DEFAULT_TEMPORAL_SCALE = 8
 DEFAULT_SPATIAL_SCALE = 32
@@ -161,11 +160,11 @@ class TemporalTilingConfig:
 class TilingConfig:
     """Configuration for tiled VAE decoding."""
 
-    spatial_config: Optional[SpatialTilingConfig] = None
-    temporal_config: Optional[TemporalTilingConfig] = None
+    spatial_config: SpatialTilingConfig | None = None
+    temporal_config: TemporalTilingConfig | None = None
 
     @classmethod
-    def default(cls) -> "TilingConfig":
+    def default(cls) -> TilingConfig:
         """Default tiled decode: spatial 512/64 and temporal 64/24."""
         return cls(
             spatial_config=SpatialTilingConfig(
@@ -189,7 +188,7 @@ class TilingConfig:
         decoder_backend: str = "legacy",
         total_memory_gb: float | None = None,
         memory_budget_gb: float | None = None,
-    ) -> Optional["TilingConfig"]:
+    ) -> TilingConfig | None:
         """Auto-select VAE tiling for the requested decode shape."""
         if decoder_backend == "native":
             return cls.auto_native_conv3d(
@@ -229,7 +228,7 @@ class TilingConfig:
         *,
         total_memory_gb: float | None = None,
         memory_budget_gb: float | None = None,
-    ) -> Optional["TilingConfig"]:
+    ) -> TilingConfig | None:
         """Pick a native Conv3d tile plan from RAM and int32-addressing limits."""
         budget_gb = (
             memory_budget_gb
@@ -296,7 +295,7 @@ class TilingConfig:
         )
 
     @classmethod
-    def spatial_only(cls, tile_size: int = 512, overlap: int = 64) -> "TilingConfig":
+    def spatial_only(cls, tile_size: int = 512, overlap: int = 64) -> TilingConfig:
         return cls(
             spatial_config=SpatialTilingConfig(
                 tile_size_in_pixels=tile_size,
@@ -306,7 +305,7 @@ class TilingConfig:
         )
 
     @classmethod
-    def temporal_only(cls, tile_size: int = 64, overlap: int = 24) -> "TilingConfig":
+    def temporal_only(cls, tile_size: int = 64, overlap: int = 24) -> TilingConfig:
         return cls(
             spatial_config=None,
             temporal_config=TemporalTilingConfig(
@@ -316,7 +315,7 @@ class TilingConfig:
         )
 
     @classmethod
-    def aggressive(cls) -> "TilingConfig":
+    def aggressive(cls) -> TilingConfig:
         return cls(
             spatial_config=SpatialTilingConfig(
                 tile_size_in_pixels=256,
@@ -326,7 +325,7 @@ class TilingConfig:
         )
 
     @classmethod
-    def conservative(cls) -> "TilingConfig":
+    def conservative(cls) -> TilingConfig:
         return cls(
             spatial_config=SpatialTilingConfig(
                 tile_size_in_pixels=768,
@@ -336,7 +335,7 @@ class TilingConfig:
         )
 
     @classmethod
-    def test_small_both(cls) -> "TilingConfig":
+    def test_small_both(cls) -> TilingConfig:
         """Small-video test config: forces both spatial and temporal tiling.
 
         Useful for debugging with 256x256, 4-second generations. Do not use as
@@ -356,10 +355,10 @@ class TilingConfig:
 
 @dataclass(frozen=True)
 class AxisTiles:
-    starts: List[int]
-    ends: List[int]
-    left_ramps: List[int]
-    right_ramps: List[int]
+    starts: list[int]
+    ends: list[int]
+    left_ramps: list[int]
+    right_ramps: list[int]
 
 
 def _split_axis(length: int, tile_size: int, overlap: int) -> AxisTiles:
@@ -375,8 +374,8 @@ def _split_axis(length: int, tile_size: int, overlap: int) -> AxisTiles:
         return AxisTiles([0], [length], [0], [0])
 
     stride = tile_size - overlap
-    starts: List[int] = []
-    ends: List[int] = []
+    starts: list[int] = []
+    ends: list[int] = []
 
     pos = 0
     while True:
@@ -428,7 +427,7 @@ def _temporal_output_slice(
     left_ramp_latent: int,
     right_ramp_latent: int,
     scale: int,
-) -> Tuple[slice, mx.array]:
+) -> tuple[slice, mx.array]:
     """Map a temporal latent interval to decoded-frame interval and mask."""
     start = 0 if start_latent == 0 else start_latent * scale
     stop = 1 if end_latent <= 1 else 1 + (end_latent - 1) * scale
@@ -454,7 +453,7 @@ def _spatial_output_slice(
     left_ramp_latent: int,
     right_ramp_latent: int,
     scale: int,
-) -> Tuple[slice, mx.array]:
+) -> tuple[slice, mx.array]:
     """Map a spatial latent interval to decoded-pixel interval and mask."""
     start = start_latent * scale
     stop = end_latent * scale
@@ -486,13 +485,13 @@ def _assign_add_5d(
 
 
 def _merge_temporal_pending(
-    pending: Optional[mx.array],
-    pending_weights: Optional[mx.array],
+    pending: mx.array | None,
+    pending_weights: mx.array | None,
     pending_start: int,
     chunk: mx.array,
     chunk_weights: mx.array,
     chunk_start: int,
-) -> Tuple[mx.array, mx.array, int]:
+) -> tuple[mx.array, mx.array, int]:
     """Merge a temporal chunk into the rolling output accumulator."""
     if pending is None or pending_weights is None:
         return chunk, chunk_weights, chunk_start
@@ -534,9 +533,9 @@ def decode_tiled(
     latent: mx.array,
     decoder_fn,
     tiling_config: TilingConfig,
-    timestep: Optional[float] = 0.05,
+    timestep: float | None = 0.05,
     show_progress: bool = True,
-    key: Optional[mx.array] = None,
+    key: mx.array | None = None,
 ) -> Iterator[mx.array]:
     """Decode a latent tensor by tiles and blend overlaps."""
     del key  # Reserved for API compatibility.
@@ -587,8 +586,8 @@ def decode_tiled(
     else:
         tqdm = None
 
-    pending: Optional[mx.array] = None
-    pending_weights: Optional[mx.array] = None
+    pending: mx.array | None = None
+    pending_weights: mx.array | None = None
     pending_start = 0
 
     progress = (

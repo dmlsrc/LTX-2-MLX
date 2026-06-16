@@ -23,7 +23,6 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-
 # Add repo root to import path when run as scripts/decode_latent_debug.py.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -207,11 +206,11 @@ def make_decoder(
     spatial_padding_mode: str = "conv",
     config_weights_path: str | None = None,
 ):
-    from scripts.generate import get_vae_config
     from LTX_2_MLX.model.video_vae.native_decoder import (
         NativeConv3dVideoDecoder,
         load_native_vae_decoder_weights,
     )
+    from scripts.generate import get_vae_config
 
     config_candidates = [config_weights_path, weights_path]
     vae_cfg = {}
@@ -366,13 +365,13 @@ def compare_spatial_padding_modes(
 
 
 def make_audio_decoder_and_vocoder(weights_path: str, compute_dtype: Any):
-    from scripts.generate import create_vocoder_for_checkpoint, print_audio_dtype_summary
     from LTX_2_MLX.model.audio_vae import (
         AudioDecoder,
         load_audio_decoder_weights,
         load_vocoder_weights,
         load_vocoder_with_bwe_weights,
     )
+    from scripts.generate import create_vocoder_for_checkpoint, print_audio_dtype_summary
 
     print("Loading Audio VAE decoder...")
     audio_decoder = AudioDecoder(compute_dtype=compute_dtype)
@@ -418,7 +417,11 @@ def write_wav(audio_waveform: Any, output_path: Path, sample_rate: int) -> None:
 
 
 def tiling_config_for_mode(mode: str, latent: Any | None = None):
-    from LTX_2_MLX.model.video_vae.tiling import SpatialTilingConfig, TemporalTilingConfig, TilingConfig
+    from LTX_2_MLX.model.video_vae.tiling import (
+        SpatialTilingConfig,
+        TemporalTilingConfig,
+        TilingConfig,
+    )
 
     if mode == "none":
         return None
@@ -578,13 +581,13 @@ def decode_mode(
     cfg = tiling_config_for_mode(mode, latent)
 
     if video_output_mode == "production":
-        from scripts.generate import encode_video_dispatch
         from LTX_2_MLX.pipelines.streaming import (
             iter_decoded_chunks,
             latent_dims,
             plan_vae_tiling,
         )
         from LTX_2_MLX.progress import StackedPhaseBars
+        from scripts.generate import encode_video_dispatch
 
         n_source_frames, height, width = latent_dims(latent)
         n_chunks, tiling_desc = plan_vae_tiling(latent, cfg)

@@ -5,11 +5,10 @@ for all test files in the test suite.
 """
 
 import sys
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import pytest
-
 
 # Add project root to path so tests can import LTX_2_MLX
 project_root = Path(__file__).parent.parent

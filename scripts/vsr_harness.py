@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """VAE-decode (or read MP4) and pump frames through VideoToolbox VSR +
 optional temporal frame-rate conversion. Writes the upscaled MP4 directly
-via AVAssetWriter — no ffmpeg, no PNG round-trip, no disk WAV by default.
+via AVAssetWriter - no ffmpeg, no PNG round-trip, no disk WAV by default.
 
 Usage
 -----
@@ -31,7 +31,7 @@ Spatial modes (VideoToolbox-imposed; scale is implied by the mode)
     image     VTSuperResolutionScalerConfiguration, InputType=Image.  Scale 4x.
               Per-frame deterministic upscale, no prev-frame feedback.
               Apple documents this as for stills, but on real video it's a
-              legitimate alternative — slightly softer per-frame detail
+              legitimate alternative - slightly softer per-frame detail
               than balanced but measurably smoother frame-to-frame (lower
               temporal second-difference).  Use scripts/compare_video_shimmer.py
               to A/B the two modes on your own content.
@@ -39,13 +39,13 @@ Spatial modes (VideoToolbox-imposed; scale is implied by the mode)
 Temporal modes (only relevant when --target-fps is set)
 -------------------------------------------------------
     normal    Default.  Fast and adequate for ~2x rate-up.
-    high      VTFrameRateConversion's QualityPrioritizationQuality — more
+    high      VTFrameRateConversion's QualityPrioritizationQuality - more
               compute per interpolated frame, cleaner motion.
 
 The VAE decoder defaults track scripts/generate.py's happy path
 (native backend + zero spatial padding) via the encode_modes_harness
 helpers. Chunks are cast to fp16 RGBA inside MLX so the full bf16
-precision is preserved through to VSR's RGBAHalf source format —
+precision is preserved through to VSR's RGBAHalf source format -
 quantization happens at the destination (either CIContext rendering
 to NV12 for LL, or AVAssetWriter encoding to HEVC for HQ).
 
@@ -66,28 +66,32 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import numpy as np
 from PIL import Image
-
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
 from LTX_2_MLX.videotoolbox import (  # noqa: E402
-    AudioTrack, AVWriter, CutDetector,
-    VsrSession, VtfrcSession,
-    autorelease_pool, require_pyobjc,
+    AudioTrack,
+    AVWriter,
+    CutDetector,
+    VsrSession,
+    VtfrcSession,
+    autorelease_pool,
+    require_pyobjc,
 )
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb  # noqa: E402
 from LTX_2_MLX.videotoolbox.comparison import render_comparison  # noqa: E402
 from LTX_2_MLX.videotoolbox.writer import (  # noqa: E402
-    HEVC_PROFILE_MAIN10, HEVC_PROFILE_MAIN422_10,
+    HEVC_PROFILE_MAIN10,
+    HEVC_PROFILE_MAIN422_10,
 )
-
 
 NATIVE_FPS = 24.0
 
@@ -106,13 +110,14 @@ NATIVE_FPS = 24.0
 #   --vae-tiling auto  array  wall 142.3s  VAE 109.3s  5.07 fps
 #   --vae-tiling off   list   wall 151.1s  VAE  58.3s  4.77 fps
 #   --vae-tiling off   array  wall 165.5s  VAE  70.2s  4.36 fps
-# Tiled mode: list/array indistinguishable — chunks are small enough that
+# Tiled mode: list/array indistinguishable - chunks are small enough that
 # list-vs-array allocation overhead is in the noise. Single-shot: list is
 # ~10% faster wall and ~17% faster through the VAE itself. So this env var
-# is NOT a no-op — it controls a real perf difference for `--vae-tiling off`.
+# is NOT a no-op - it controls a real perf difference for `--vae-tiling off`.
 # List stays the default because it's the faster path everywhere AND lets
 # the inner loop drop per-frame memory as it goes.
 import os as _os
+
 _CHUNK_AS_ARRAY = _os.environ.get("VSR_CHUNK_AS_ARRAY", "0") == "1"
 
 
@@ -127,7 +132,7 @@ def chunk_to_rgba_fp16(chunk: Any, mx_mod: Any):
     Returns a list of independently-allocated per-frame ndarrays rather than
     one big (T,H,W,4) array. The downstream inner loop can then null out
     `chunk[i]` once a frame is consumed, freeing that frame's ~1.2 MB back
-    to the OS — so the resident chunk memory tapers as we work through it
+    to the OS - so the resident chunk memory tapers as we work through it
     instead of sitting at full size until chunk-end. Allocator overhead is
     one mmap per frame (cheap; macOS mmaps allocations >= 16 KiB directly).
     """
@@ -144,12 +149,12 @@ def chunk_to_rgba_fp16(chunk: Any, mx_mod: Any):
         # List of per-frame ndarrays so each frame's memory can be freed
         # independently by the main loop. np.array(..., copy=True) forces
         # a Python-owned buffer (np.asarray returns a view sharing MLX
-        # memory — OWNDATA=False — which pins MLX state across the loop).
+        # memory - OWNDATA=False - which pins MLX state across the loop).
         result = [np.array(transposed[0, t], copy=True) for t in range(T)]
     # Drop refs to all MLX intermediates AND force the cache to release.
     # Without clear_cache here, the rescaled/alpha/rgba/transposed Metal
     # buffers (which can be GiB-scale for single-shot decodes) sit in MLX's
-    # cache for the entire downstream inner loop — only released when the
+    # cache for the entire downstream inner loop - only released when the
     # generator resumes after the loop drains. The numpy result is already
     # an independent Python-owned copy, so MLX state is safe to drop now.
     del rescaled, alpha, rgba, transposed
@@ -180,8 +185,8 @@ def plan_vae_tiling(latent: Any, backend: str) -> tuple[Any, int, str]:
     """Decide the tiling cfg + chunk count up front.
 
     Returns (cfg, n_chunks, human_description). `cfg` is the TilingConfig
-    (or None for single-shot decode). Pure CPU/dim arithmetic — no GPU
-    work — so it's cheap to call before any tqdm bar starts (which is
+    (or None for single-shot decode). Pure CPU/dim arithmetic - no GPU
+    work - so it's cheap to call before any tqdm bar starts (which is
     what avoids clobbering the bar with VAE tiling status mid-stream).
     """
     from LTX_2_MLX.model.video_vae.tiling import TilingConfig
@@ -226,8 +231,8 @@ def iter_latent_chunks(
        "uint8_rgb"  -> (T,H,W,3) uint8  (for LowLatency VSR / NV12 source)
        "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
     """
-    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
+    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
     from scripts.encode_modes_harness import chunk_to_uint8
 
     convert = chunk_to_rgba_fp16 if output_format == "fp16_rgba" else chunk_to_uint8
@@ -330,9 +335,9 @@ def _decode_audio_track(audio_latent: Any, weights: str, compute_dtype: Any) -> 
     """Decode the audio latent through the audio VAE + vocoder into an
     in-memory AudioTrack. No disk WAV unless the caller asks for a sidecar.
     """
-    from scripts.decode_latent_debug import make_audio_decoder_and_vocoder, decode_audio_latent
-
     import mlx.core as mx
+
+    from scripts.decode_latent_debug import decode_audio_latent, make_audio_decoder_and_vocoder
 
     print("Decoding audio latent (audio VAE + vocoder)...")
     audio_decoder, vocoder, sample_rate = make_audio_decoder_and_vocoder(weights, compute_dtype)
@@ -386,8 +391,9 @@ def run(args: argparse.Namespace) -> None:
 
     # ---- Input source ------------------------------------------------------
     if args.latent:
-        from scripts.decode_latent_debug import load_latents, parse_dtype
         import mlx.core as mx
+
+        from scripts.decode_latent_debug import load_latents, parse_dtype
 
         print(f"[setup] VAE-decoding latent: {args.latent}")
         t = time.perf_counter()
@@ -399,7 +405,7 @@ def run(args: argparse.Namespace) -> None:
             f"audio_latent={'yes' if audio_latent is not None else 'no'})"
         )
 
-        # Audio decode runs serially — threading it against VAE chunk 1 was
+        # Audio decode runs serially - threading it against VAE chunk 1 was
         # tried and made total setup slower (MLX serializes work across
         # threads on the single Metal scheduler).
         if audio_latent is not None and args.audio:
@@ -436,7 +442,7 @@ def run(args: argparse.Namespace) -> None:
             f"VAE tiling: {vae_tiling_desc} "
             f"({n_vae_chunks} chunk{'s' if n_vae_chunks != 1 else ''})"
         )
-        # Always carry fp16 RGBA from MLX through to VSR — quantization
+        # Always carry fp16 RGBA from MLX through to VSR - quantization
         # happens at the destination format, not earlier. For LL this means
         # CIContext quantizes once at NV12 render time (in YUV space) rather
         # than twice (in RGB then YUV). For HQ this preserves full bf16
@@ -479,7 +485,7 @@ def run(args: argparse.Namespace) -> None:
     # ---- Sessions + writers ------------------------------------------------
     # Defer constructing the VSR session, VtfrcSession, and AVWriters until
     # the *first* VAE chunk has materialized.  These hold Metal resources
-    # — the HQ VSR model in particular pins ~100MB of Metal heap — so
+    # - the HQ VSR model in particular pins ~100MB of Metal heap - so
     # creating them up front would compete with chunk-1 VAE decode for
     # the same unified-memory pool.  Lazy init via _build_post_pipeline.
     session: VsrSession | None = None
@@ -626,7 +632,7 @@ def run(args: argparse.Namespace) -> None:
                 # instead of piling up on the process top-level pool until
                 # the interpreter exits. Without this the RSS climbs
                 # unboundedly during long runs even though Python refcounts
-                # are tracking correctly — PyObjC just doesn't drain
+                # are tracking correctly - PyObjC just doesn't drain
                 # autoreleased ObjC objects on Python GC.
                 with autorelease_pool():
                     src_frame = chunk[i]
@@ -658,8 +664,8 @@ def run(args: argparse.Namespace) -> None:
                             post_dir / f"frame_{processed:05d}.png"
                         )
 
-                    # Iterate VSR/temporal output buffers directly — don't
-                    # materialize into a list — so each buffer's local ref
+                    # Iterate VSR/temporal output buffers directly - don't
+                    # materialize into a list - so each buffer's local ref
                     # drops the moment the writer takes it.
                     out_iter = (
                         iter([vsr_pb]) if vtfrc is None
@@ -781,7 +787,7 @@ def main() -> None:
         "--source-fps", type=float, default=NATIVE_FPS,
         help=(
             f"Source frame rate for --latent (latents don't carry an fps; "
-            f"default {NATIVE_FPS} matches generate.py). Ignored for --video — "
+            f"default {NATIVE_FPS} matches generate.py). Ignored for --video - "
             f"the input file's r_frame_rate is honored instead. Pair with "
             f"--target-fps to drive temporal frame-rate conversion."
         ),

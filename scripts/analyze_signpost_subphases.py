@@ -22,12 +22,12 @@ line starting with "#".
 """
 
 from __future__ import annotations
+
 import argparse
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-
 
 # Phase taxonomy: which are parents (block-level) vs sub-phases (nested).
 PARENT_PHASES = {
@@ -101,7 +101,7 @@ def analyze(events):
                     popped = stack.pop(i)
                     break
             if popped is None:
-                # Orphan end without begin — skip
+                # Orphan end without begin - skip
                 continue
             begin_ts = popped[1]
             dur = ts - begin_ts

@@ -10,8 +10,7 @@ import os
 import mlx.core as mx
 import numpy as np
 
-
-# ── Dispatch probe ─────────────────────────────────────────────────────────
+# -- Dispatch probe ---------------------------------------------------------
 #
 # When LTX_FUSED_PROBE=1 is set, every adaln_norm_fused / gated_add_fused
 # call increments a counter for either the kernel path or the MLX fallback
@@ -20,7 +19,7 @@ import numpy as np
 # run vs silently routing through the fallback.
 #
 # Zero overhead when LTX_FUSED_PROBE is unset (single env-var check at
-# module load → no-op increments).
+# module load -> no-op increments).
 
 _PROBE_ENABLED = bool(os.environ.get("LTX_FUSED_PROBE"))
 _PROBE_COUNTS: dict[str, int] = {
@@ -87,7 +86,7 @@ if _PROBE_ENABLED:
 # through the sigmoid, skipping that roundtrip.  Measured 1.19x
 # speedup vs the prior bf16-math kernel at T=14640, C=16384 (Gemma 3
 # text encoder hot path); robust across a cache-protocol microbench
-# (hot_fixed, rotate, rotate_shuffle, thrash all show E/C ≈ 0.84 with
+# (hot_fixed, rotate, rotate_shuffle, thrash all show E/C ~ 0.84 with
 # stdev < 0.05 ms).
 _silu_mul_kernel = mx.fast.metal_kernel(
     name="silu_mul",
@@ -322,15 +321,15 @@ def interleaved_rope(
     return result
 
 
-# ── Fused AdaLN: rms_norm(x) * (1 + scale) + shift ─────────────────────────
+# -- Fused AdaLN: rms_norm(x) * (1 + scale) + shift -------------------------
 #
 # Replaces the ``_adaln_inline`` MLX path in transformer.py.  Production
 # T2V shape is x bf16 (B, T, C), scale/shift fp32 (B, 1, C) broadcast
 # across T (uniform_mask=True path through modality_from_state).
 #
 # Registered for both supported transformer dims:
-#   - C=4096 (video, BLOCK=512, VPT=2 → 8 elem/thread, 16 SG/tg)
-#   - C=2048 (audio, BLOCK=256, VPT=2 → 8 elem/thread, 8 SG/tg)
+#   - C=4096 (video, BLOCK=512, VPT=2 -> 8 elem/thread, 16 SG/tg)
+#   - C=2048 (audio, BLOCK=256, VPT=2 -> 8 elem/thread, 8 SG/tg)
 # Same algorithmic structure for both; only the constants differ.
 # Other shapes fall back to the stock MLX expression (I2V per-token
 # scale/shift, non-bf16 x, unsupported C, etc.).
@@ -340,13 +339,13 @@ def interleaved_rope(
 # protocols at T=14640, C=4096; 60% of peak DRAM bandwidth (~240 GB/s).
 # Audio variant added 2026-05-27 by analogy; bench has not been redone
 # at C=2048 but the layout (8 elem/thread, single-barrier reduction)
-# is the same shape-portable pattern that survived the C=3584 → C=4096
+# is the same shape-portable pattern that survived the C=3584 -> C=4096
 # shape correction.  Verified by parity tests; perf will surface in the
 # end-to-end A/B.
 
 _ADALN_FUSED_EPS = 1e-6  # hardcoded; matches transformer.py norm_eps default
 
-# Map C → (BLOCK, VPT).  BLOCK * VPT * 4 == C; VPT=2 keeps 8 elements/thread
+# Map C -> (BLOCK, VPT).  BLOCK * VPT * 4 == C; VPT=2 keeps 8 elements/thread
 # across both variants (the layout that won the C=4096 bench).
 _ADALN_FUSED_CONFIGS: dict[int, tuple[int, int]] = {
     4096: (512, 2),   # video transformer
@@ -399,7 +398,7 @@ def _build_adaln_norm_kernel(c: int, block: int, vpt: int) -> mx.fast.metal_kern
                 local_sum += a*a + b*b + c*c + d*d;
             }}
 
-            // Simdgroup reduce → per-SG partials in TGM, single barrier.
+            // Simdgroup reduce -> per-SG partials in TGM, single barrier.
             threadgroup float tg_partials[{block // 32}];
             float sg_sum = simd_sum(local_sum);
             if ((tid & 31u) == 0) {{
@@ -416,7 +415,7 @@ def _build_adaln_norm_kernel(c: int, block: int, vpt: int) -> mx.fast.metal_kern
             const float inv = rsqrt(total * INV_C + EPS_F);
 
             // Phase 2: modulate from cached registers, vectorized stores.
-            // fp32 scale/shift reads land directly without bfloat→float casts.
+            // fp32 scale/shift reads land directly without bfloat->float casts.
             #pragma unroll
             for (int v = 0; v < {vpt}; ++v) {{
                 float4 sc = scale_v[tid * {vpt} + v];
@@ -445,7 +444,7 @@ _adaln_norm_fused_kernels: dict[int, mx.fast.metal_kernel] = {
 def _adaln_norm_mlx(
     x: mx.array, scale: mx.array, shift: mx.array, eps: float
 ) -> mx.array:
-    """Stock MLX AdaLN — matches ``transformer.py::_adaln_inline``.
+    """Stock MLX AdaLN - matches ``transformer.py::_adaln_inline``.
 
     Used as fallback when the fused kernel's shape/dtype gate doesn't
     match (I2V per-token scale/shift, unsupported C, non-bf16 x, etc.).
@@ -466,7 +465,7 @@ def _adaln_t2v_broadcast_compatible(
       - scale, shift have all-singleton leading dims (i.e. (1, 1, C) or
         (C,) up to broadcast) so the kernel's per-channel read is valid
 
-    Any per-token scale/shift (B, T, C) returns False → MLX fallback.
+    Any per-token scale/shift (B, T, C) returns False -> MLX fallback.
     """
     if x.dtype != mx.bfloat16 or x.ndim != 3:
         return False
@@ -477,7 +476,7 @@ def _adaln_t2v_broadcast_compatible(
         return False
     if scale.shape[-1] != c or shift.shape[-1] != c:
         return False
-    # All leading dims must be 1 — covers (C,), (1, C), (1, 1, C).
+    # All leading dims must be 1 - covers (C,), (1, C), (1, 1, C).
     for d in scale.shape[:-1]:
         if d != 1:
             return False
@@ -540,7 +539,7 @@ def adaln_norm_fused(
     return outputs[0].reshape(B, T, C)
 
 
-# ── Fused gated add: residual + branch * gate ──────────────────────────────
+# -- Fused gated add: residual + branch * gate ------------------------------
 #
 # Replaces the ``_residual_gate_inline`` MLX path in transformer.py.
 # Production T2V shape: residual bf16 (B, T, C), branch bf16 (B, T, C),
@@ -548,15 +547,15 @@ def adaln_norm_fused(
 # ``out = branch * gate + residual``.
 #
 # Registered for both supported transformer dims (same configs as AdaLN):
-#   - C=4096 (video, BLOCK=512, VPT=2 → 8 elem/thread, 16 SG/tg)
-#   - C=2048 (audio, BLOCK=256, VPT=2 → 8 elem/thread, 8 SG/tg)
+#   - C=4096 (video, BLOCK=512, VPT=2 -> 8 elem/thread, 16 SG/tg)
+#   - C=2048 (audio, BLOCK=256, VPT=2 -> 8 elem/thread, 8 SG/tg)
 # Other shapes fall back to the stock MLX expression.
 #
 # Video variant validated on M1 Max: 1.26-1.30x speedup over mx.compile
 # under all four cache protocols at T=14640, C=4096; 72% of peak DRAM
 # bandwidth (~288 GB/s).  Audio variant added 2026-05-27 by analogy.
 
-# Same (BLOCK, VPT) configs as AdaLN — these are bandwidth-bound kernels
+# Same (BLOCK, VPT) configs as AdaLN - these are bandwidth-bound kernels
 # with the same per-row tiling story.
 _GATED_ADD_FUSED_CONFIGS: dict[int, tuple[int, int]] = {
     4096: (512, 2),   # video transformer
@@ -576,7 +575,7 @@ def _build_gated_add_kernel(c: int, block: int, vpt: int) -> mx.fast.metal_kerne
         output_names=["out"],
         source=f"""
             // One threadgroup per row.  BLOCK={block} threads,
-            // VPT={vpt} vectors/thread per dtype.  No reductions —
+            // VPT={vpt} vectors/thread per dtype.  No reductions -
             // pure elementwise FMA over C={c} bf16 elements per row.
 
             const uint row    = threadgroup_position_in_grid.x;
@@ -615,7 +614,7 @@ _gated_add_fused_kernels: dict[int, mx.fast.metal_kernel] = {
 def _gated_add_mlx(
     residual: mx.array, branch: mx.array, gate: mx.array
 ) -> mx.array:
-    """Stock MLX gated add — matches ``transformer.py::_residual_gate_inline``."""
+    """Stock MLX gated add - matches ``transformer.py::_residual_gate_inline``."""
     return (residual + branch * gate).astype(residual.dtype)
 
 
@@ -659,7 +658,7 @@ def gated_add_fused(
     any other shape/dtype.
 
     Argument order matches ``_residual_gate_inline(x, residual, gate)``
-    where x ≡ residual_arg, residual ≡ branch_arg, gate ≡ gate_arg.
+    where x == residual_arg, residual == branch_arg, gate == gate_arg.
 
     Args:
         residual: Accumulated residual stream, shape (B, T, C).

@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from LTX_2_MLX.model.upscaler.spatial import (
-    ResBlock3d,
     PixelShuffle2d,
+    ResBlock3d,
     SpatialUpscaler,
 )
 from LTX_2_MLX.model.upscaler.temporal import (

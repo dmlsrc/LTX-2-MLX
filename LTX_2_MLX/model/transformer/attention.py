@@ -2,15 +2,14 @@
 
 import os
 from collections.abc import Callable
-from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from ...kernels.steel_attention import maybe_steel_attention
+from ...utils.signpost import signpost as _signpost
+from ...utils.signpost import signpost_barrier as _sp_barrier
 from .rope import LTXRopeType, apply_rotary_emb
-from ...utils.signpost import signpost as _signpost, signpost_barrier as _sp_barrier
-
 
 # Set LTX_DISABLE_COMPILED_ATTN=1 to bypass the @mx.compile wrappers around the
 # reshape+SDPA+reshape sequence.  Used to A/B compile overhead vs fusion.
@@ -30,7 +29,7 @@ def _env_enabled_by_default(name: str, disable_name: str) -> bool:
 _USE_STEEL_ATTN = _env_enabled_by_default("LTX_STEEL_ATTN", "LTX_DISABLE_STEEL_ATTN")
 
 
-_KV_DOWNSAMPLE_CONFIG: Optional[dict[str, object]] = None
+_KV_DOWNSAMPLE_CONFIG: dict[str, object] | None = None
 _KV_DOWNSAMPLE_COUNTS: dict[str, int] = {"applied": 0, "fallback": 0}
 _KV_DOWNSAMPLE_REASONS: dict[str, int] = {}
 
@@ -45,7 +44,7 @@ def configure_kv_downsample(
     heads: int = 32,
     dim_head: int = 128,
     mode: str = "mean",
-    max_applied: Optional[int] = None,
+    max_applied: int | None = None,
 ) -> None:
     """Enable a failed-experiment K/V reduction path for video self-attn.
 
@@ -94,7 +93,7 @@ def reset_kv_downsample_stats() -> None:
     _KV_DOWNSAMPLE_REASONS.clear()
 
 
-def kv_downsample_summary() -> Optional[dict]:
+def kv_downsample_summary() -> dict | None:
     if _KV_DOWNSAMPLE_CONFIG is None:
         return None
     return {
@@ -104,7 +103,7 @@ def kv_downsample_summary() -> Optional[dict]:
     }
 
 
-def _kv_downsample_record(reason: Optional[str]) -> None:
+def _kv_downsample_record(reason: str | None) -> None:
     if reason is None:
         _KV_DOWNSAMPLE_COUNTS["applied"] += 1
         return
@@ -180,7 +179,7 @@ def _sdpa(
     v: mx.array,
     *,
     scale: float,
-    mask: Optional[mx.array] = None,
+    mask: mx.array | None = None,
 ) -> mx.array:
     if _USE_STEEL_ATTN:
         out = maybe_steel_attention(q, k, v, scale=scale, mask=mask)
@@ -259,12 +258,12 @@ def _attention_core_inline_with_mask(
     elif mask.ndim == 3:
         mask = mask[:, None, :, :]
 
-    # Boolean masks pass through unchanged — MLX SDPA handles them natively
+    # Boolean masks pass through unchanged - MLX SDPA handles them natively
     # (True = attend, False = mask out, equivalent to additive -inf at False).
     # Additive masks (e.g. context_mask with -inf at padding) must match q dtype.
-    # An unconditional .astype(q.dtype) here would cast bool → 0/1 BF16, which
+    # An unconditional .astype(q.dtype) here would cast bool -> 0/1 BF16, which
     # MLX SDPA then interprets as a soft additive bias (~2.72x preference
-    # factor) rather than a hard mask — a real bug for any caller passing
+    # factor) rather than a hard mask - a real bug for any caller passing
     # bool.  Dormant on main today (no bool callers), kept correct preemptively.
     if mask.dtype != mx.bool_:
         mask = mask.astype(q.dtype)
@@ -293,7 +292,7 @@ def _attention_core(
     v: mx.array,
     heads: int,
     dim_head: int,
-    mask: Optional[mx.array] = None,
+    mask: mx.array | None = None,
 ) -> mx.array:
     """Dispatch to compiled attention core based on mask presence."""
     if mask is None:
@@ -310,7 +309,7 @@ def _attention_core(
         return _compiled_attention_core_with_mask(q, k, v, heads, dim_head, mask)
 
 
-def rms_norm(x: mx.array, weight: Optional[mx.array] = None, eps: float = 1e-6) -> mx.array:
+def rms_norm(x: mx.array, weight: mx.array | None = None, eps: float = 1e-6) -> mx.array:
     """
     Apply RMS normalization using optimized MLX implementation.
 
@@ -341,8 +340,8 @@ def scaled_dot_product_attention(
     q: mx.array,
     k: mx.array,
     v: mx.array,
-    mask: Optional[mx.array] = None,
-    scale: Optional[float] = None,
+    mask: mx.array | None = None,
+    scale: float | None = None,
 ) -> mx.array:
     """
     Scaled dot-product attention using optimized MLX implementation.
@@ -379,7 +378,7 @@ class Attention(nn.Module):
     def __init__(
         self,
         query_dim: int,
-        context_dim: Optional[int] = None,
+        context_dim: int | None = None,
         heads: int = 8,
         dim_head: int = 64,
         norm_eps: float = 1e-6,
@@ -433,7 +432,7 @@ class Attention(nn.Module):
     def _projection_call(
         self,
         linear: nn.Linear,
-        cached_t: Optional[mx.array],
+        cached_t: mx.array | None,
         x: mx.array,
     ) -> mx.array:
         """Apply a Linear, using a pre-transposed weight cache when present."""
@@ -494,7 +493,7 @@ class Attention(nn.Module):
             return []
         return self._pretranspose_linear("to_gate_logits", "_to_gate_logits_weight_t")
 
-    # Map layout-spec target → (apply method name, cache attr name).
+    # Map layout-spec target -> (apply method name, cache attr name).
     _PRETRANSPOSE_TARGETS: dict[str, tuple[str, str]] = {
         "to_out": ("pretranspose_to_out", "_to_out_weight_t"),
         "to_q":   ("pretranspose_to_q",   "_to_q_weight_t"),
@@ -514,7 +513,7 @@ class Attention(nn.Module):
             _, cache_attr = self._PRETRANSPOSE_TARGETS[target]
             cached = getattr(self, cache_attr)
             linear = getattr(self, target, None)
-            # to_gate_logits can be None on non-V2 attentions — skip silently.
+            # to_gate_logits can be None on non-V2 attentions - skip silently.
             if linear is None:
                 continue
             if cached is not None and "weight" in linear:
@@ -536,10 +535,10 @@ class Attention(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        context: Optional[mx.array] = None,
-        mask: Optional[mx.array] = None,
-        pe: Optional[tuple] = None,
-        k_pe: Optional[tuple] = None,
+        context: mx.array | None = None,
+        mask: mx.array | None = None,
+        pe: tuple | None = None,
+        k_pe: tuple | None = None,
     ) -> mx.array:
         """
         Forward pass.
@@ -561,12 +560,12 @@ class Attention(nn.Module):
         per-step time; at large T the effect is in the noise but still neutral.
         """
         # Sub-phase signposts (no-op when LTX_PROFILE_SIGNPOSTS is unset).
-        # Three regions: qkv (projections + norms + rope) → sdpa → out.
+        # Three regions: qkv (projections + norms + rope) -> sdpa -> out.
         # Aggregates across all attention call sites; the parent phase
         # signpost (video_self_attn / video_text_ca / etc.) wraps the whole
         # call so trace tools can correlate.
         with _signpost("attn_qkv"):
-            # 1) Gate logits first — independent of V/Q/K, lets MLX schedule it
+            # 1) Gate logits first - independent of V/Q/K, lets MLX schedule it
             #    in parallel with the projections below.
             gate = None
             if self.to_gate_logits is not None:
@@ -615,10 +614,10 @@ class Attention(nn.Module):
         x: mx.array,
         name: str,
         mark_profile: Callable[..., None],
-        context: Optional[mx.array] = None,
-        mask: Optional[mx.array] = None,
-        pe: Optional[tuple] = None,
-        k_pe: Optional[tuple] = None,
+        context: mx.array | None = None,
+        mask: mx.array | None = None,
+        pe: tuple | None = None,
+        k_pe: tuple | None = None,
     ) -> mx.array:
         """Forward pass with forced-eval timing checkpoints for diagnostics."""
         q = self._projection_call(self.to_q, self._to_q_weight_t, x)
@@ -684,8 +683,8 @@ class SelfAttention(nn.Module):
     def __call__(
         self,
         x: mx.array,
-        mask: Optional[mx.array] = None,
-        pe: Optional[tuple] = None,
+        mask: mx.array | None = None,
+        pe: tuple | None = None,
     ) -> mx.array:
         return self.attn(x, context=None, mask=mask, pe=pe)
 
@@ -715,6 +714,6 @@ class CrossAttention(nn.Module):
         self,
         x: mx.array,
         context: mx.array,
-        mask: Optional[mx.array] = None,
+        mask: mx.array | None = None,
     ) -> mx.array:
         return self.attn(x, context=context, mask=mask, pe=None)

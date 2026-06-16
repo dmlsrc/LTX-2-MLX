@@ -1,7 +1,7 @@
 """Audio VAE components for LTX-2 MLX."""
 
 from .decoder import AudioDecoder, load_audio_decoder_weights
-from .encoder import AudioEncoder, load_audio_encoder_weights, encode_audio
+from .encoder import AudioEncoder, encode_audio, load_audio_encoder_weights
 from .vocoder import Vocoder, VocoderWithBWE, load_vocoder_weights, load_vocoder_with_bwe_weights
 
 __all__ = [

@@ -1,12 +1,5 @@
 """Video VAE encoder and decoder (native MLX Conv3d, BFHWC)."""
 
-from .ops import (
-    patchify,
-    unpatchify,
-    PerChannelStatistics,
-    pixel_shuffle_3d,
-    pixel_unshuffle_3d,
-)
 from .decode_utils import decode_latent
 from .native_decoder import (
     NativeConv3dVideoDecoder,
@@ -16,12 +9,19 @@ from .native_encoder import (
     NativeConv3dVideoEncoder,
     load_native_vae_encoder_weights,
 )
+from .ops import (
+    PerChannelStatistics,
+    patchify,
+    pixel_shuffle_3d,
+    pixel_unshuffle_3d,
+    unpatchify,
+)
 from .tiling import (
-    TilingConfig,
     SpatialTilingConfig,
     TemporalTilingConfig,
-    decode_tiled,
+    TilingConfig,
     compute_trapezoidal_mask_1d,
+    decode_tiled,
 )
 
 __all__ = [

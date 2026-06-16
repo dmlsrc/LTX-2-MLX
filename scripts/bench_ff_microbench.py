@@ -98,11 +98,10 @@ import argparse
 import os
 import sys
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import mlx.core as mx
 import mlx.nn as nn
-
 
 # --- shapes (from LTX-2.3 distilled at 1024x576x481, stage 1 latent) ---
 B = 1

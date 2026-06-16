@@ -10,7 +10,6 @@ de/re-normalize between stages.
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -19,12 +18,11 @@ from .native_blocks import (
     NativeConv3dBlock,
     NativeResBlockGroup,
     lookup_weight,
+    patchify_spatial_bfhwc,
     pixel_norm_bfhwc,
     to_native_conv3d_layout,
-    patchify_spatial_bfhwc,
 )
 from .ops import PerChannelStatistics
-
 
 _STRIDE_MAP = {
     "compress_all": (2, 2, 2),
@@ -55,7 +53,7 @@ class NativeConv3dVideoEncoderStatistics:
     heavyweight encoder convolution weights.
     """
 
-    def __init__(self, per_channel_statistics: Optional[PerChannelStatistics] = None):
+    def __init__(self, per_channel_statistics: PerChannelStatistics | None = None):
         self.per_channel_statistics = (
             per_channel_statistics
             if per_channel_statistics is not None

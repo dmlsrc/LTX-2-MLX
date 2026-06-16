@@ -2,19 +2,19 @@
 
 from .connector import BasicTransformerBlock1D, Embeddings1DConnector
 from .encoder import (
-    # Video-only encoder
-    VideoGemmaEncoderOutput,
-    VideoGemmaTextEncoderModel,
-    create_text_encoder,
-    load_text_encoder_weights,
     # Audio+Video encoder
     AudioVideoGemmaEncoderOutput,
     AudioVideoGemmaTextEncoderModel,
+    # Video-only encoder
+    VideoGemmaEncoderOutput,
+    VideoGemmaTextEncoderModel,
     create_av_text_encoder,
-    load_av_text_encoder_weights,
     create_av_text_encoder_v2,
     create_av_text_encoder_v2_from_checkpoint,
+    create_text_encoder,
     load_av_text_encoder_v2_weights,
+    load_av_text_encoder_weights,
+    load_text_encoder_weights,
 )
 from .feature_extractor import (
     GemmaFeaturesExtractorProjLinear,

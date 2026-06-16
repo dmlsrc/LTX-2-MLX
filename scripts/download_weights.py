@@ -26,7 +26,6 @@ Usage:
 import argparse
 import os
 from pathlib import Path
-from typing import Optional
 
 from huggingface_hub import get_token, hf_hub_download, login, snapshot_download
 from rich.console import Console
@@ -107,7 +106,7 @@ def print_header():
     console.print()
 
 
-def print_weights_table(selected: Optional[set[str]] = None):
+def print_weights_table(selected: set[str] | None = None):
     """Print table of available weights."""
     table = Table(title="Available Weights", show_header=True, header_style="bold cyan")
     table.add_column("Key", style="yellow")
@@ -192,7 +191,7 @@ def get_interactive_selection() -> set[str]:
     return selected
 
 
-def download_weight(key: str, info: dict, token: Optional[str] = None) -> bool:
+def download_weight(key: str, info: dict, token: str | None = None) -> bool:
     """Download a single weight file."""
     local_path = Path(info["local_path"])
 
@@ -233,7 +232,7 @@ def download_weight(key: str, info: dict, token: Optional[str] = None) -> bool:
         return False
 
 
-def download_weights(selected: set[str], token: Optional[str] = None):
+def download_weights(selected: set[str], token: str | None = None):
     """Download selected weights."""
     if not selected:
         console.print("[yellow]No weights selected for download.[/yellow]")

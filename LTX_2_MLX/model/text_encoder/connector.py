@@ -1,6 +1,5 @@
 """Embeddings connector for LTX-2 text encoder."""
 
-from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -61,8 +60,8 @@ class BasicTransformerBlock1D(nn.Module):
     def __call__(
         self,
         hidden_states: mx.array,
-        attention_mask: Optional[mx.array] = None,
-        pe: Optional[Tuple[mx.array, mx.array]] = None,
+        attention_mask: mx.array | None = None,
+        pe: tuple[mx.array, mx.array] | None = None,
     ) -> mx.array:
         """
         Forward pass.
@@ -116,8 +115,8 @@ class Embeddings1DConnector(nn.Module):
         num_attention_heads: int = 30,
         num_layers: int = 2,
         positional_embedding_theta: float = 10000.0,
-        positional_embedding_max_pos: Optional[List[int]] = None,
-        num_learnable_registers: Optional[int] = 128,
+        positional_embedding_max_pos: list[int] | None = None,
+        num_learnable_registers: int | None = 128,
         rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
         norm_eps: float = 1e-6,
         apply_gated_attention: bool = False,
@@ -175,8 +174,8 @@ class Embeddings1DConnector(nn.Module):
     def _append_learnable_registers(
         self,
         hidden_states: mx.array,
-        attention_mask: Optional[mx.array] = None,
-    ) -> Tuple[mx.array, Optional[mx.array]]:
+        attention_mask: mx.array | None = None,
+    ) -> tuple[mx.array, mx.array | None]:
         """
         Append learnable register tokens beyond the input sequence.
 
@@ -229,8 +228,8 @@ class Embeddings1DConnector(nn.Module):
     def __call__(
         self,
         hidden_states: mx.array,
-        attention_mask: Optional[mx.array] = None,
-    ) -> Tuple[mx.array, mx.array]:
+        attention_mask: mx.array | None = None,
+    ) -> tuple[mx.array, mx.array]:
         """
         Process embeddings through connector.
 

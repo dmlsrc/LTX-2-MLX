@@ -1,15 +1,14 @@
 """Video Gemma Text Encoder for LTX-2."""
 
-from dataclasses import dataclass
 import json
-from typing import List, Optional
+from dataclasses import dataclass
 
 import mlx.core as mx
 import mlx.nn as nn
 
+from ..transformer.rope import LTXRopeType
 from .connector import Embeddings1DConnector
 from .feature_extractor import GemmaFeaturesExtractorProjLinear, GemmaFeaturesExtractorV2
-from ..transformer.rope import LTXRopeType
 
 
 @dataclass
@@ -72,12 +71,12 @@ class VideoGemmaTextEncoderModel(nn.Module):
     3. Embeddings connector (1D transformer refinement)
 
     The output is 3840-dim embeddings suitable for the diffusion transformer,
-    which applies its own caption projection (3840 → 4096) for cross-attention.
+    which applies its own caption projection (3840 -> 4096) for cross-attention.
 
     Note: The Gemma model itself is loaded separately via mlx-lm.
     This class handles the LTX-2 specific projection layers.
 
-    Note: Caption projection (3840 → 4096) is handled by the transformer model,
+    Note: Caption projection (3840 -> 4096) is handled by the transformer model,
     not this text encoder. This matches PyTorch LTX-2 architecture where the
     text encoder returns 3840-dim features and the diffusion model contains
     the caption_projection layer.
@@ -85,8 +84,8 @@ class VideoGemmaTextEncoderModel(nn.Module):
 
     def __init__(
         self,
-        feature_extractor: Optional[GemmaFeaturesExtractorProjLinear] = None,
-        embeddings_connector: Optional[Embeddings1DConnector] = None,
+        feature_extractor: GemmaFeaturesExtractorProjLinear | None = None,
+        embeddings_connector: Embeddings1DConnector | None = None,
     ):
         """
         Initialize text encoder.
@@ -133,7 +132,7 @@ class VideoGemmaTextEncoderModel(nn.Module):
 
     def encode_from_hidden_states(
         self,
-        hidden_states: List[mx.array],
+        hidden_states: list[mx.array],
         attention_mask: mx.array,
         padding_side: str = "left",
     ) -> VideoGemmaEncoderOutput:
@@ -166,7 +165,7 @@ class VideoGemmaTextEncoderModel(nn.Module):
         # Process through connector
         encoded, output_mask = self.embeddings_connector(encoded, connector_mask)
 
-        # Note: Caption projection (3840 → 4096) is handled by the transformer model,
+        # Note: Caption projection (3840 -> 4096) is handled by the transformer model,
         # not here. This matches PyTorch where text encoder returns 3840-dim features.
 
         # Convert mask back to binary for output
@@ -209,7 +208,7 @@ class VideoGemmaTextEncoderModel(nn.Module):
             projected_features, connector_mask
         )
 
-        # Note: Caption projection (3840 → 4096) is handled by the transformer model
+        # Note: Caption projection (3840 -> 4096) is handled by the transformer model
 
         # Convert mask back to binary
         binary_mask = (output_mask.squeeze(1).squeeze(1) >= -0.5).astype(mx.int32)
@@ -224,7 +223,7 @@ class VideoGemmaTextEncoderModel(nn.Module):
 
     def __call__(
         self,
-        hidden_states: List[mx.array],
+        hidden_states: list[mx.array],
         attention_mask: mx.array,
         padding_side: str = "left",
     ) -> VideoGemmaEncoderOutput:
@@ -260,9 +259,9 @@ class AudioVideoGemmaTextEncoderModel(nn.Module):
 
     def __init__(
         self,
-        feature_extractor: Optional[nn.Module] = None,
-        embeddings_connector: Optional[Embeddings1DConnector] = None,
-        audio_embeddings_connector: Optional[Embeddings1DConnector] = None,
+        feature_extractor: nn.Module | None = None,
+        embeddings_connector: Embeddings1DConnector | None = None,
+        audio_embeddings_connector: Embeddings1DConnector | None = None,
     ):
         """
         Initialize audio+video text encoder.
@@ -299,7 +298,7 @@ class AudioVideoGemmaTextEncoderModel(nn.Module):
 
     def encode_from_hidden_states(
         self,
-        hidden_states: List[mx.array],
+        hidden_states: list[mx.array],
         attention_mask: mx.array,
         padding_side: str = "left",
     ) -> AudioVideoGemmaEncoderOutput:
@@ -357,7 +356,7 @@ class AudioVideoGemmaTextEncoderModel(nn.Module):
 
     def __call__(
         self,
-        hidden_states: List[mx.array],
+        hidden_states: list[mx.array],
         attention_mask: mx.array,
         padding_side: str = "left",
     ) -> AudioVideoGemmaEncoderOutput:
@@ -390,7 +389,7 @@ def create_text_encoder(
 
     Returns:
         Configured VideoGemmaTextEncoderModel.
-        Note: Output is 3840-dim. Caption projection (3840 → 4096) is handled
+        Note: Output is 3840-dim. Caption projection (3840 -> 4096) is handled
         by the transformer model, matching PyTorch LTX-2 architecture.
     """
     feature_extractor = GemmaFeaturesExtractorProjLinear(
@@ -718,7 +717,7 @@ def create_av_text_encoder_v2(
     audio_connector_head_dim: int = 64,
     connector_layers: int = 8,
     num_registers: int = 128,
-    positional_embedding_max_pos: Optional[List[int]] = None,
+    positional_embedding_max_pos: list[int] | None = None,
     rope_type: LTXRopeType = LTXRopeType.INTERLEAVED,
     connector_apply_gated_attention: bool = True,
     double_precision_rope: bool = False,

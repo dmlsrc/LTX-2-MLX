@@ -1,7 +1,7 @@
 """Guidance strategies for LTX-2 diffusion sampling."""
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Protocol
 
 import mlx.core as mx
 
@@ -171,7 +171,7 @@ class LegacyStatefulAPGGuider:
     eta: float
     norm_threshold: float = 5.0
     momentum: float = 0.0
-    running_avg: Optional[mx.array] = field(default=None, repr=False)
+    running_avg: mx.array | None = field(default=None, repr=False)
 
     def delta(self, cond: mx.array, uncond: mx.array) -> mx.array:
         guidance = cond - uncond
@@ -218,7 +218,7 @@ class MultiModalGuiderParams:
 
     cfg_scale: float = 1.0
     stg_scale: float = 0.0
-    stg_blocks: Optional[list] = field(default_factory=list)
+    stg_blocks: list | None = field(default_factory=list)
     rescale_scale: float = 0.0
     modality_scale: float = 1.0
     skip_step: int = 0
@@ -239,7 +239,7 @@ class MultiModalGuider:
     """
 
     params: MultiModalGuiderParams
-    negative_context: Optional[mx.array] = None
+    negative_context: mx.array | None = None
 
     def calculate(
         self,

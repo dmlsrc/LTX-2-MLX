@@ -3,12 +3,10 @@
 Uses Gemma 3 to enhance user prompts for better video generation.
 """
 
-from typing import Optional
 
 import mlx.core as mx
 import numpy as np
 from PIL import Image
-
 
 # Default system prompts for prompt enhancement
 T2V_SYSTEM_PROMPT = """You are a highly skilled video production expert tasked with transforming simple user prompts into rich, cinematic video descriptions. Your goal is to take the user's basic idea and expand it into a detailed, visually compelling description that would guide a state-of-the-art AI video generator.
@@ -83,7 +81,7 @@ def load_image_for_enhancement(
 
 def create_t2v_chat_prompt(
     user_prompt: str,
-    system_prompt: Optional[str] = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Create a chat prompt for T2V prompt enhancement."""
     system_prompt = system_prompt or T2V_SYSTEM_PROMPT
@@ -99,7 +97,7 @@ def create_t2v_chat_prompt(
 
 def create_i2v_chat_prompt(
     user_prompt: str,
-    system_prompt: Optional[str] = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Create a chat prompt for I2V prompt enhancement (text only, image handled separately)."""
     system_prompt = system_prompt or I2V_SYSTEM_PROMPT
@@ -120,7 +118,7 @@ def enhance_prompt_t2v(
     tokenizer,
     max_new_tokens: int = 256,
     seed: int = 42,
-    system_prompt: Optional[str] = None,
+    system_prompt: str | None = None,
 ) -> str:
     """
     Enhance a text-to-video prompt using Gemma.
@@ -178,7 +176,7 @@ def enhance_prompt_i2v(
     tokenizer,
     max_new_tokens: int = 256,
     seed: int = 42,
-    system_prompt: Optional[str] = None,
+    system_prompt: str | None = None,
 ) -> str:
     """
     Enhance an image-to-video prompt using Gemma.
@@ -339,7 +337,7 @@ def generate_enhanced_prompt(
     gemma_model,
     tokenizer,
     prompt: str,
-    image_path: Optional[str] = None,
+    image_path: str | None = None,
     max_new_tokens: int = 256,
     seed: int = 42,
 ) -> str:

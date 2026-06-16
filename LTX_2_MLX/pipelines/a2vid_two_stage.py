@@ -9,20 +9,12 @@ The original audio waveform is returned as-is (not VAE-decoded) for fidelity.
 
 import gc
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import numpy as np
 
-from .common import (
-    ImageCondition,
-    apply_conditionings,
-    create_image_conditionings,
-    modality_from_state,
-    audio_modality_from_state,
-    maybe_post_process_latent,
-)
 from ..components import (
     STAGE_2_DISTILLED_SIGMA_VALUES,
     EulerDiffusionStep,
@@ -31,29 +23,31 @@ from ..components import (
     VideoLatentPatchifier,
 )
 from ..components.patchifiers import AudioPatchifier
-from ..conditioning.tools import VideoLatentTools, AudioLatentTools
-from ..model.transformer import LTXModel, LTXAVModel, LTXModelType, X0Model
+from ..conditioning.tools import AudioLatentTools, VideoLatentTools
+from ..loader import (
+    LoRAConfig,
+    format_lora_stage_scale_lines,
+    fuse_loras_into_model,
+    get_transformer_cache_restore_state,
+    lora_configs_for_stage,
+    lora_configs_for_stage_delta,
+    restore_transformer_cache_state,
+)
+from ..model.audio_vae import AudioDecoder, Vocoder
+from ..model.transformer import LTXAVModel, LTXModel, LTXModelType, X0Model
+from ..model.upscaler import SpatialUpscaler
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-from ..model.upscaler import SpatialUpscaler
-from ..model.audio_vae import AudioDecoder, Vocoder
-from ..loader import (
-    LoRAConfig,
-    fuse_loras_into_model,
-    format_lora_stage_scale_lines,
-    lora_configs_for_stage,
-    lora_configs_for_stage_delta,
-    restore_transformer_cache_state,
-    get_transformer_cache_restore_state,
-)
-from ..types import (
-    AudioLatentShape,
-    LatentState,
-    VideoLatentShape,
-    VideoPixelShape,
-    NATIVE_FPS
+from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
+from .common import (
+    ImageCondition,
+    apply_conditionings,
+    audio_modality_from_state,
+    create_image_conditionings,
+    maybe_post_process_latent,
+    modality_from_state,
 )
 
 
@@ -71,11 +65,11 @@ class A2VidConfig:
     fps: float = NATIVE_FPS
 
     # LoRA for stage 2 refinement
-    distilled_lora_config: Optional[LoRAConfig] = None
-    stage_lora_configs: Optional[List[LoRAConfig]] = None
+    distilled_lora_config: LoRAConfig | None = None
+    stage_lora_configs: list[LoRAConfig] | None = None
     stage2_lora_fuse_mode: str = "fresh-total"
 
-    tiling_config: Optional[TilingConfig] = None
+    tiling_config: TilingConfig | None = None
     dtype: mx.Dtype = mx.bfloat16
 
     # Audio params
@@ -88,9 +82,9 @@ class A2VidConfig:
 
     # Audio input
     audio_start_time: float = 0.0
-    audio_max_duration: Optional[float] = None
+    audio_max_duration: float | None = None
 
-    def _get_tiling_config(self) -> Optional[TilingConfig]:
+    def _get_tiling_config(self) -> TilingConfig | None:
         if self.tiling_config is not None:
             return self.tiling_config
         latent_frames = (self.num_frames - 1) // 8 + 1
@@ -110,8 +104,8 @@ def load_audio_file(
     audio_path: str,
     target_sr: int = 16000,
     start_time: float = 0.0,
-    max_duration: Optional[float] = None,
-) -> Tuple[np.ndarray, int]:
+    max_duration: float | None = None,
+) -> tuple[np.ndarray, int]:
     """Load audio file and resample to target sample rate.
 
     Args:
@@ -181,12 +175,12 @@ class A2VidPipelineTwoStage:
 
     def __init__(
         self,
-        transformer: Union[LTXModel, LTXAVModel],
+        transformer: LTXModel | LTXAVModel,
         video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
         spatial_upscaler: SpatialUpscaler,
-        audio_decoder: Optional[AudioDecoder] = None,
-        vocoder: Optional[Vocoder] = None,
+        audio_decoder: AudioDecoder | None = None,
+        vocoder: Vocoder | None = None,
     ):
         if isinstance(transformer, X0Model):
             self.transformer = transformer
@@ -289,11 +283,11 @@ class A2VidPipelineTwoStage:
         positive_encoding: mx.array,
         negative_encoding: mx.array,
         config: A2VidConfig,
-        images: Optional[List[ImageCondition]] = None,
-        callback: Optional[Callable[[str, int, int], None]] = None,
-        positive_audio_encoding: Optional[mx.array] = None,
-        negative_audio_encoding: Optional[mx.array] = None,
-    ) -> Tuple[mx.array, np.ndarray, int]:
+        images: list[ImageCondition] | None = None,
+        callback: Callable[[str, int, int], None] | None = None,
+        positive_audio_encoding: mx.array | None = None,
+        negative_audio_encoding: mx.array | None = None,
+    ) -> tuple[mx.array, np.ndarray, int]:
         """
         Generate video from audio file.
 

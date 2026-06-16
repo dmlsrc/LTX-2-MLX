@@ -36,8 +36,8 @@ from ._compat import autorelease_pool, require_pyobjc
 from .audio import AudioTrack
 from .cut_detect import CutDetector
 from .encode import encode_video_videotoolbox
-from .vsr import VsrSession
 from .temporal import VtfrcSession
+from .vsr import VsrSession
 from .writer import AVWriter
 
 __all__ = [

@@ -6,18 +6,13 @@ Uses a two-stage approach:
   Stage 2: Upsample 2x and refine with distilled sigmas
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional
 
 import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from .common import (
-    apply_conditionings,
-    modality_from_state,
-    maybe_post_process_latent,
-)
 from ..components import (
     STAGE_2_DISTILLED_SIGMA_VALUES,
     CFGGuider,
@@ -30,16 +25,16 @@ from ..conditioning.item import ConditioningItem
 from ..conditioning.keyframe import VideoConditionByKeyframeIndex
 from ..conditioning.tools import VideoLatentTools
 from ..model.transformer import LTXModel, X0Model
+from ..model.upscaler import SpatialUpscaler
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
-from ..model.upscaler import SpatialUpscaler
-from ..types import (
-    LatentState,
-    VideoLatentShape,
-    VideoPixelShape,
-    NATIVE_FPS
+from ..types import NATIVE_FPS, LatentState, VideoLatentShape, VideoPixelShape
+from .common import (
+    apply_conditionings,
+    maybe_post_process_latent,
+    modality_from_state,
 )
 
 
@@ -63,7 +58,7 @@ class KeyframeInterpolationConfig:
     stage_2_steps: int = 3  # Refinement steps
 
     # Tiling
-    tiling_config: Optional[TilingConfig] = None
+    tiling_config: TilingConfig | None = None
 
     # Compute settings
     dtype: mx.Dtype = mx.bfloat16
@@ -128,12 +123,12 @@ def load_image_as_tensor(
 
 
 def create_keyframe_conditionings(
-    keyframes: List[Keyframe],
+    keyframes: list[Keyframe],
     video_encoder: NativeConv3dVideoEncoder,
     height: int,
     width: int,
     dtype: mx.Dtype = mx.float32,
-) -> List[ConditioningItem]:
+) -> list[ConditioningItem]:
     """
     Create conditioning items from keyframes.
 
@@ -186,7 +181,7 @@ class KeyframeInterpolationPipeline:
         transformer: LTXModel,
         video_encoder: NativeConv3dVideoEncoder,
         video_decoder: NativeConv3dVideoDecoder,
-        spatial_upscaler: Optional[SpatialUpscaler] = None,
+        spatial_upscaler: SpatialUpscaler | None = None,
     ):
         """
         Initialize the pipeline.
@@ -231,7 +226,7 @@ class KeyframeInterpolationPipeline:
         context_mask_neg: mx.array,
         cfg_guider: CFGGuider,
         stepper: EulerDiffusionStep,
-        callback: Optional[Callable[[int, int], None]] = None,
+        callback: Callable[[int, int], None] | None = None,
     ) -> LatentState:
         """
         Run the denoising loop with CFG.
@@ -298,11 +293,11 @@ class KeyframeInterpolationPipeline:
         self,
         text_encoding: mx.array,
         text_mask: mx.array,
-        keyframes: List[Keyframe],
+        keyframes: list[Keyframe],
         config: KeyframeInterpolationConfig,
-        negative_text_encoding: Optional[mx.array] = None,
-        negative_text_mask: Optional[mx.array] = None,
-        callback: Optional[Callable[[str, int, int], None]] = None,
+        negative_text_encoding: mx.array | None = None,
+        negative_text_mask: mx.array | None = None,
+        callback: Callable[[str, int, int], None] | None = None,
     ) -> mx.array:
         """
         Generate video by interpolating between keyframes.
@@ -503,7 +498,7 @@ def create_keyframe_pipeline(
     transformer: LTXModel,
     video_encoder: NativeConv3dVideoEncoder,
     video_decoder: NativeConv3dVideoDecoder,
-    spatial_upscaler: Optional[SpatialUpscaler] = None,
+    spatial_upscaler: SpatialUpscaler | None = None,
 ) -> KeyframeInterpolationPipeline:
     """
     Create a keyframe interpolation pipeline.

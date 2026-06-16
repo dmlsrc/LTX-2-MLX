@@ -6,7 +6,6 @@ implementations to avoid code duplication.
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import numpy as np
@@ -104,12 +103,12 @@ def load_image_tensor(
 
 
 def create_image_conditionings(
-    images: List[ImageCondition],
+    images: list[ImageCondition],
     video_encoder: NativeConv3dVideoEncoder,
     height: int,
     width: int,
     dtype: mx.Dtype = mx.float32,
-) -> List[ConditioningItem]:
+) -> list[ConditioningItem]:
     """Create canonical image conditionings.
 
     The first frame replaces the latent directly. Non-zero frame indices are
@@ -158,7 +157,7 @@ def create_image_conditionings(
 
 def apply_conditionings(
     latent_state: LatentState,
-    conditionings: List[ConditioningItem],
+    conditionings: list[ConditioningItem],
     video_tools: VideoLatentTools,
 ) -> LatentState:
     """Apply all conditionings to the latent state.
@@ -219,8 +218,8 @@ def modality_from_state(
     context: mx.array,
     sigma: float,
     enabled: bool = True,
-    positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
-    cross_positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
+    positional_embeddings: tuple[mx.array, mx.array] | None = None,
+    cross_positional_embeddings: tuple[mx.array, mx.array] | None = None,
 ) -> Modality:
     """Create a Modality from a latent state.
 
@@ -268,8 +267,8 @@ def audio_modality_from_state(
     context: mx.array,
     sigma: float,
     enabled: bool = True,
-    positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
-    cross_positional_embeddings: Optional[Tuple[mx.array, mx.array]] = None,
+    positional_embeddings: tuple[mx.array, mx.array] | None = None,
+    cross_positional_embeddings: tuple[mx.array, mx.array] | None = None,
 ) -> Modality:
     """Create a Modality from an audio latent state.
 

@@ -59,10 +59,9 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
-
 
 # The 8 transformer sub-ops we instrument, plus event-only markers.
 # Must match the LTX_PHASE() invocations in _signpost.c.
@@ -93,7 +92,7 @@ _SRC = _THIS_DIR / "_signpost.c"
 _LIB = _THIS_DIR / "_signpost.dylib"
 
 # State
-_lib: Optional[ctypes.CDLL] = None
+_lib: ctypes.CDLL | None = None
 _sids: dict[str, int] = {}
 _init_lock = threading.Lock()
 _init_attempted = False
@@ -103,7 +102,7 @@ _init_attempted = False
 # os_signpost categories.  Path comes from LTX_PROFILE_SIGNPOST_LOG env var.
 # Format: one line per event:
 #     <ns_since_epoch> <begin|end> <phase>
-# Timestamps are time.monotonic_ns() — same clock Metal traces use.
+# Timestamps are time.monotonic_ns() - same clock Metal traces use.
 _log_fh = None
 _log_block_counter = 0  # per-process; reset by caller if needed
 
@@ -116,7 +115,7 @@ _log_block_counter = 0  # per-process; reset by caller if needed
 # "Python finished enqueueing".  Without this, signposts fire microseconds
 # apart while GPU work spans seconds and time-based attribution fails.
 #
-# NOTE: mx.synchronize() alone does NOT work — it only waits for ALREADY-
+# NOTE: mx.synchronize() alone does NOT work - it only waits for ALREADY-
 # DISPATCHED GPU work to finish.  Lazy ops that haven't been kicked off
 # to the GPU yet (because nothing has eval'd them) are not affected.
 _sync_mode = False
@@ -147,7 +146,7 @@ def _try_init() -> None:
     """Idempotent.  Builds + loads the dylib, allocates one sid per phase.
 
     Also opens the sidecar log file if LTX_PROFILE_SIGNPOST_LOG is set.
-    The dylib (os_signpost) and the sidecar log are independent — either
+    The dylib (os_signpost) and the sidecar log are independent - either
     or both can be active.
     """
     global _lib, _init_attempted, _log_fh
@@ -213,7 +212,7 @@ def _try_init() -> None:
             _sync_mode = True
             print(
                 "  [LTX_PROFILE_SIGNPOSTS_SYNC] phase-output mx.eval() at "
-                "barrier — slower, but accurate attribution.",
+                "barrier - slower, but accurate attribution.",
                 flush=True,
             )
 
@@ -235,7 +234,7 @@ def signpost(phase: str) -> Iterator[None]:
         return
     sid = _sids.get(phase) if _lib is not None else None
     if _lib is not None and sid is None:
-        # Unknown phase — silently no-op rather than crash a perf run
+        # Unknown phase - silently no-op rather than crash a perf run
         yield
         return
     begin = getattr(_lib, f"ltx_signpost_begin_{phase}", None) if _lib is not None else None
@@ -250,8 +249,8 @@ def signpost(phase: str) -> Iterator[None]:
         # Caller is responsible for calling signpost_barrier(out_array)
         # inside the with block when LTX_PROFILE_SIGNPOSTS_SYNC=1 is set.
         # Without that, this signpost end fires immediately after Python
-        # finishes enqueueing the phase's ops — long before GPU executes
-        # them — and time-based attribution fails.
+        # finishes enqueueing the phase's ops - long before GPU executes
+        # them - and time-based attribution fails.
         if end is not None:
             end(sid)
         if _log_fh is not None:
@@ -297,7 +296,7 @@ def block_event(block_idx: int) -> None:
 
 
 # Eager init at module import.  Without this, _try_init() fires lazily on
-# the first signpost(...) call — which lands inside the denoise loop, in
+# the first signpost(...) call - which lands inside the denoise loop, in
 # the middle of progress-bar output.  The init prints get clobbered by
 # the in-place progress bar.  Running init at import time makes the
 # "[LTX_PROFILE_SIGNPOSTS] loaded ..." prints happen before any pipeline

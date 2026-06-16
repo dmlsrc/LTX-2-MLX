@@ -1,7 +1,6 @@
 """Timestep embeddings for LTX-2 Transformer."""
 
 import math
-from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -93,8 +92,8 @@ class TimestepEmbedding(nn.Module):
         self,
         in_channels: int,
         time_embed_dim: int,
-        out_dim: Optional[int] = None,
-        cond_proj_dim: Optional[int] = None,
+        out_dim: int | None = None,
+        cond_proj_dim: int | None = None,
         bias: bool = True,
     ):
         super().__init__()
@@ -112,7 +111,7 @@ class TimestepEmbedding(nn.Module):
     def __call__(
         self,
         sample: mx.array,
-        condition: Optional[mx.array] = None,
+        condition: mx.array | None = None,
     ) -> mx.array:
         if condition is not None and self.cond_proj is not None:
             sample = sample + self.cond_proj(condition)
@@ -188,7 +187,7 @@ class AdaLayerNormSingle(nn.Module):
         self._linear_weight_t = None
 
     def pretranspose_linear(self) -> list[mx.array]:
-        """Cache mx.contiguous(linear.weight.T) — saves the implicit transpose
+        """Cache mx.contiguous(linear.weight.T) - saves the implicit transpose
         op on every per-step adaln call.  Returns the arrays to ``mx.eval``."""
         if self._linear_weight_t is not None:
             arrays = [self._linear_weight_t]

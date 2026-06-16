@@ -2,8 +2,8 @@
 
 import mlx.core as mx
 
-from LTX_2_MLX.types import LatentState
 from LTX_2_MLX.conditioning.tools import VideoLatentTools
+from LTX_2_MLX.types import LatentState
 
 
 class ConditioningError(Exception):

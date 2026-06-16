@@ -30,17 +30,15 @@ import sys
 import time
 from contextlib import redirect_stderr
 from pathlib import Path
-from typing import Optional
-
 
 # Allow running directly from the repo root without an install.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from LTX_2_MLX.progress import (  # noqa: E402
-    PhaseBar, StackedPhaseBars,
+    PhaseBar,
+    StackedPhaseBars,
 )
 from LTX_2_MLX.progress.bars import _fmt_duration  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Tiny test framework: a failing assert prints a "FAIL" line and bumps the
@@ -99,7 +97,7 @@ def test_first_tick_records_duration() -> None:
         b.close()
 
 
-def _parse_duration(s: str) -> Optional[float]:
+def _parse_duration(s: str) -> float | None:
     """Parse the dashed clock format (`--:--:SS`, `--:MM:SS`, `HH:MM:SS`)
     back to seconds. Substitutes `--` -> `00` then parses HH:MM:SS."""
     s = s.strip().replace("--", "00")

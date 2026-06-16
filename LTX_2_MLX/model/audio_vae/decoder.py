@@ -1,14 +1,12 @@
 """Audio VAE Decoder for LTX-2 MLX."""
 
 from enum import Enum
-from typing import Optional, Tuple, List
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from LTX_2_MLX.components.patchifiers import AudioPatchifier
 from LTX_2_MLX.types import AudioLatentShape
-
 
 LATENT_DOWNSAMPLE_FACTOR = 4
 
@@ -166,7 +164,7 @@ class SimpleResBlock2d(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        out_channels: Optional[int] = None,
+        out_channels: int | None = None,
     ):
         super().__init__()
         out_channels = out_channels or in_channels
@@ -265,7 +263,7 @@ class AudioDecoder(nn.Module):
         self,
         ch: int = 128,
         out_ch: int = 2,
-        ch_mult: Tuple[int, ...] = (1, 2, 4),  # 3 levels
+        ch_mult: tuple[int, ...] = (1, 2, 4),  # 3 levels
         num_res_blocks: int = 3,  # ResBlocks per level (from checkpoint)
         z_channels: int = 8,
         mel_bins: int = 16,  # Latent mel bins (64/4 = 16)
@@ -289,7 +287,7 @@ class AudioDecoder(nn.Module):
         # PyTorch AudioDecoder uses ch (128) for the stats, which equals z_channels * mel_bins
         self.per_channel_statistics = PerChannelStatistics(latent_channels=ch)
 
-        # Patchifier for denormalization pipeline (patchify → denormalize → unpatchify)
+        # Patchifier for denormalization pipeline (patchify -> denormalize -> unpatchify)
         self.patchifier = AudioPatchifier(
             patch_size=1,
             audio_latent_downsample_factor=LATENT_DOWNSAMPLE_FACTOR,
@@ -310,7 +308,7 @@ class AudioDecoder(nn.Module):
 
         # Upsampling path (in reverse order of ch_mult)
         # Build: level 2 (512), level 1 (256), level 0 (128)
-        self.up_blocks: List[dict] = []
+        self.up_blocks: list[dict] = []
         block_in = base_block_channels
 
         for i_level in reversed(range(self.num_resolutions)):
@@ -339,7 +337,7 @@ class AudioDecoder(nn.Module):
         """
         Denormalize decoder latents using per-channel statistics.
 
-        Follows PyTorch pipeline: patchify → denormalize → unpatchify.
+        Follows PyTorch pipeline: patchify -> denormalize -> unpatchify.
         """
         # Build shape info for patchifier
         latent_shape = AudioLatentShape(
@@ -349,7 +347,7 @@ class AudioDecoder(nn.Module):
             mel_bins=sample.shape[3],
         )
 
-        # PyTorch pipeline: patchify → denormalize → unpatchify
+        # PyTorch pipeline: patchify -> denormalize -> unpatchify
         # Patchify: (B, C, T, F) -> (B, T, C*F)
         sample_patched = self.patchifier.patchify(sample)
 

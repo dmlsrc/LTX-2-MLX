@@ -15,7 +15,6 @@ import numpy as np
 
 from ._compat import CoreMedia, Foundation, Quartz, require_pyobjc
 
-
 # FourCC pixel-format constants ----------------------------------------------
 #
 # CV uses big-endian four-character codes packed into a uint32. PIX_BGRA is
@@ -129,7 +128,7 @@ def make_pool_from_attrs(attrs: dict) -> Any | None:
     """Try to create a CVPixelBufferPool for the given attrs; None on failure.
 
     Caller should fall back to make_pixel_buffer_from_attrs if this returns
-    None — some attribute combos don't pool cleanly.
+    None - some attribute combos don't pool cleanly.
     """
     require_pyobjc()
     err, pool = Quartz.CVPixelBufferPoolCreate(None, None, attrs, None)
@@ -151,7 +150,7 @@ def flush_pool(pool: Any) -> None:
     """Release any excess cached buffers in a CVPixelBufferPool.
 
     Pools cache returned buffers for reuse (default age threshold ~1s) and
-    don't expose `kCVPixelBufferPoolAllocationThresholdKey` by default —
+    don't expose `kCVPixelBufferPoolAllocationThresholdKey` by default -
     they grow to whatever peak buffer count the workload demands and stay
     there. For long runs that's a memory leak from the user's perspective.
     Calling `CVPixelBufferPoolFlush` with `kCVPixelBufferPoolFlushExcessBuffers`
@@ -231,7 +230,7 @@ def upload_frame_to_buffer(frame: np.ndarray, pb: Any) -> None:
 
     The NV12 destination always goes through CoreImage so the sRGB->BT.709
     YUV conversion is correct. CIImage's source format is RGBA8 for uint8
-    input and RGBAh for fp16 input — using RGBAh defers quantization to
+    input and RGBAh for fp16 input - using RGBAh defers quantization to
     CIContext's render pass so the single 8-bit cast happens in YUV space
     rather than once in RGB and once in YUV.
 
