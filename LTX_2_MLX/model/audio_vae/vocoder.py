@@ -4,7 +4,6 @@ import math
 
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
 
 LRELU_SLOPE = 0.1
 
@@ -280,7 +279,12 @@ class UpSample1d(nn.Module):
         self._checkpoint_filter_loaded = False
 
         if window_type == "hann":
-            # Hann-windowed sinc filter (matches torchaudio.functional.resample)
+            # Hann-windowed sinc filter (matches torchaudio.functional.resample).
+            # Built once at init in float64 via the stdlib math module, then frozen
+            # to float32. math.sin/cos are true double precision (libm); MLX sin/cos
+            # are float32-only even on float64 inputs, so they cannot reproduce these
+            # taps. The kernel is ~29 elements computed once, so the scalar Python
+            # loop has no measurable cost.
             rolloff = 0.99
             lowpass_filter_width = 6
             width = math.ceil(lowpass_filter_width / rolloff)
@@ -289,22 +293,19 @@ class UpSample1d(nn.Module):
             self.pad_left = 2 * width * ratio
             self.pad_right = self.kernel_size - ratio
 
-            time_axis = np.arange(self.kernel_size) / ratio - width
-            time_axis_rolloff = time_axis * rolloff
-            time_clamped = np.clip(
-                time_axis_rolloff, -lowpass_filter_width, lowpass_filter_width
-            )
-            window = np.cos(time_clamped * math.pi / lowpass_filter_width / 2) ** 2
-            # Use safe division to avoid RuntimeWarning: invalid value in divide
-            # (np.where evaluates both branches before masking)
-            safe_denom = np.where(time_axis_rolloff == 0, 1.0, np.pi * time_axis_rolloff)
-            sinc_vals = np.where(
-                time_axis_rolloff == 0,
-                1.0,
-                np.sin(np.pi * time_axis_rolloff) / safe_denom,
-            )
-            sinc_filter = (sinc_vals * window * rolloff / ratio).reshape(1, 1, -1)
-            self.filter = mx.array(sinc_filter.astype(np.float32))
+            taps: list[float] = []
+            for n in range(self.kernel_size):
+                t_rolloff = (n / ratio - width) * rolloff
+                t_clamped = max(
+                    -lowpass_filter_width, min(lowpass_filter_width, t_rolloff)
+                )
+                window = math.cos(t_clamped * math.pi / lowpass_filter_width / 2) ** 2
+                if t_rolloff == 0.0:
+                    sinc = 1.0
+                else:
+                    sinc = math.sin(math.pi * t_rolloff) / (math.pi * t_rolloff)
+                taps.append(sinc * window * rolloff / ratio)
+            self.filter = mx.array(taps, dtype=mx.float32).reshape(1, 1, -1)
             self._checkpoint_filter_loaded = True
         elif window_type == "checkpoint":
             self.kernel_size = (
