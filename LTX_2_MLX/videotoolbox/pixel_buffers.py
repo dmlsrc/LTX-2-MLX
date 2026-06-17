@@ -198,16 +198,25 @@ def _frame_is_fp16(frame: Any) -> bool:
     return str(frame.dtype).split(".")[-1] == "float16"
 
 
-def _frame_bytes(frame: Any) -> bytes:
-    """Contiguous raw bytes of a frame (numpy or mlx), straight from its buffer.
+def _frame_buffer(frame: Any) -> memoryview:
+    """A contiguous uint8-format memoryview over a frame's bytes, no copy.
 
-    numpy goes through tobytes(); mlx through the buffer protocol via memoryview,
-    so no numpy is needed to extract the bytes.
+    mlx arrays go through the buffer protocol (mx.contiguous + memoryview); a
+    contiguous numpy array returns a zero-copy view of its buffer. This lets the
+    caller memcpy straight from the array's (unified) memory into an IOSurface
+    plane instead of materializing an intermediate ``bytes`` object first.
     """
-    tobytes = getattr(frame, "tobytes", None)
-    if callable(tobytes):
-        return tobytes()  # numpy ndarray
-    return bytes(memoryview(mx.contiguous(frame)))  # mlx array
+    if isinstance(frame, mx.array):
+        return memoryview(mx.contiguous(frame)).cast("B")
+    mv = memoryview(frame)
+    if mv.c_contiguous:
+        return mv.cast("B")
+    return memoryview(frame.tobytes())  # non-contiguous numpy fallback
+
+
+def _frame_bytes(frame: Any) -> bytes:
+    """Raw bytes of a frame (copies; for the NSData/CoreImage path that copies anyway)."""
+    return bytes(_frame_buffer(frame))
 
 
 def write_fp16_rgba(rgba_fp16: Any, pb: Any) -> None:
@@ -220,7 +229,10 @@ def write_fp16_rgba(rgba_fp16: Any, pb: Any) -> None:
     """
     require_pyobjc()
     h, w = int(rgba_fp16.shape[0]), int(rgba_fp16.shape[1])
-    src = _frame_bytes(rgba_fp16)
+    # Zero-copy view of the frame's buffer; the single mv[:] = src memcpy below
+    # goes straight from MLX's unified memory into the IOSurface plane, with no
+    # intermediate bytes object.
+    src = _frame_buffer(rgba_fp16)
     row = w * 8
     Quartz.CVPixelBufferLockBaseAddress(pb, 0)
     try:
