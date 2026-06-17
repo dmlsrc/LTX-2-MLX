@@ -24,12 +24,7 @@ These tests validate individual components without requiring model weights:
   - Full SpatialUpscaler and TemporalUpscaler pipelines
   - Numerical stability verification (prevents res-block explosion)
 
-- **test_parity_structure.py** (5 tests) - Parity verification with PyTorch reference
-  - LTXModel structural correctness (RoPE type, merged classes)
-  - BasicAVTransformerBlock features (Cross-Attention scale)
-  - Component initialization checks (verified against LTX-2 Technical Report)
-
-**Total unit tests: 60**
+**Total unit tests: 55**
 **Execution time: ~2 seconds**
 
 ### Integration Tests (Slow, Requires Weights)

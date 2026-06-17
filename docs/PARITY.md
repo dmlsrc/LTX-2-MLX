@@ -299,35 +299,19 @@ Lightricks has shipped two pipeline-level features since our V2.3 baseline that 
 | **HDR IC-LoRA pipeline** | `packages/ltx-pipelines/src/ltx_pipelines/hdr_ic_lora.py` (~886 lines, April 23) | Whole new pipeline class for HDR-aware image-conditioned LoRA generation.  Substantial port effort. |
 | **Color conversion module** | `packages/ltx-pipelines/src/ltx_pipelines/utils/color_conversion.py` (~224 lines, May 11) | BT.709 / BT.2020 colorimetry for HDR output.  If a user reports "MLX output looks slightly washed out vs ComfyUI" this is likely the cause. |
 
-## Running Parity Tests
+## Status of the Parity Harness
 
-### Generate PyTorch Checkpoints
+The executable PyTorch-checkpoint harness this document originally described - a
+`generate_pytorch_checkpoints.py` generator plus a `test_parity.py` comparison
+suite - has been removed. Producing the golden checkpoints requires running the
+PyTorch LTX reference, which does not run on macOS, so the suite only ever
+skipped here, and it was still pinned to the retired 19B architecture.
 
-```bash
-# Requires LTX-2-PyTorch installation
-cd ~/Developer/LTX-2-PyTorch
-python scripts/generate_pytorch_checkpoints.py \
-    --prompt "A golden retriever running through a meadow" \
-    --height 128 --width 128 \
-    --frames 17 --steps 8 \
-    --seed 42 \
-    --output-dir /tmp/pytorch_parity_checkpoints
-```
-
-### Run MLX Comparison
-
-```bash
-cd ~/Developer/LTX-2-MLX
-python scripts/compare_inference.py \
-    --pytorch-dir /tmp/pytorch_parity_checkpoints
-```
-
-### Run Pytest Suite
-
-```bash
-pytest tests/test_parity_structure.py -v
-pytest tests/test_pipelines.py -v
-```
+The parity findings above remain the record of how MLX was validated against
+PyTorch. Ongoing, runnable parity checks now compare against independent in-repo
+references instead of the PyTorch reference - see `tests/test_fused_ops.py`
+(fused kernels vs plain-MLX) and `tests/test_spatial_upscaler.py` (vs a
+NumPy/einops reference).
 
 ## Interpreting Results
 
