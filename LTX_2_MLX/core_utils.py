@@ -47,18 +47,18 @@ def to_velocity(
     Returns:
         Velocity prediction.
     """
-    # Convert sigma to scalar if it's an array
     if isinstance(sigma, mx.array):
-        sigma = float(sigma.item())
-
-    if sigma == 0:
-        raise ValueError("Sigma can't be 0.0")
+        sigma_val = sigma.astype(mx.float32)
+    else:
+        if sigma == 0:
+            raise ValueError("Sigma can't be 0.0")
+        sigma_val = sigma
 
     # Compute in float32 for stability
     sample_f32 = sample.astype(mx.float32)
     denoised_f32 = denoised_sample.astype(mx.float32)
 
-    return (sample_f32 - denoised_f32) / sigma
+    return (sample_f32 - denoised_f32) / sigma_val
 
 
 def to_denoised(
