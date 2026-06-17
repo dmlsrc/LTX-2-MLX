@@ -34,7 +34,6 @@ from .res2s import get_res2s_coefficients, phi
 from .schedulers import (
     DISTILLED_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
-    BetaScheduler,
     LinearQuadraticScheduler,
     LTX2Scheduler,
     get_sigma_schedule,
@@ -44,7 +43,6 @@ __all__ = [
     # Schedulers
     "LTX2Scheduler",
     "LinearQuadraticScheduler",
-    "BetaScheduler",
     "DISTILLED_SIGMA_VALUES",
     "STAGE_2_DISTILLED_SIGMA_VALUES",
     "get_sigma_schedule",

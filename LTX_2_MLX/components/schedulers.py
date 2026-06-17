@@ -1,7 +1,6 @@
 """Sigma schedule generators for LTX-2 diffusion sampling."""
 
 import math
-from functools import lru_cache
 from typing import Protocol
 
 import mlx.core as mx
@@ -162,70 +161,6 @@ class LinearQuadraticScheduler:
         sigma_schedule = [1.0 - x for x in sigma_schedule]
 
         return mx.array(sigma_schedule, dtype=mx.float32)
-
-
-class BetaScheduler:
-    """
-    Scheduler using a beta distribution to sample timesteps.
-
-    Based on: https://arxiv.org/abs/2407.12173
-    """
-
-    shift = 2.37
-    timesteps_length = 10000
-
-    def execute(
-        self, steps: int, alpha: float = 0.6, beta: float = 0.6, **_kwargs
-    ) -> mx.array:
-        """
-        Execute the beta scheduler.
-
-        Args:
-            steps: The number of steps to execute the scheduler for.
-            alpha: The alpha parameter for the beta distribution.
-            beta: The beta parameter for the beta distribution.
-
-        Note:
-            The number of steps within `sigmas` theoretically might be less
-            than `steps+1`, because of the deduplication of identical timesteps.
-
-        Returns:
-            A tensor of sigmas.
-        """
-        try:
-            import numpy as np
-            import scipy.stats
-        except ImportError as exc:
-            raise ImportError(
-                "BetaScheduler requires numpy and scipy. Install with: pip install scipy"
-            ) from exc
-
-        model_sampling_sigmas = _precalculate_model_sampling_sigmas(
-            self.shift, self.timesteps_length
-        )
-        total_timesteps = len(model_sampling_sigmas) - 1
-
-        # Use numpy for beta distribution sampling
-        ts = 1 - np.linspace(0, 1, steps, endpoint=False)
-        ts = np.rint(scipy.stats.beta.ppf(ts, alpha, beta) * total_timesteps).tolist()
-
-        # Deduplicate while preserving order
-        ts = list(dict.fromkeys(ts))
-
-        sigmas = [float(model_sampling_sigmas[int(t)]) for t in ts] + [0.0]
-
-        return mx.array(sigmas, dtype=mx.float32)
-
-
-@lru_cache(maxsize=5)
-def _precalculate_model_sampling_sigmas(
-    shift: float, timesteps_length: int
-) -> tuple[float, ...]:
-    """Precalculate model sampling sigmas with caching."""
-    return tuple(
-        flux_time_shift(shift, 1.0, timestep / timesteps_length)
-        for timestep in range(1, timesteps_length + 1)
-    )
 
 
 def flux_time_shift(mu: float, sigma: float, t: float) -> float:
