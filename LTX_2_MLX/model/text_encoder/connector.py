@@ -135,7 +135,7 @@ class Embeddings1DConnector(nn.Module):
             rope_type: Type of RoPE.
             norm_eps: Epsilon for normalization.
             apply_gated_attention: Enable per-head gating (V2).
-            double_precision_rope: Use host float64 math for RoPE frequency
+            double_precision_rope: Use MLX CPU float64 math for RoPE frequency
                 computation before casting to float32. Required for V2.3.
         """
         super().__init__()

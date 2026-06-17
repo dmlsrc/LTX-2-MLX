@@ -90,18 +90,18 @@ def apply_split_rotary_emb(
 
 
 @lru_cache(maxsize=5)
-def generate_freq_grid_float64_host(
+def generate_freq_grid_float64_cpu(
     positional_embedding_theta: float,
     positional_embedding_max_pos_count: int,
     inner_dim: int,
 ) -> mx.array:
     """
-    Generate the frequency grid with host float64 math, returning float32.
+    Generate the frequency grid with MLX CPU float64 math, returning float32.
 
-    MLX does not support float64 on the GPU, and its CPU float64 elementary
-    functions are not bit-identical to the historical NumPy implementation
-    after the final float32 cast.  Keep this tiny cached parity island in
-    Python's host float math so LTX-2.3 RoPE frequencies stay unchanged.
+    MLX does not support float64 on the GPU. Keep every constant in this
+    computation as an explicit CPU float64 array; Python scalar literals can
+    otherwise be folded through a lower-precision path and change the final
+    float32 grid.
 
     Args:
         positional_embedding_theta: Base theta value.
@@ -111,24 +111,25 @@ def generate_freq_grid_float64_host(
     Returns:
         Frequency indices array.
     """
-    theta = positional_embedding_theta
-    start = 1.0
-    end = float(theta)
-
     n_elem = 2 * positional_embedding_max_pos_count
-    log_start = math.log(start) / math.log(theta)
-    log_end = math.log(end) / math.log(theta)
     num_indices = inner_dim // n_elem
 
     if num_indices <= 0:
         return mx.array([], dtype=mx.float32)
-    if num_indices == 1:
-        exponents = (log_start,)
-    else:
-        step = (log_end - log_start) / (num_indices - 1)
-        exponents = (log_start + step * i for i in range(num_indices))
 
-    values = [math.pow(theta, exponent) * (math.pi / 2) for exponent in exponents]
+    old_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        theta = mx.array(positional_embedding_theta, dtype=mx.float64)
+        pi_over_two = mx.array(math.pi / 2, dtype=mx.float64)
+        start = mx.array(0.0, dtype=mx.float64)
+        end = mx.array(1.0, dtype=mx.float64)
+        exponents = mx.linspace(start, end, num_indices, dtype=mx.float64)
+        values = (mx.power(theta, exponents) * pi_over_two).astype(mx.float32)
+        mx.eval(values)
+    finally:
+        mx.set_default_device(old_device)
+
     return mx.array(values, dtype=mx.float32)
 
 
@@ -305,7 +306,7 @@ def precompute_freqs_cis(
         use_middle_indices_grid: If True, use middle of position bounds.
         num_attention_heads: Number of attention heads.
         rope_type: Type of RoPE.
-        use_double_precision: Use host float64 math for frequency grid
+        use_double_precision: Use MLX CPU float64 math for frequency grid
             computation before casting to float32. Required for V2.3.
 
     Returns:
@@ -317,7 +318,7 @@ def precompute_freqs_cis(
     # Generate frequency indices
     n_pos_dims = indices_grid.shape[1]
     if use_double_precision:
-        indices = generate_freq_grid_float64_host(theta, n_pos_dims, dim)
+        indices = generate_freq_grid_float64_cpu(theta, n_pos_dims, dim)
     else:
         indices = generate_freq_grid(theta, n_pos_dims, dim)
 
