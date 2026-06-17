@@ -5,7 +5,7 @@ Built originally to diagnose the "loud click at t=0" sequence-start
 spike that LTX-2.3 AV produces on *some* clips (dialog-heavy prompts
 in particular - see `docs/AUDIO_ISSUES.md` -> "Sequence-Start Audio
 Spike" for the dialog-vs-ambient comparison).  The tool is generic:
-any LTX-2 audio output sidecar pair (decoded WAV + latent NPZ) can
+any LTX-2 audio output sidecar pair (decoded WAV + latent sidecar) can
 be passed in, and it reports whether the head of the clip has
 anomalously high energy relative to the rest, in both the time
 domain and in the latent.
@@ -20,17 +20,17 @@ don't.
 Inputs
 ------
 Point the script at any LTX-2-MLX run by giving it a path whose stem
-is shared by the run's sidecars; the script derives `.wav` and `.npz`
+is shared by the run's sidecars; the script derives the `.wav` and latent sidecar
 from that stem.
 
     scripts/analyze_audio_onset.py \\
         --run $DIFFUSERS_OUTPUT_DIR/<stem>.mp4
 
-Equivalently, pass the WAV or NPZ directly:
+Equivalently, pass the WAV or the latent sidecar directly:
 
     scripts/analyze_audio_onset.py --run $DIFFUSERS_OUTPUT_DIR/<stem>.wav
 
-If the latents NPZ isn't present (e.g. the run wasn't launched with
+If the latent sidecar isn't present (e.g. the run wasn't launched with
 `--save-latents` / `--save-all-sidecars`), only the WAV analysis runs.
 
 What it prints
@@ -43,7 +43,7 @@ What it prints
    (defaults: 5 ms windows, 120 ms window).  Useful for localizing
    transient attacks to within a single AV frame's worth of audio.
 4. Per-frame latent profile - for each audio-latent key found in the
-   NPZ (`final_audio_latent`, and on distilled two-stage runs also
+   sidecar (`final_audio_latent`, and on distilled two-stage runs also
    `stage_1_audio_latent` / `stage_2_audio_latent`), prints per-frame
    RMS / max-abs / energy-vs-median ratio for the first K latent
    frames (default 30, which spans ~1.2 s at LTX-2.3's 25 fps_lat).
@@ -124,10 +124,10 @@ DEFAULT_SPIKE_THRESHOLD = DEFAULT_DETECT_THRESHOLD_RATIO  # first-window RMS / g
 # ---------------------------------------------------------------------------
 
 def resolve_sidecars(run_path: Path) -> tuple[Path, Path | None]:
-    """Given any sidecar path (.mp4 / .wav / .npz), derive the WAV + NPZ.
+    """Given any sidecar path (.mp4 / .wav / .npz / .safetensors), derive the WAV + latent sidecar.
 
-    Returns (wav_path, npz_path_or_None).  The WAV is required; the NPZ
-    is optional.  Raises SystemExit with a clear message if the WAV is
+    Returns (wav_path, latent_sidecar_or_None).  The WAV is required;
+    the latent sidecar is optional.  Raises SystemExit with a clear message if the WAV is
     missing.
     """
     stem_base = run_path.with_suffix("")
@@ -255,19 +255,19 @@ def _quantile(values: mx.array, q: float) -> float:
 
 
 def report_audio_latents(
-    npz: Path, latent_frames: int, duration_s: float,
+    latent_sidecar: Path, latent_frames: int, duration_s: float,
 ) -> None:
     """Print per-frame audio-latent statistics for any audio latent keys
-    found in the NPZ.  Handles both single-stage runs and distilled
+    found in the sidecar.  Handles both single-stage runs and distilled
     two-stage runs (which expose stage_1 / stage_2 / final keys).
     """
-    print(f"\nNPZ: {npz}")
-    arrays, _metadata = load_sidecar(str(npz))
+    print(f"\nLatents: {latent_sidecar}")
+    arrays, _metadata = load_sidecar(str(latent_sidecar))
     # load_sidecar returns native MLX arrays; cast to float32 for the stats math.
     d = {k: v.astype(mx.float32) for k, v in arrays.items()}
     audio_keys = [k for k in d if "audio_latent" in k]
     if not audio_keys:
-        print("  (no audio-latent keys found in NPZ)")
+        print("  (no audio-latent keys found in the sidecar)")
         return
     # Order: final / stage_2 / stage_1 / anything else, so the comparison
     # progresses from "what the vocoder actually saw" backward through
@@ -324,8 +324,8 @@ def main() -> int:
     p.add_argument(
         "--run", required=True,
         help=(
-            "Path to any sidecar from the run (.mp4 / .wav / .npz).  "
-            "Sibling .wav and .npz are auto-resolved from the stem."
+            "Path to any sidecar from the run (.mp4, .wav, or the latent .npz/.safetensors).  "
+            "The sibling .wav and latent sidecar are auto-resolved from the stem."
         ),
     )
     p.add_argument(
@@ -365,7 +365,7 @@ def main() -> int:
     args = p.parse_args()
 
     run_path = Path(args.run)
-    wav_path, npz_path = resolve_sidecars(run_path)
+    wav_path, latent_sidecar = resolve_sidecars(run_path)
 
     samples, sr = read_wav(wav_path)
     report_wav_summary(samples, sr, wav_path)
@@ -384,11 +384,11 @@ def main() -> int:
     )
 
     duration_s = samples.shape[0] / sr
-    if npz_path is not None:
-        report_audio_latents(npz_path, args.latent_frames, duration_s)
+    if latent_sidecar is not None:
+        report_audio_latents(latent_sidecar, args.latent_frames, duration_s)
     else:
         print(
-            "\n(no .npz sidecar next to the WAV - re-run with "
+            "\n(no latent sidecar next to the WAV - re-run with "
             "--save-latents / --save-all-sidecars to also see latent stats)"
         )
 
