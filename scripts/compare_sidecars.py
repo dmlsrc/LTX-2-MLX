@@ -31,9 +31,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+import mlx.core as mx
 
-# Run as scripts/compare_npz_sidecars.py: put the repo root on the path so the
+# Run as scripts/compare_sidecars.py: put the repo root on the path so the
 # centralized sidecar loader (which transparently handles both the npz and
 # safetensors backends) is importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -128,43 +128,39 @@ def _adjacent_run_log_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}_run.json")
 
 
-def _is_numeric(array: np.ndarray) -> bool:
-    return np.issubdtype(array.dtype, np.number) or np.issubdtype(array.dtype, np.bool_)
-
-
 def _key_width(keys: Iterable[str]) -> int:
     return max([MIN_KEY_WIDTH, *(len(key) for key in keys)])
 
 
-def _dtype_label(dtype: np.dtype) -> str:
-    if np.issubdtype(dtype, np.str_):
-        return "str"
-    if np.issubdtype(dtype, np.bytes_):
-        return "bytes"
-    return str(dtype)
+def _dtype_label(arr: mx.array) -> str:
+    return str(arr.dtype).replace("mlx.core.", "")
 
 
-def _array_descriptor(array: np.ndarray) -> str:
-    dtype = _dtype_label(array.dtype)
-    if array.shape == ():
-        return f"scalar[{dtype}]"
-    return f"shape={array.shape} dtype={dtype}"
+def _array_descriptor(arr: mx.array) -> str:
+    if arr.ndim == 0:
+        return f"scalar[{_dtype_label(arr)}]"
+    return f"shape={tuple(arr.shape)} dtype={_dtype_label(arr)}"
 
 
-def _pair_descriptor(left: np.ndarray, right: np.ndarray) -> str:
-    left_desc = _array_descriptor(left)
-    right_desc = _array_descriptor(right)
+def _value_descriptor(value: object) -> str:
+    if isinstance(value, mx.array):
+        return _array_descriptor(value)
+    return f"str[len={len(str(value))}]"
+
+
+def _pair_descriptor(left: object, right: object) -> str:
+    left_desc = _value_descriptor(left)
+    right_desc = _value_descriptor(right)
     if left_desc == right_desc:
         return left_desc
     return f"left={left_desc} right={right_desc}"
 
 
 def _scalar_repr(value: Any) -> str:
-    if isinstance(value, np.ndarray):
-        if value.shape == ():
-            value = value.item()
-        else:
-            return f"array(shape={value.shape}, dtype={value.dtype})"
+    if isinstance(value, mx.array):
+        if value.ndim == 0:
+            return str(value.item())
+        return f"array(shape={tuple(value.shape)}, dtype={_dtype_label(value)})"
     return str(value)
 
 
@@ -198,65 +194,48 @@ def _print_wrapped_field(
         print(continuation + line)
 
 
-def _safe_float_array(array: np.ndarray) -> np.ndarray:
-    if np.issubdtype(array.dtype, np.bool_):
-        return array.astype(np.float64)
-    if np.issubdtype(array.dtype, np.integer):
-        return array.astype(np.float64)
-    if np.issubdtype(array.dtype, np.floating):
-        return array.astype(np.float64)
-    if np.issubdtype(array.dtype, np.complexfloating):
-        return array.astype(np.complex128)
-    raise TypeError(f"cannot convert dtype {array.dtype} to float stats")
-
-
-def _cosine(a: np.ndarray, b: np.ndarray) -> float:
-    a_flat = a.reshape(-1)
-    b_flat = b.reshape(-1)
-    if np.iscomplexobj(a_flat) or np.iscomplexobj(b_flat):
-        dot = np.vdot(a_flat, b_flat)
-        a_norm = np.sqrt(np.vdot(a_flat, a_flat).real)
-        b_norm = np.sqrt(np.vdot(b_flat, b_flat).real)
-        if a_norm == 0 or b_norm == 0:
-            return 1.0 if a_norm == b_norm else math.nan
-        return float((dot / (a_norm * b_norm)).real)
-    a_norm = np.linalg.norm(a_flat)
-    b_norm = np.linalg.norm(b_flat)
+def _cosine(a: mx.array, b: mx.array) -> float:
+    a_flat = a.reshape(-1).astype(mx.float32)
+    b_flat = b.reshape(-1).astype(mx.float32)
+    a_norm = float(mx.sqrt(mx.sum(a_flat * a_flat)).item())
+    b_norm = float(mx.sqrt(mx.sum(b_flat * b_flat)).item())
     if a_norm == 0 or b_norm == 0:
         return 1.0 if a_norm == b_norm else math.nan
-    return float(np.dot(a_flat, b_flat) / (a_norm * b_norm))
+    return float(mx.sum(a_flat * b_flat).item() / (a_norm * b_norm))
 
 
-def _compare_numeric(
+def _compare_array(
     name: str,
-    left: np.ndarray,
-    right: np.ndarray,
+    left: mx.array,
+    right: mx.array,
     *,
     key_width: int,
     colors: Colors,
 ) -> CompareResult:
-    exact = bool(np.array_equal(left, right))
     if left.shape != right.shape:
         print(
             f"{name:<{key_width}} "
-            f"{_exact_status(exact, colors=colors, comparable=False)} "
+            f"{_exact_status(False, colors=colors, comparable=False)} "
             f"{colors.red('shape_mismatch')} "
             f"left={_array_descriptor(left)} right={_array_descriptor(right)}"
         )
         return CompareResult(name, exact=False, comparable=False)
 
-    left_f = _safe_float_array(left)
-    right_f = _safe_float_array(right)
-    delta = left_f - right_f
-    abs_delta = np.abs(delta)
-    max_abs = float(abs_delta.max()) if abs_delta.size else 0.0
-    mean_abs = float(abs_delta.mean()) if abs_delta.size else 0.0
-    rms_abs = float(np.sqrt(np.mean(abs_delta * abs_delta))) if abs_delta.size else 0.0
-    denom = np.maximum(np.abs(right_f), 1e-9)
-    max_rel = float((abs_delta / denom).max()) if abs_delta.size else 0.0
-    cos = _cosine(left_f, right_f)
-    nonfinite_left = int((~np.isfinite(left_f)).sum())
-    nonfinite_right = int((~np.isfinite(right_f)).sum())
+    exact = bool(mx.all(left == right).item())
+    left_f = left.astype(mx.float32)
+    right_f = right.astype(mx.float32)
+    abs_delta = mx.abs(left_f - right_f)
+    if left_f.size:
+        max_abs = float(mx.max(abs_delta).item())
+        mean_abs = float(mx.mean(abs_delta).item())
+        rms_abs = float(mx.sqrt(mx.mean(abs_delta * abs_delta)).item())
+        denom = mx.maximum(mx.abs(right_f), 1e-9)
+        max_rel = float(mx.max(abs_delta / denom).item())
+    else:
+        max_abs = mean_abs = rms_abs = max_rel = 0.0
+    cos = 1.0 if exact else _cosine(left_f, right_f)
+    nonfinite_left = int(mx.sum(mx.logical_or(mx.isnan(left_f), mx.isinf(left_f)).astype(mx.int32)).item())
+    nonfinite_right = int(mx.sum(mx.logical_or(mx.isnan(right_f), mx.isinf(right_f)).astype(mx.int32)).item())
 
     print(
         f"{name:<{key_width}} {_exact_status(exact, colors=colors)} "
@@ -271,17 +250,26 @@ def _compare_numeric(
 
 def _compare_value(
     name: str,
-    left: np.ndarray,
-    right: np.ndarray,
+    left: object,
+    right: object,
     *,
     key_width: int,
     wrap_width: int | None,
     colors: Colors,
 ) -> CompareResult:
-    exact = bool(np.array_equal(left, right))
-    if left.shape == right.shape and _is_numeric(left) and _is_numeric(right):
-        return _compare_numeric(name, left, right, key_width=key_width, colors=colors)
+    left_is_array = isinstance(left, mx.array)
+    right_is_array = isinstance(right, mx.array)
+    if left_is_array and right_is_array:
+        return _compare_array(name, left, right, key_width=key_width, colors=colors)
+    if left_is_array != right_is_array:
+        print(
+            f"{name:<{key_width}} "
+            f"{_exact_status(False, colors=colors, comparable=False)} "
+            f"{colors.red('type_mismatch')} {_pair_descriptor(left, right)}"
+        )
+        return CompareResult(name, exact=False, comparable=False)
 
+    exact = left == right
     print(
         f"{name:<{key_width}} {_exact_status(exact, colors=colors)} "
         f"{_pair_descriptor(left, right)}"
@@ -305,41 +293,34 @@ def _resolve_keys(
     return sorted(keys)
 
 
-def _load_sidecar_as_numpy(path: Path) -> dict[str, np.ndarray]:
-    """Load a sidecar via the centralized loader and return a NumPy-keyed dict.
+def _load(path: Path) -> dict[str, object]:
+    """Load a sidecar through the centralized loader and merge its native MLX
+    arrays with its string metadata into one comparable namespace.
 
-    The comparison math below is NumPy, so each MLX array is converted once.
-    bf16 has no NumPy dtype, so widen it to float32 (which is also what the npz
-    backend stored on disk) before the stats code touches it. The ``_mlx_dtype``
-    tags and string metadata come back through ``load_sidecar``'s metadata dict,
-    so they remain comparable keys exactly as the raw npz exposed them.
+    ``load_sidecar`` already normalizes either on-disk format to native dtypes
+    (bf16 restored) plus a string metadata dict (pipeline tag, ``*_mlx_dtype``,
+    prompts), so the comparison operates on MLX arrays and strings directly -
+    no NumPy, no re-widening.
     """
-    import mlx.core as mx
-
     arrays, metadata = load_sidecar(str(path))
-    out: dict[str, np.ndarray] = {}
-    for key, value in arrays.items():
-        if value.dtype == mx.bfloat16:
-            value = value.astype(mx.float32)
-        out[key] = np.array(value)
-    for key, value in metadata.items():
-        out[key] = np.array(value)
-    return out
+    merged: dict[str, object] = dict(arrays)
+    merged.update(metadata)
+    return merged
 
 
-def _npz_selected_keys(
+def _selected_keys(
     left_path: Path,
     right_path: Path,
     *,
     keys: list[str] | None,
     include_missing: bool,
 ) -> list[str]:
-    left = _load_sidecar_as_numpy(left_path)
-    right = _load_sidecar_as_numpy(right_path)
+    left = _load(left_path)
+    right = _load(right_path)
     return _resolve_keys(left.keys(), right.keys(), keys, include_missing)
 
 
-def compare_npz(
+def compare_sidecar(
     left_path: Path,
     right_path: Path,
     *,
@@ -354,8 +335,8 @@ def compare_npz(
     _print_wrapped_field("left", left_path, indent="", wrap_width=wrap_width)
     _print_wrapped_field("right", right_path, indent="", wrap_width=wrap_width)
 
-    left = _load_sidecar_as_numpy(left_path)
-    right = _load_sidecar_as_numpy(right_path)
+    left = _load(left_path)
+    right = _load(right_path)
     selected_keys = _resolve_keys(left.keys(), right.keys(), keys, include_missing)
     if not selected_keys:
         print("No comparable keys.")
@@ -458,7 +439,7 @@ def main() -> int:
         "--keys",
         nargs="+",
         default=None,
-        help="Specific NPZ keys to compare. Defaults to all common keys.",
+        help="Specific keys to compare. Defaults to all common keys.",
     )
     parser.add_argument(
         "--include-missing",
@@ -514,7 +495,7 @@ def main() -> int:
     right_run_log = args.right_run_log or _adjacent_run_log_path(args.right)
 
     key_groups = [
-        _npz_selected_keys(
+        _selected_keys(
             args.left,
             args.right,
             keys=args.keys,
@@ -523,7 +504,7 @@ def main() -> int:
     ]
     if args.with_text:
         key_groups.append(
-            _npz_selected_keys(
+            _selected_keys(
                 left_text,
                 right_text,
                 keys=None,
@@ -536,7 +517,7 @@ def main() -> int:
 
     results: list[CompareResult] = []
     results.extend(
-        compare_npz(
+        compare_sidecar(
             args.left,
             args.right,
             label="latents",
@@ -550,7 +531,7 @@ def main() -> int:
 
     if args.with_text:
         results.extend(
-            compare_npz(
+            compare_sidecar(
                 left_text,
                 right_text,
                 label="text conditioning",
