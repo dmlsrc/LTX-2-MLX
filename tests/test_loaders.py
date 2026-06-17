@@ -1,6 +1,5 @@
 """Tests for loader module: weight conversion, LoRA, and registry."""
 
-import threading
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -14,10 +13,6 @@ from LTX_2_MLX.loader.lora_loader import (
     lora_configs_for_stage,
     lora_configs_for_stage_delta,
     lora_configs_have_stage_strengths,
-)
-from LTX_2_MLX.loader.registry import (
-    DummyRegistry,
-    StateDictRegistry,
 )
 from LTX_2_MLX.loader.transformer_cache import (
     TRANSFORMER_CACHE_RESTORE_ATTR,
@@ -646,162 +641,6 @@ class TestFuseLorasIntoModel:
         assert calls["kwargs"]["video_ff_quantize_group_size"] == 32
         assert calls["kwargs"]["video_ff_quantize_bits"] == 8
         assert getattr(model, TRANSFORMER_CACHE_RESTORE_ATTR)["valid"] is True
-
-# ============================================================================
-# Registry Tests
-# ============================================================================
-
-class TestDummyRegistry:
-    """Tests for DummyRegistry class."""
-
-    def test_add_returns_empty_string(self):
-        """Test add always returns empty string."""
-        registry = DummyRegistry()
-        result = registry.add(["path1"], "op", {"key": mx.array([1])})
-        assert result == ""
-
-    def test_get_returns_none(self):
-        """Test get always returns None."""
-        registry = DummyRegistry()
-        registry.add(["path1"], "op", {"key": mx.array([1])})
-        result = registry.get(["path1"], "op")
-        assert result is None
-
-    def test_pop_returns_none(self):
-        """Test pop always returns None."""
-        registry = DummyRegistry()
-        registry.add(["path1"], "op", {"key": mx.array([1])})
-        result = registry.pop(["path1"], "op")
-        assert result is None
-
-    def test_clear_is_noop(self):
-        """Test clear does nothing (no error)."""
-        registry = DummyRegistry()
-        registry.clear()  # Should not raise
-
-
-class TestStateDictRegistry:
-    """Tests for StateDictRegistry class."""
-
-    def test_add_and_get(self):
-        """Test adding and retrieving state dict."""
-        registry = StateDictRegistry()
-        state_dict = {"weight": mx.array([1, 2, 3])}
-
-        sd_id = registry.add(["path1.safetensors"], "transformer", state_dict)
-        assert sd_id  # Non-empty ID
-
-        retrieved = registry.get(["path1.safetensors"], "transformer")
-        assert retrieved is not None
-        assert "weight" in retrieved
-
-    def test_add_duplicate_raises(self):
-        """Test adding duplicate raises ValueError."""
-        registry = StateDictRegistry()
-        state_dict = {"weight": mx.array([1])}
-
-        registry.add(["path1"], "op", state_dict)
-        with pytest.raises(ValueError):
-            registry.add(["path1"], "op", state_dict)
-
-    def test_pop_removes_entry(self):
-        """Test pop removes and returns state dict."""
-        registry = StateDictRegistry()
-        state_dict = {"weight": mx.array([1])}
-
-        registry.add(["path1"], "op", state_dict)
-        popped = registry.pop(["path1"], "op")
-        assert popped is not None
-
-        # Should be gone now
-        assert registry.get(["path1"], "op") is None
-
-    def test_get_nonexistent_returns_none(self):
-        """Test get on nonexistent key returns None."""
-        registry = StateDictRegistry()
-        result = registry.get(["nonexistent"], "op")
-        assert result is None
-
-    def test_clear_removes_all(self):
-        """Test clear removes all entries."""
-        registry = StateDictRegistry()
-        registry.add(["path1"], "op1", {"w1": mx.array([1])})
-        registry.add(["path2"], "op2", {"w2": mx.array([2])})
-
-        assert len(registry) == 2
-        registry.clear()
-        assert len(registry) == 0
-
-    def test_len(self):
-        """Test __len__ returns correct count."""
-        registry = StateDictRegistry()
-        assert len(registry) == 0
-
-        registry.add(["path1"], "op1", {"w": mx.array([1])})
-        assert len(registry) == 1
-
-        registry.add(["path2"], "op2", {"w": mx.array([2])})
-        assert len(registry) == 2
-
-    def test_keys(self):
-        """Test keys() returns list of IDs."""
-        registry = StateDictRegistry()
-        id1 = registry.add(["path1"], "op1", {"w": mx.array([1])})
-        id2 = registry.add(["path2"], "op2", {"w": mx.array([2])})
-
-        keys = registry.keys()
-        assert id1 in keys
-        assert id2 in keys
-
-    def test_different_paths_different_ids(self):
-        """Test different paths generate different IDs."""
-        registry = StateDictRegistry()
-
-        id1 = registry.add(["path1"], "op", {"w": mx.array([1])})
-        id2 = registry.add(["path2"], "op", {"w": mx.array([2])})
-
-        assert id1 != id2
-
-    def test_different_ops_different_ids(self):
-        """Test different op_names generate different IDs."""
-        registry = StateDictRegistry()
-
-        id1 = registry.add(["path"], "op1", {"w": mx.array([1])})
-        id2 = registry.add(["path"], "op2", {"w": mx.array([2])})
-
-        assert id1 != id2
-
-    def test_none_op_name(self):
-        """Test None op_name works correctly."""
-        registry = StateDictRegistry()
-        state_dict = {"weight": mx.array([1])}
-
-        registry.add(["path"], None, state_dict)
-        retrieved = registry.get(["path"], None)
-        assert retrieved is not None
-
-    def test_thread_safety(self):
-        """Test thread-safe access to registry."""
-        registry = StateDictRegistry()
-        errors = []
-
-        def add_weights(thread_id):
-            try:
-                for i in range(10):
-                    state_dict = {"weight": mx.array([thread_id, i])}
-                    registry.add([f"path_{thread_id}_{i}"], f"op_{thread_id}_{i}", state_dict)
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=add_weights, args=(i,)) for i in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert len(errors) == 0
-        assert len(registry) == 50  # 5 threads * 10 entries
-
 
 # ============================================================================
 # Integration Tests (require actual weights - marked for skip)

@@ -8,12 +8,6 @@ from .lora_loader import (
     lora_configs_for_stage_delta,
     lora_configs_have_stage_strengths,
 )
-from .registry import (
-    DummyRegistry,
-    Registry,
-    StateDict,
-    StateDictRegistry,
-)
 from .transformer_cache import (
     TRANSFORMER_CACHE_QUANTIZE_MODES,
     TRANSFORMER_CACHE_QUANTIZE_MXFP8_BLOCKS,
@@ -69,9 +63,4 @@ __all__ = [
     "lora_configs_for_stage",
     "lora_configs_for_stage_delta",
     "lora_configs_have_stage_strengths",
-    # Registry
-    "Registry",
-    "DummyRegistry",
-    "StateDictRegistry",
-    "StateDict",
 ]
