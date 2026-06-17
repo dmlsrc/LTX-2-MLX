@@ -92,7 +92,7 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
+import mlx.core as mx
 from scipy.io import wavfile
 
 # Thresholds for "is this a spike" come from the same module the encoders
@@ -146,28 +146,30 @@ def resolve_sidecars(run_path: Path) -> tuple[Path, Path | None]:
 # WAV reading + windowed RMS
 # ---------------------------------------------------------------------------
 
-def read_wav(path: Path) -> tuple[np.ndarray, int]:
+def read_wav(path: Path) -> tuple[mx.array, int]:
     """Load any WAV format supported by scipy (PCM int16/int24/int32, float32).
 
-    Returns (samples (N, channels) float32 in [-1, 1], sample_rate).
+    scipy hands back a NumPy array; convert it to MLX at this boundary and keep
+    everything downstream native. Returns (samples (N, channels) float32 in
+    [-1, 1] as an MLX array, sample_rate).
     """
     sr, arr = wavfile.read(str(path))
     if arr.ndim == 1:
         arr = arr[:, None]
-    if arr.dtype == np.int16:
-        arr = arr.astype(np.float32) / 32768.0
-    elif arr.dtype == np.int32:
-        arr = arr.astype(np.float32) / 2147483648.0
-    elif arr.dtype == np.uint8:
-        arr = (arr.astype(np.float32) - 128.0) / 128.0
-    else:
-        arr = arr.astype(np.float32, copy=False)
-    return arr, sr
+    samples = mx.array(arr).astype(mx.float32)
+    dtype = str(arr.dtype)
+    if dtype == "int16":
+        samples = samples / 32768.0
+    elif dtype == "int32":
+        samples = samples / 2147483648.0
+    elif dtype == "uint8":
+        samples = (samples - 128.0) / 128.0
+    return samples, sr
 
 
 def windowed_rms(
-    samples: np.ndarray, sr: int, window_ms: float, head_ms: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    samples: mx.array, sr: int, window_ms: float, head_ms: float,
+) -> tuple[list[float], list[float], list[float]]:
     """Mono RMS over fixed-size windows covering the first `head_ms`.
 
     Mono is the per-window mean across channels (so a stereo spike
@@ -178,18 +180,18 @@ def windowed_rms(
 
     Returns (window_start_times_ms, rms_per_window, peak_abs_per_window).
     """
-    mono = samples.mean(axis=1)
+    mono = mx.mean(samples, axis=1)
     win = max(1, int(round(window_ms / 1000 * sr)))
     n = max(1, int(round(head_ms / 1000 * sr)))
     head = mono[:n]
-    n_full = len(head) // win
+    n_full = head.size // win
     if n_full == 0:
-        return np.array([0.0]), np.array([0.0]), np.array([0.0])
+        return [0.0], [0.0], [0.0]
     trimmed = head[: n_full * win].reshape(n_full, win)
-    rms = np.sqrt((trimmed ** 2).mean(axis=1) + 1e-12)
-    peak = np.abs(trimmed).max(axis=1)
-    t_start_ms = np.arange(n_full) * window_ms
-    return t_start_ms, rms, peak
+    rms = mx.sqrt(mx.mean(trimmed ** 2, axis=1) + 1e-12)
+    peak = mx.max(mx.abs(trimmed), axis=1)
+    t_start_ms = [i * window_ms for i in range(n_full)]
+    return t_start_ms, rms.tolist(), peak.tolist()
 
 
 def ascii_bar(value: float, ref: float, max_chars: int = 60) -> str:
@@ -204,11 +206,11 @@ def ascii_bar(value: float, ref: float, max_chars: int = 60) -> str:
 # Reporting helpers
 # ---------------------------------------------------------------------------
 
-def report_wav_summary(samples: np.ndarray, sr: int, path: Path) -> None:
+def report_wav_summary(samples: mx.array, sr: int, path: Path) -> None:
     n, ch = samples.shape
     duration = n / sr
-    rms = float(np.sqrt((samples ** 2).mean()))
-    peak = float(np.abs(samples).max())
+    rms = float(mx.sqrt(mx.mean(samples ** 2)).item())
+    peak = float(mx.max(mx.abs(samples)).item())
     print(f"WAV: {path}")
     print(
         f"  channels={ch}  sample_rate={sr}  samples={n}  "
@@ -218,11 +220,11 @@ def report_wav_summary(samples: np.ndarray, sr: int, path: Path) -> None:
 
 
 def report_head_profile(
-    samples: np.ndarray, sr: int, window_ms: float, head_ms: float,
+    samples: mx.array, sr: int, window_ms: float, head_ms: float,
     label: str,
 ) -> tuple[float, float]:
     """Print a windowed RMS table.  Returns (first_window_rms, global_rms)."""
-    global_rms = float(np.sqrt((samples.mean(axis=1) ** 2).mean()))
+    global_rms = float(mx.sqrt(mx.mean(mx.mean(samples, axis=1) ** 2)).item())
     t, rms, peak = windowed_rms(samples, sr, window_ms, head_ms)
     print(
         f"\n{label} - {window_ms:g} ms windows over first "
@@ -239,6 +241,19 @@ def report_head_profile(
     return float(rms[0]) if len(rms) else 0.0, global_rms
 
 
+def _quantile(values: mx.array, q: float) -> float:
+    """Linear-interpolation quantile (matches numpy's default), via mx.sort."""
+    n = values.size
+    if n == 0:
+        return 0.0
+    ordered = mx.sort(values.reshape(-1))
+    pos = q * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return float((ordered[lo] * (1.0 - frac) + ordered[hi] * frac).item())
+
+
 def report_audio_latents(
     npz: Path, latent_frames: int, duration_s: float,
 ) -> None:
@@ -248,16 +263,9 @@ def report_audio_latents(
     """
     print(f"\nNPZ: {npz}")
     arrays, _metadata = load_sidecar(str(npz))
-    # The comparison math below is NumPy; convert the MLX arrays once. bf16 has
-    # no NumPy dtype, so widen it to float32 (this is also what the npz backend
-    # stored on disk) before handing it to the stats code.
-    import mlx.core as mx
-
-    d = {
-        k: np.array(v.astype(mx.float32) if v.dtype == mx.bfloat16 else v)
-        for k, v in arrays.items()
-    }
-    audio_keys = [k for k in d.keys() if "audio_latent" in k and "_mlx_dtype" not in k]
+    # load_sidecar returns native MLX arrays; cast to float32 for the stats math.
+    d = {k: v.astype(mx.float32) for k, v in arrays.items()}
+    audio_keys = [k for k in d if "audio_latent" in k]
     if not audio_keys:
         print("  (no audio-latent keys found in NPZ)")
         return
@@ -276,12 +284,15 @@ def report_audio_latents(
         # 4D `(c, f)` flatten -> "amplitude" channels, T is time.  Per-t
         # RMS divides by C*F so the scale matches a standard L2 norm
         # divided by sqrt(features), making cross-frame comparison easy.
-        per_t_norm = np.sqrt((lat[0] ** 2).sum(axis=(0, 2)) / (C * F))
-        per_t_max = np.abs(lat[0]).max(axis=(0, 2))
-        global_rms = float(np.sqrt((lat[0] ** 2).mean()))
-        global_peak = float(np.abs(lat[0]).max())
-        median = float(np.median(per_t_norm))
-        p99 = float(np.quantile(per_t_norm, 0.99))
+        sample = lat[0]
+        per_t_norm = mx.sqrt(mx.sum(sample ** 2, axis=(0, 2)) / (C * F))
+        per_t_max = mx.max(mx.abs(sample), axis=(0, 2))
+        global_rms = float(mx.sqrt(mx.mean(sample ** 2)).item())
+        global_peak = float(mx.max(mx.abs(sample)).item())
+        median = _quantile(per_t_norm, 0.5)
+        p99 = _quantile(per_t_norm, 0.99)
+        per_t_norm = per_t_norm.tolist()
+        per_t_max = per_t_max.tolist()
         fps_lat = T / duration_s if duration_s > 0 else float("nan")
         ms_per_frame = 1000.0 / fps_lat if fps_lat > 0 else float("nan")
         print(f"\n  {key}: shape={lat.shape}  fps_lat={fps_lat:.2f}")
