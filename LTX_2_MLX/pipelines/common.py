@@ -8,7 +8,6 @@ import os
 from dataclasses import dataclass
 
 import mlx.core as mx
-import numpy as np
 from PIL import Image
 
 from ..conditioning.item import ConditioningItem
@@ -91,11 +90,11 @@ def load_image_tensor(
         top = (new_h - height) // 2
         img = img.crop((left, top, left + width, top + height))
 
-    # Convert to numpy and normalize to [-1, 1]
-    img_np = np.array(img).astype(np.float32) / 127.5 - 1.0
-
-    # Convert to MLX array
-    img_mx = mx.array(img_np)
+    # Decode pixels straight into MLX (PIL -> bytes -> mx, no numpy) and
+    # normalize to [-1, 1].
+    w, h = img.size
+    c = len(img.getbands())
+    img_mx = mx.array(img.tobytes()).reshape(h, w, c).astype(mx.float32) / 127.5 - 1.0
     img_mx = mx.transpose(img_mx, (2, 0, 1))  # (H, W, C) -> (C, H, W)
     img_mx = img_mx[None, :, None, :, :]  # (1, C, 1, H, W)
 

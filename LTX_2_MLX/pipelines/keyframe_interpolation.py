@@ -10,7 +10,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
-import numpy as np
 from PIL import Image
 
 from ..components import (
@@ -111,11 +110,11 @@ def load_image_as_tensor(
     # Resize to target dimensions
     img = img.resize((width, height), Image.Resampling.LANCZOS)
 
-    # Convert to numpy array and normalize to [-1, 1]
-    img_np = np.array(img).astype(np.float32) / 127.5 - 1.0
-
-    # Convert to MLX: (H, W, C) -> (1, C, 1, H, W)
-    img_mx = mx.array(img_np)
+    # Decode pixels straight into MLX (PIL -> bytes -> mx, no numpy) and
+    # normalize to [-1, 1]. (H, W, C) -> (1, C, 1, H, W)
+    w, h = img.size
+    c = len(img.getbands())
+    img_mx = mx.array(img.tobytes()).reshape(h, w, c).astype(mx.float32) / 127.5 - 1.0
     img_mx = mx.transpose(img_mx, (2, 0, 1))  # (C, H, W)
     img_mx = img_mx[None, :, None, :, :]  # (1, C, 1, H, W)
 

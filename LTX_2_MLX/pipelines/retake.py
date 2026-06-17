@@ -12,7 +12,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
-import numpy as np
 from PIL import Image
 
 from ..components import (
@@ -119,8 +118,10 @@ def load_video_frames(
             frame_path = f"{tmpdir}/frame_{i:06d}.png"
             try:
                 img = Image.open(frame_path).convert("RGB")
-                img_np = np.array(img).astype(np.float32) / 127.5 - 1.0
-                frames.append(img_np)
+                w, h = img.size
+                c = len(img.getbands())
+                frame = mx.array(img.tobytes()).reshape(h, w, c).astype(mx.float32) / 127.5 - 1.0
+                frames.append(frame)
             except FileNotFoundError:
                 break
 
@@ -128,11 +129,11 @@ def load_video_frames(
         raise ValueError(f"No frames extracted from {video_path}")
 
     # Stack: (F, H, W, C) -> (1, C, F, H, W)
-    video_np = np.stack(frames, axis=0)  # (F, H, W, C)
-    video_np = np.transpose(video_np, (3, 0, 1, 2))  # (C, F, H, W)
-    video_np = video_np[np.newaxis, ...]  # (1, C, F, H, W)
+    video = mx.stack(frames, axis=0)  # (F, H, W, C)
+    video = mx.transpose(video, (3, 0, 1, 2))  # (C, F, H, W)
+    video = video[None, ...]  # (1, C, F, H, W)
 
-    return mx.array(video_np).astype(dtype)
+    return video.astype(dtype)
 
 
 class TemporalRegionMask:
