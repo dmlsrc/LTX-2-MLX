@@ -43,17 +43,16 @@ Encoder-choice details that aren't obvious from the flags alone:
 
 from __future__ import annotations
 
+import itertools
 import struct
 import subprocess
 import time
 import wave
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
-import numpy as np
 
 
 def _human_size(n: float) -> str:
@@ -234,15 +233,16 @@ def write_wav_int16(audio_waveform: Any, path: Path, sample_rate: int) -> None:
         raise ValueError(
             f"audio_waveform must be (B,C,T) or (C,T); got shape {audio.shape}"
         )
+    channels = int(audio.shape[0])
     pcm_mx = mx.clip(audio * 32767.0, -32768.0, 32767.0).astype(mx.int16)
-    mx.eval(pcm_mx)
-    pcm = np.array(pcm_mx)
-    interleaved = pcm.T.flatten().tobytes()
+    # Interleave channels per sample: (C, T) -> (T, C) row-major == [t0c0, t0c1, ...].
+    interleaved = mx.contiguous(mx.transpose(pcm_mx))
+    mx.eval(interleaved)
     with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(pcm.shape[0])
+        wf.setnchannels(channels)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes(interleaved)
+        wf.writeframes(bytes(memoryview(interleaved)))
 
 
 def write_wav_float32(audio_waveform: Any, path: Path, sample_rate: int) -> None:
@@ -254,10 +254,11 @@ def write_wav_float32(audio_waveform: Any, path: Path, sample_rate: int) -> None
         raise ValueError(
             f"audio_waveform must be (B,C,T) or (C,T); got shape {audio.shape}"
         )
-    mx.eval(audio)
-    audio_np = np.array(audio)
-    channels, samples = audio.shape
-    pcm = audio_np.T.flatten().tobytes()
+    channels, samples = int(audio.shape[0]), int(audio.shape[1])
+    # (C, T) -> (T, C) row-major float32 == interleaved per-sample.
+    interleaved = mx.contiguous(mx.transpose(audio))
+    mx.eval(interleaved)
+    pcm = bytes(memoryview(interleaved))
     bytes_per_sample = 4
     byte_rate = sample_rate * channels * bytes_per_sample
     block_align = channels * bytes_per_sample
@@ -274,37 +275,38 @@ def write_wav_float32(audio_waveform: Any, path: Path, sample_rate: int) -> None
     path.write_bytes(body)
 
 
-def _normalize_frames(
-    frames: Sequence[np.ndarray] | np.ndarray,
-    bit_depth: int,
-) -> np.ndarray:
-    """Coerce frames to a contiguous (T, H, W, 3) ndarray at the required dtype.
+def _frame_to_bytes(frame: Any, bit_depth: int) -> bytes:
+    """One (H, W, 3) frame -> raw little-endian bytes at the target bit depth.
 
-    Accepts a list of (H, W, 3) frames or a 4D ndarray. For 16-bit tiers the
-    8->16 promotion uses *257 (so 0xFF -> 0xFFFF) which is the bit-exact
-    "stretch to full range" conversion, not a left-shift.
+    Accepts an mlx array or anything ``mlx.core.array()`` can adopt (a numpy
+    frame, a buffer). For 16-bit tiers the 8->16 promotion uses *257 (so
+    0xFF -> 0xFFFF), the bit-exact full-range stretch, not a left-shift; 16->8 is
+    a right shift by 8. The conversion runs in MLX and the bytes come straight
+    from the array's buffer, so no numpy and no per-video materialization.
     """
-    if isinstance(frames, (list, tuple)):
-        arr = np.stack([np.asarray(f) for f in frames], axis=0)
-    else:
-        arr = np.asarray(frames)
-    if arr.ndim != 4 or arr.shape[-1] != 3:
-        raise ValueError(f"frames must be (T,H,W,3); got shape {arr.shape}")
+    f = frame if isinstance(frame, mx.array) else mx.array(frame)
+    if f.ndim != 3 or f.shape[-1] != 3:
+        raise ValueError(f"frame must be (H,W,3); got shape {f.shape}")
     if bit_depth == 16:
-        if arr.dtype == np.uint16:
-            return np.ascontiguousarray(arr)
-        if arr.dtype == np.uint8:
-            return np.ascontiguousarray(arr.astype(np.uint16) * 257)
-        raise ValueError(f"Cannot use {arr.dtype} frames for a 16-bit tier")
-    if arr.dtype == np.uint8:
-        return np.ascontiguousarray(arr)
-    if arr.dtype == np.uint16:
-        return np.ascontiguousarray((arr >> 8).astype(np.uint8))
-    raise ValueError(f"Cannot use {arr.dtype} frames for an 8-bit tier")
+        if f.dtype == mx.uint16:
+            out = f
+        elif f.dtype == mx.uint8:
+            out = (f.astype(mx.uint16) * 257).astype(mx.uint16)
+        else:
+            raise ValueError(f"Cannot use {f.dtype} frames for a 16-bit tier")
+    elif f.dtype == mx.uint8:
+        out = f
+    elif f.dtype == mx.uint16:
+        out = (f // 256).astype(mx.uint8)
+    else:
+        raise ValueError(f"Cannot use {f.dtype} frames for an 8-bit tier")
+    out = mx.contiguous(out)
+    mx.eval(out)
+    return bytes(memoryview(out))
 
 
 def encode_video(
-    frames: Sequence[np.ndarray] | np.ndarray,
+    frames: Any,
     output_path: str | Path,
     *,
     tier: str = "default",
@@ -322,8 +324,10 @@ def encode_video(
     Returns the actual output path. If the tier requires a different container
     extension (ProRes -> .mov), the supplied path is rewritten accordingly.
 
-    `frames` can be a list of (H,W,3) uint8 frames or a (T,H,W,3) ndarray;
-    8/16-bit conversion is handled internally based on the tier's frame_bit_depth.
+    `frames` can be a list/iterator of (H,W,3) frames or a (T,H,W,3) array
+    (mlx or numpy); frames stream to ffmpeg one at a time, so the whole video is
+    never resident at once. 8/16-bit conversion is handled per frame based on the
+    tier's frame_bit_depth.
 
     `audio_waveform` is anything castable to MLX with shape (B,C,T) or (C,T).
     Pass None to skip audio and produce a video-only file.
@@ -345,8 +349,22 @@ def encode_video(
         )
     preset = TIERS[tier]
 
-    frames_arr = _normalize_frames(frames, preset.frame_bit_depth)
-    n_frames, height, width, _ = frames_arr.shape
+    # Normalize 'frames' to an iterator of per-frame arrays and peek the first for
+    # the dimensions; ffmpeg infers the frame count from the raw byte stream, so
+    # the whole video is never materialized (one frame resident at a time).
+    if hasattr(frames, "shape") and len(frames.shape) == 4:
+        frame_iter: Any = (frames[i] for i in range(frames.shape[0]))
+    else:
+        frame_iter = iter(frames)
+    try:
+        first_frame = next(frame_iter)
+    except StopIteration:
+        raise ValueError("encode_video: no frames to encode") from None
+    f0 = first_frame if isinstance(first_frame, mx.array) else mx.array(first_frame)
+    if f0.ndim != 3 or f0.shape[-1] != 3:
+        raise ValueError(f"frames must be (H,W,3); got shape {f0.shape}")
+    height, width = int(f0.shape[0]), int(f0.shape[1])
+    frame_stream = itertools.chain([first_frame], frame_iter)
 
     output_path = Path(output_path)
     if output_path.suffix.lstrip(".").lower() != preset.container:
@@ -405,7 +423,8 @@ def encode_video(
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         try:
-            proc.stdin.write(frames_arr.tobytes())
+            for frame in frame_stream:
+                proc.stdin.write(_frame_to_bytes(frame, preset.frame_bit_depth))
         finally:
             proc.stdin.close()
         rc = proc.wait()
