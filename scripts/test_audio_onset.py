@@ -39,6 +39,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import mlx.core as mx
 import numpy as np
 
 # Allow running directly from the repo root without an install.
@@ -58,6 +59,10 @@ from LTX_2_MLX.audio.onset import (
 )
 
 _FAILURES: list[str] = []
+
+
+def as_np(array: mx.array | np.ndarray) -> np.ndarray:
+    return np.array(array)
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -204,14 +209,15 @@ def test_trim_preserves_sample_count() -> None:
         f"sample count preserved (in={n_in}, out={trimmed.shape[1]})",
         trimmed.shape[1] == n_in,
     )
+    trimmed_np = as_np(trimmed)
     n_zero = int(120.0 / 1000.0 * SR)
     check(
         f"leading {n_zero} samples are exactly zero",
-        np.all(trimmed[:, :n_zero] == 0.0),
+        np.all(trimmed_np[:, :n_zero] == 0.0),
     )
     check(
         "samples past the trim region are untouched",
-        np.allclose(trimmed[:, n_zero:], click[:, n_zero:]),
+        np.allclose(trimmed_np[:, n_zero:], click[:, n_zero:]),
     )
 
 
@@ -220,9 +226,9 @@ def test_trim_zero_passthrough() -> None:
     click = make_click_signature()
     out_zero = trim_onset(click, SR, trim_ms=0.0)
     out_neg = trim_onset(click, SR, trim_ms=-5.0)
-    check("trim_ms=0 -> identical content", np.array_equal(out_zero, click))
-    check("trim_ms<0 -> identical content", np.array_equal(out_neg, click))
-    check("returned ndarray is a copy, not the input", out_zero is not click)
+    check("trim_ms=0 -> identical content", np.array_equal(as_np(out_zero), click))
+    check("trim_ms<0 -> identical content", np.array_equal(as_np(out_neg), click))
+    check("returned MLX array is not the NumPy input", out_zero is not click)
 
 
 def test_trim_clamps_to_clip_length() -> None:
@@ -230,7 +236,7 @@ def test_trim_clamps_to_clip_length() -> None:
     click = make_click_signature(duration_s=0.5)
     trimmed = trim_onset(click, SR, trim_ms=10_000.0)
     check("over-trim does not raise", trimmed.shape == click.shape)
-    check("entire clip is silenced", np.all(trimmed == 0.0))
+    check("entire clip is silenced", np.all(as_np(trimmed) == 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -246,11 +252,12 @@ def test_mitigate_modes() -> None:
     # auto fires on a click clip.
     r_auto_click = mitigate_onset(click, SR, mode="auto", trim_ms=120.0)
     n_zero = int(120.0 / 1000.0 * SR)
+    auto_click_np = as_np(r_auto_click.samples)
     check("auto + click: applied=True", r_auto_click.applied)
     check("auto + click: detected=True", r_auto_click.detected)
     check(
         "auto + click: leading samples zeroed",
-        np.all(r_auto_click.samples[:, :n_zero] == 0.0),
+        np.all(auto_click_np[:, :n_zero] == 0.0),
     )
     check(
         "auto + click: sample count preserved",
@@ -259,29 +266,32 @@ def test_mitigate_modes() -> None:
 
     # auto passes ambient through untouched.
     r_auto_amb = mitigate_onset(ambient, SR, mode="auto", trim_ms=120.0)
+    auto_amb_np = as_np(r_auto_amb.samples)
     check("auto + ambient: applied=False", not r_auto_amb.applied)
     check("auto + ambient: detected=False", not r_auto_amb.detected)
     check(
         "auto + ambient: content unchanged",
-        np.allclose(r_auto_amb.samples, ambient),
+        np.allclose(auto_amb_np, ambient),
     )
 
     # off never trims.
     r_off = mitigate_onset(click, SR, mode="off")
+    off_np = as_np(r_off.samples)
     check("off + click: applied=False", not r_off.applied)
     check("off + click: detected=False", not r_off.detected)
     check(
         "off + click: content unchanged",
-        np.allclose(r_off.samples, click),
+        np.allclose(off_np, click),
     )
 
     # force trims regardless of detection - even on a clean ambient clip.
     r_force = mitigate_onset(ambient, SR, mode="force", trim_ms=80.0)
     n_zero_force = int(80.0 / 1000.0 * SR)
+    force_np = as_np(r_force.samples)
     check("force + ambient: applied=True", r_force.applied)
     check(
         "force + ambient: leading 80 ms zeroed",
-        np.all(r_force.samples[:, :n_zero_force] == 0.0),
+        np.all(force_np[:, :n_zero_force] == 0.0),
     )
     check(
         "force + ambient: detected=False (diag still ran)",
@@ -296,17 +306,16 @@ def test_mitigate_modes() -> None:
         check("unknown mode raises ValueError", True)
 
 
-def test_mitigate_returns_fresh_array() -> None:
-    """OnsetTrimResult.samples must be a *new* ndarray so the caller
-    can mutate / convert dtype without aliasing the upstream pipeline
-    output.
-    """
-    print("\n[8] mitigate_onset returns a fresh ndarray (no aliasing)")
+def test_mitigate_returns_mlx_without_numpy_aliasing() -> None:
+    """OnsetTrimResult.samples must not alias a NumPy caller input."""
+    print("\n[8] mitigate_onset returns MLX samples without NumPy aliasing")
     click = make_click_signature()
     r = mitigate_onset(click, SR, mode="off")
-    r.samples[:, 0] = 999.0
+    check("result.samples is an MLX array", isinstance(r.samples, mx.array))
+    result_np = as_np(r.samples)
+    result_np[:, 0] = 999.0
     check(
-        "mutating result.samples does not corrupt input",
+        "mutating result snapshot does not corrupt input",
         not np.any(click[:, 0] == 999.0),
     )
 
@@ -369,7 +378,7 @@ def main() -> int:
     test_trim_zero_passthrough()
     test_trim_clamps_to_clip_length()
     test_mitigate_modes()
-    test_mitigate_returns_fresh_array()
+    test_mitigate_returns_mlx_without_numpy_aliasing()
     test_parse_trim_mode()
     test_constants_are_exposed()
 

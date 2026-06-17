@@ -178,7 +178,12 @@ class SnakeBeta(nn.Module):
 def kaiser_sinc_filter1d(
     cutoff: float, half_width: float, kernel_size: int
 ) -> mx.array:
-    """Compute a kaiser-windowed sinc filter using numpy, return as mx.array.
+    """Compute a kaiser-windowed sinc filter and return an MLX array.
+
+    NumPy remains here only for filter construction: MLX has no Kaiser window
+    or Bessel i0 primitive, and its CPU sin/cos path is not bit-identical to
+    NumPy for the Hann filter after float32 cast. The result is immediately
+    converted to MLX.
 
     Returns shape (1, 1, kernel_size).
     """

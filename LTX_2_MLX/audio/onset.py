@@ -41,7 +41,7 @@ Sample count is preserved.
 Public API
 ----------
 - `detect_onset_spike(samples, sample_rate, ...)` -> bool
-- `trim_onset(samples, sample_rate, *, trim_ms)` -> trimmed ndarray
+- `trim_onset(samples, sample_rate, *, trim_ms)` -> trimmed mx.array
 - `mitigate_onset(samples, sample_rate, *, mode, trim_ms)` -> result
 - `parse_trim_mode(s)` -> (mode, trim_ms) for the CLI flag
 """
@@ -51,7 +51,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
+import mlx.core as mx
 
 # ---------------------------------------------------------------------------
 # Threshold constants - single source of truth for both this module and
@@ -82,9 +82,9 @@ DEFAULT_TRIM_MS = 120.0
 # Detector
 # ---------------------------------------------------------------------------
 
-def _to_mono_2d(samples: Any) -> np.ndarray:
-    """Coerce (B,C,T) / (C,T) / (T,) -> (C,T) float32 ndarray, no copy when possible."""
-    arr = np.asarray(samples)
+def _to_audio_ct_mlx(samples: Any, dtype: mx.Dtype = mx.float32) -> mx.array:
+    """Coerce (B,C,T) / (C,T) / (T,) to an MLX (C,T) audio array."""
+    arr = mx.array(samples, dtype=dtype)
     if arr.ndim == 3:
         arr = arr[0]
     if arr.ndim == 1:
@@ -93,9 +93,12 @@ def _to_mono_2d(samples: Any) -> np.ndarray:
         raise ValueError(
             f"audio_waveform must be (B,C,T), (C,T), or (T,); got shape {arr.shape}"
         )
-    if arr.dtype != np.float32:
-        arr = arr.astype(np.float32, copy=False)
     return arr
+
+
+def _rms(values: mx.array) -> mx.array:
+    """RMS for an MLX float64 vector."""
+    return mx.sqrt(mx.mean(mx.square(values)))
 
 
 def detect_onset_spike(
@@ -120,30 +123,36 @@ def detect_onset_spike(
     if the clip is shorter than the silence-window endpoint, or global
     RMS is essentially zero, returns False.
     """
-    arr = _to_mono_2d(samples)
-    mono = arr.mean(axis=0)
-    n_total = mono.shape[0]
+    old_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        arr = _to_audio_ct_mlx(samples, dtype=mx.float64)
+        mono = mx.mean(arr, axis=0)
+        n_total = mono.shape[0]
 
-    win = max(1, int(round(window_ms / 1000.0 * sample_rate)))
-    silence_start = int(round(silence_start_ms / 1000.0 * sample_rate))
-    silence_end = int(round(silence_end_ms / 1000.0 * sample_rate))
+        win = max(1, int(round(window_ms / 1000.0 * sample_rate)))
+        silence_start = int(round(silence_start_ms / 1000.0 * sample_rate))
+        silence_end = int(round(silence_end_ms / 1000.0 * sample_rate))
 
-    # Need the full silence window present to evaluate the second condition.
-    if n_total < silence_end or win <= 0:
-        return False
+        # Need the full silence window present to evaluate the second condition.
+        if n_total < silence_end or win <= 0:
+            return False
 
-    global_rms = float(np.sqrt(np.mean(mono.astype(np.float64) ** 2)))
-    if global_rms <= 1e-9:
-        return False
+        global_rms = _rms(mono)
+        mx.eval(global_rms)
+        global_rms_value = float(global_rms)
+        if global_rms_value <= 1e-9:
+            return False
 
-    first = mono[:win].astype(np.float64)
-    first_rms = float(np.sqrt(np.mean(first ** 2)))
-    if first_rms <= threshold_ratio * global_rms:
-        return False
+        first_rms = _rms(mono[:win])
+        tail_rms = _rms(mono[silence_start:silence_end])
+        mx.eval(first_rms, tail_rms)
+        if float(first_rms) <= threshold_ratio * global_rms_value:
+            return False
 
-    tail = mono[silence_start:silence_end].astype(np.float64)
-    tail_rms = float(np.sqrt(np.mean(tail ** 2)))
-    return tail_rms < silence_ratio * global_rms
+        return float(tail_rms) < silence_ratio * global_rms_value
+    finally:
+        mx.set_default_device(old_device)
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +164,10 @@ def trim_onset(
     sample_rate: int,
     *,
     trim_ms: float = DEFAULT_TRIM_MS,
-) -> np.ndarray:
+) -> mx.array:
     """Zero out the leading `trim_ms` milliseconds of every channel.
 
-    Returns a *new* float32 ndarray with the same shape as the input
+    Returns a float32 MLX array with the same shape as the input
     (modulo the (B,C,T) -> (C,T) drop of the batch axis, which the
     encoders already do too).  Sample count is preserved so video and
     audio stay in sync.
@@ -168,14 +177,17 @@ def trim_onset(
     track, which is the right behavior if a caller deliberately asks
     for it.
     """
-    arr = _to_mono_2d(samples).copy()
+    arr = _to_audio_ct_mlx(samples, dtype=mx.float32)
     if trim_ms <= 0:
         return arr
     n_zero = int(round(trim_ms / 1000.0 * sample_rate))
     n_zero = min(n_zero, arr.shape[1])
-    if n_zero > 0:
-        arr[:, :n_zero] = 0.0
-    return arr
+    if n_zero <= 0:
+        return arr
+    if n_zero == arr.shape[1]:
+        return mx.zeros_like(arr)
+    leading = mx.zeros((arr.shape[0], n_zero), dtype=arr.dtype)
+    return mx.concatenate([leading, arr[:, n_zero:]], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -186,17 +198,15 @@ def trim_onset(
 class OnsetTrimResult:
     """Outcome of an onset-mitigation call.
 
-    `samples` is always a fresh ndarray (callers can mutate without
-    aliasing the input).  When `applied=False` it is a copy of the
-    input with the channel layout normalized to (C, T); when
-    `applied=True` the leading `trim_ms` is zero-filled.
+    `samples` is a float32 MLX array with channel layout normalized to
+    (C, T). When `applied=True` the leading `trim_ms` is zero-filled.
 
     `detected` is the diagnostic verdict from the two-window check -
     it can be True even when `applied=False` (e.g. mode="off"), and
     False when `applied=True` (e.g. mode="force" / explicit N_ms).
     """
 
-    samples: np.ndarray
+    samples: mx.array
     applied: bool
     detected: bool
     trim_ms: float
@@ -217,7 +227,7 @@ def mitigate_onset(
       auto   detect-then-trim.  Trim is applied only when the two-window
              detector fires.  Quiet-onset clips pass through unchanged.
       off    no detection, no trim.  Returned `samples` is a (C,T)
-             ndarray copy of the input, untouched.
+             MLX array normalized from the input, untouched.
       force  always trim by `trim_ms`, regardless of detection.  Used
              by the CLI when the user specifies an explicit N_ms.
 
@@ -226,11 +236,11 @@ def mitigate_onset(
     that want non-default thresholds should call `detect_onset_spike`
     + `trim_onset` directly.
     """
-    arr = _to_mono_2d(samples)
+    arr = _to_audio_ct_mlx(samples, dtype=mx.float32)
     mode = mode.lower()
     if mode == "off":
         return OnsetTrimResult(
-            samples=arr.copy(),
+            samples=arr,
             applied=False,
             detected=False,
             trim_ms=0.0,
@@ -242,7 +252,7 @@ def mitigate_onset(
         is_spike = detect_onset_spike(arr, sample_rate)
         if not is_spike:
             return OnsetTrimResult(
-                samples=arr.copy(),
+                samples=arr,
                 applied=False,
                 detected=False,
                 trim_ms=0.0,

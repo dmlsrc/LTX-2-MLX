@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import mlx.core as mx
 import numpy as np
 
 
@@ -225,11 +226,17 @@ def build_ffmpeg_cmd(
 
 
 def write_wav_int16(audio_waveform: Any, path: Path, sample_rate: int) -> None:
-    """Write a stereo int16 WAV. Accepts mx.array / np.ndarray with shape (B,C,T) or (C,T)."""
-    audio_np = np.asarray(audio_waveform)
-    if audio_np.ndim == 3:
-        audio_np = audio_np[0]
-    pcm = (audio_np * 32767).clip(-32768, 32767).astype(np.int16)
+    """Write a stereo int16 WAV. Accepts MLX/NumPy shape (B,C,T) or (C,T)."""
+    audio = mx.array(audio_waveform, dtype=mx.float32)
+    if audio.ndim == 3:
+        audio = audio[0]
+    if audio.ndim != 2:
+        raise ValueError(
+            f"audio_waveform must be (B,C,T) or (C,T); got shape {audio.shape}"
+        )
+    pcm_mx = mx.clip(audio * 32767.0, -32768.0, 32767.0).astype(mx.int16)
+    mx.eval(pcm_mx)
+    pcm = np.array(pcm_mx)
     interleaved = pcm.T.flatten().tobytes()
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(pcm.shape[0])
@@ -240,10 +247,16 @@ def write_wav_int16(audio_waveform: Any, path: Path, sample_rate: int) -> None:
 
 def write_wav_float32(audio_waveform: Any, path: Path, sample_rate: int) -> None:
     """WAVE_FORMAT_IEEE_FLOAT (float32 PCM). No int16 quantization."""
-    audio_np = np.asarray(audio_waveform).astype(np.float32)
-    if audio_np.ndim == 3:
-        audio_np = audio_np[0]
-    channels, samples = audio_np.shape
+    audio = mx.array(audio_waveform, dtype=mx.float32)
+    if audio.ndim == 3:
+        audio = audio[0]
+    if audio.ndim != 2:
+        raise ValueError(
+            f"audio_waveform must be (B,C,T) or (C,T); got shape {audio.shape}"
+        )
+    mx.eval(audio)
+    audio_np = np.array(audio)
+    channels, samples = audio.shape
     pcm = audio_np.T.flatten().tobytes()
     bytes_per_sample = 4
     byte_rate = sample_rate * channels * bytes_per_sample
@@ -312,7 +325,7 @@ def encode_video(
     `frames` can be a list of (H,W,3) uint8 frames or a (T,H,W,3) ndarray;
     8/16-bit conversion is handled internally based on the tier's frame_bit_depth.
 
-    `audio_waveform` is anything castable to numpy with shape (B,C,T) or (C,T).
+    `audio_waveform` is anything castable to MLX with shape (B,C,T) or (C,T).
     Pass None to skip audio and produce a video-only file.
 
     When `save_audio_sidecar=True`, the WAV intermediate is preserved as

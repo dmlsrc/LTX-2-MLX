@@ -105,7 +105,7 @@ def load_audio_file(
     target_sr: int = 16000,
     start_time: float = 0.0,
     max_duration: float | None = None,
-) -> tuple[np.ndarray, int]:
+) -> tuple[mx.array, int]:
     """Load audio file and resample to target sample rate.
 
     Args:
@@ -115,7 +115,7 @@ def load_audio_file(
         max_duration: Maximum duration in seconds.
 
     Returns:
-        Tuple of (waveform as numpy array [channels, samples], sample_rate).
+        Tuple of (waveform as MLX array [channels, samples], sample_rate).
     """
     try:
         import soundfile as sf
@@ -138,28 +138,31 @@ def load_audio_file(
                 else:
                     data = data.reshape(-1, 1)
 
+    data_mx = mx.array(data, dtype=mx.float32)
+
     # Handle mono/stereo
-    if data.ndim == 1:
-        data = data[:, np.newaxis]
+    if data_mx.ndim == 1:
+        data_mx = data_mx[:, None]
     # Transpose to (channels, samples)
-    if data.shape[0] > data.shape[1]:
-        data = data.T
+    if data_mx.shape[0] > data_mx.shape[1]:
+        data_mx = data_mx.T
 
     # Trim to start_time / max_duration
     start_sample = int(start_time * sr)
-    data = data[:, start_sample:]
+    data_mx = data_mx[:, start_sample:]
     if max_duration is not None:
         max_samples = int(max_duration * sr)
-        data = data[:, :max_samples]
+        data_mx = data_mx[:, :max_samples]
 
     # Simple resample if needed (nearest neighbor - not ideal but functional)
     if sr != target_sr:
-        num_output = int(data.shape[1] * target_sr / sr)
-        indices = np.linspace(0, data.shape[1] - 1, num_output).astype(int)
-        data = data[:, indices]
+        num_output = int(data_mx.shape[1] * target_sr / sr)
+        indices = mx.linspace(0, data_mx.shape[1] - 1, num_output).astype(mx.int32)
+        data_mx = data_mx[:, indices]
         sr = target_sr
 
-    return data, sr
+    mx.eval(data_mx)
+    return data_mx, sr
 
 
 class A2VidPipelineTwoStage:
@@ -212,7 +215,7 @@ class A2VidPipelineTwoStage:
 
     def _encode_audio_to_latent(
         self,
-        audio_waveform: np.ndarray,
+        audio_waveform: mx.array,
         audio_sr: int,
         pixel_shape: VideoPixelShape,
         config: A2VidConfig,
@@ -287,7 +290,7 @@ class A2VidPipelineTwoStage:
         callback: Callable[[str, int, int], None] | None = None,
         positive_audio_encoding: mx.array | None = None,
         negative_audio_encoding: mx.array | None = None,
-    ) -> tuple[mx.array, np.ndarray, int]:
+    ) -> tuple[mx.array, mx.array, int]:
         """
         Generate video from audio file.
 

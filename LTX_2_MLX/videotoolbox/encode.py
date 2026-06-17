@@ -109,7 +109,7 @@ def _pick_hevc_profile(vsr_spatial_mode: str | None, encode_chroma: str) -> str:
 
 
 def _normalize_audio_for_track(audio_waveform: Any) -> np.ndarray:
-    """(B,C,T) or (C,T) mx.array / ndarray -> (C,T) float32 ndarray.
+    """Final encoder boundary: (B,C,T) or (C,T) MLX/ndarray -> NumPy (C,T).
 
     AudioTrack expects (channels, samples). Pipeline outputs are (B,C,T).
     """
@@ -167,7 +167,7 @@ def encode_video_videotoolbox(
     caller supplied something else (matches encode_video() behavior for
     the ffmpeg `default` tier - both produce .mp4).
 
-    `audio_waveform` is anything castable to (B,C,T) or (C,T) numpy
+    `audio_waveform` is anything castable to (B,C,T) or (C,T) MLX/NumPy
     float32. Pass None for video-only.
 
     `vsr_spatial_mode`:
@@ -275,10 +275,10 @@ def encode_video_videotoolbox(
                 raise ValueError(
                     "audio_sample_rate is required when audio_waveform is provided"
                 )
-            arr = _normalize_audio_for_track(audio_waveform)
             # Sequence-start onset mitigation.  Runs before the AudioTrack
-            # build so the same cleaned (C,T) float32 buffer feeds both the
-            # muxed track and the optional sidecar.  See
+            # build while the generated waveform can still stay MLX-native;
+            # `_normalize_audio_for_track` is the final NumPy byte-boundary
+            # adapter for CoreMedia.  See
             # LTX_2_MLX.audio.onset and docs/AUDIO_ISSUES.md ->
             # "Sequence-Start Audio Spike".
             from ..audio import DEFAULT_TRIM_MS, mitigate_onset
@@ -289,10 +289,10 @@ def encode_video_videotoolbox(
                 else DEFAULT_TRIM_MS
             )
             onset_result = mitigate_onset(
-                arr, int(audio_sample_rate),
+                audio_waveform, int(audio_sample_rate),
                 mode=audio_onset_trim_mode, trim_ms=onset_trim_ms,
             )
-            arr = onset_result.samples
+            arr = _normalize_audio_for_track(onset_result.samples)
             if verbose and onset_result.applied:
                 print(f"  audio onset: {onset_result.detail}")
             audio_track = AudioTrack(arr, sample_rate=int(audio_sample_rate))
