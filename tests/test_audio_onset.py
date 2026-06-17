@@ -27,23 +27,12 @@ behave as documented, and the OnsetTrimResult carries the expected
 diagnostic flags.
 
 Lastly the CLI parser is sanity-checked.
-
-Exit code: 0 on pass, non-zero on any failed assertion.
-
-Usage:
-    scripts/test_audio_onset.py
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import mlx.core as mx
 import numpy as np
-
-# Allow running directly from the repo root without an install.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from LTX_2_MLX.audio.onset import (
     DEFAULT_DETECT_THRESHOLD_RATIO,
@@ -58,20 +47,13 @@ from LTX_2_MLX.audio.onset import (
     trim_onset,
 )
 
-_FAILURES: list[str] = []
-
 
 def as_np(array: mx.array | np.ndarray) -> np.ndarray:
     return np.array(array)
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
-    if condition:
-        print(f"  PASS  {name}")
-    else:
-        msg = f"{name}{(' - ' + detail) if detail else ''}"
-        print(f"  FAIL  {msg}")
-        _FAILURES.append(msg)
+    assert condition, f"{name}{(' - ' + detail) if detail else ''}"
 
 
 # ---------------------------------------------------------------------------
@@ -363,34 +345,3 @@ def test_constants_are_exposed() -> None:
     check("DEFAULT_SILENCE_END_MS == 250", DEFAULT_SILENCE_END_MS == 250.0)
     check("DEFAULT_SILENCE_RATIO == 0.1", DEFAULT_SILENCE_RATIO == 0.1)
     check("DEFAULT_TRIM_MS == 120", DEFAULT_TRIM_MS == 120.0)
-
-
-# ---------------------------------------------------------------------------
-# Driver
-# ---------------------------------------------------------------------------
-
-def main() -> int:
-    print("Running audio-onset tests...")
-    test_detector_classifies_signal_classes()
-    test_detector_accepts_shape_variants()
-    test_detector_threshold_responds_to_kwargs()
-    test_trim_preserves_sample_count()
-    test_trim_zero_passthrough()
-    test_trim_clamps_to_clip_length()
-    test_mitigate_modes()
-    test_mitigate_returns_mlx_without_numpy_aliasing()
-    test_parse_trim_mode()
-    test_constants_are_exposed()
-
-    print()
-    if _FAILURES:
-        print(f"{len(_FAILURES)} test(s) FAILED:")
-        for msg in _FAILURES:
-            print(f"  - {msg}")
-        return 1
-    print("All audio-onset tests passed.")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
