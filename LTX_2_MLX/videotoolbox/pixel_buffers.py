@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import mlx.core as mx
 import numpy as np
 
 from ._compat import CoreMedia, Foundation, Quartz, require_pyobjc
@@ -189,38 +190,57 @@ def make_bgra_buffer(adaptor: Any, width: int, height: int) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# numpy -> CVPixelBuffer
+# frame -> CVPixelBuffer
 # ---------------------------------------------------------------------------
 
-def write_fp16_rgba(rgba_fp16: np.ndarray, pb: Any) -> None:
-    """Memcpy a (H,W,4) fp16 RGBA ndarray into a RGBAHalf CVPixelBuffer.
+def _frame_is_fp16(frame: Any) -> bool:
+    """True for a float16 frame, whether it is a numpy or an mlx array."""
+    return str(frame.dtype).split(".")[-1] == "float16"
 
-    Used for the HQ VSR source upload (RGBAHalf format) and any other case
-    where we already have the exact destination layout in numpy. The base
-    address is obtained as an objc.varlist whose `.as_buffer(n)` returns a
-    writable memoryview into the IOSurface plane.
+
+def _frame_bytes(frame: Any) -> bytes:
+    """Contiguous raw bytes of a frame (numpy or mlx), straight from its buffer.
+
+    numpy goes through tobytes(); mlx through the buffer protocol via memoryview,
+    so no numpy is needed to extract the bytes.
+    """
+    tobytes = getattr(frame, "tobytes", None)
+    if callable(tobytes):
+        return tobytes()  # numpy ndarray
+    return bytes(memoryview(mx.contiguous(frame)))  # mlx array
+
+
+def write_fp16_rgba(rgba_fp16: Any, pb: Any) -> None:
+    """Memcpy a (H,W,4) fp16 RGBA frame (mlx or numpy) into a RGBAHalf CVPixelBuffer.
+
+    Used for the HQ VSR source upload (RGBAHalf format) and any other case where
+    we already have the exact destination layout. The base address is an
+    objc.varlist whose `.as_buffer(n)` is a writable memoryview into the IOSurface
+    plane; the source bytes come straight from the frame's buffer.
     """
     require_pyobjc()
-    h, w, _ = rgba_fp16.shape
+    h, w = int(rgba_fp16.shape[0]), int(rgba_fp16.shape[1])
+    src = _frame_bytes(rgba_fp16)
+    row = w * 8
     Quartz.CVPixelBufferLockBaseAddress(pb, 0)
     try:
         base = Quartz.CVPixelBufferGetBaseAddress(pb)
         bpr = Quartz.CVPixelBufferGetBytesPerRow(pb)
         mv = base.as_buffer(h * bpr)
-        if bpr == w * 8:
-            mv[:] = rgba_fp16.tobytes()
+        if bpr == row:
+            mv[:] = src
         else:
-            # Row-pad case: copy row by row through a uint8 view.
-            dst = np.frombuffer(mv, dtype=np.uint8).reshape(h, bpr)
-            dst[:, : w * 8] = rgba_fp16.view(np.uint8).reshape(h, w * 8)
+            # Row-pad case: copy each row's bytes, skipping the destination pad.
+            for r in range(h):
+                mv[r * bpr : r * bpr + row] = src[r * row : (r + 1) * row]
     finally:
         Quartz.CVPixelBufferUnlockBaseAddress(pb, 0)
 
 
-def upload_frame_to_buffer(frame: np.ndarray, pb: Any) -> None:
+def upload_frame_to_buffer(frame: Any, pb: Any) -> None:
     """Upload `frame` into `pb`, dispatching on the buffer's pixel format.
 
-    Accepted inputs:
+    Accepted inputs (mlx or numpy array):
       - (H,W,3) uint8 RGB           : --video / ffmpeg rgb24 path
       - (H,W,4) fp16 RGBA           : --latent / chunk_to_rgba_fp16 path
 
@@ -235,39 +255,41 @@ def upload_frame_to_buffer(frame: np.ndarray, pb: Any) -> None:
     rather than once in RGB and once in YUV.
 
     The RGBAHalf destination is a direct memcpy when the source is already
-    fp16 RGBA. For uint8 input we promote to fp16 inline.
+    fp16 RGBA. For uint8 input we promote to fp16 inline. All channel math runs
+    in MLX and the bytes come from the array buffer, so no numpy - and the
+    CoreImage / memcpy calls are unchanged, so chroma is byte-for-byte identical.
     """
     require_pyobjc()
     pix_fmt = Quartz.CVPixelBufferGetPixelFormatType(pb)
+    h, w = int(frame.shape[0]), int(frame.shape[1])
 
     if pix_fmt == PIX_RGBAHALF:
-        if frame.dtype == np.float16:
+        if _frame_is_fp16(frame):
             write_fp16_rgba(frame, pb)
             return
-        # uint8 RGB promotion (legacy / --video path)
-        h, w = frame.shape[:2]
-        rgba_fp16 = np.empty((h, w, 4), dtype=np.float16)
-        rgba_fp16[..., 0:3] = frame.astype(np.float16) * np.float16(1.0 / 255.0)
-        rgba_fp16[..., 3] = np.float16(1.0)
-        write_fp16_rgba(rgba_fp16, pb)
+        # uint8 RGB -> fp16 RGBA promotion (legacy / --video path).
+        f = frame if isinstance(frame, mx.array) else mx.array(frame)
+        rgb = f.astype(mx.float16) * mx.array(1.0 / 255.0, dtype=mx.float16)
+        alpha = mx.ones((h, w, 1), dtype=mx.float16)
+        write_fp16_rgba(mx.concatenate([rgb, alpha], axis=-1), pb)
         return
 
     # NV12 (and any other format CoreImage can render into). Pick the CIImage
-    # source format from the input dtype: RGBA8 for uint8, RGBAh for fp16.
-    if frame.dtype == np.float16:
-        h, w, _ = frame.shape
-        data = Foundation.NSData.dataWithBytes_length_(frame.tobytes(), frame.nbytes)
+    # source format from the input dtype: RGBAh for fp16, RGBA8 for uint8.
+    if _frame_is_fp16(frame):
+        src = _frame_bytes(frame)
+        data = Foundation.NSData.dataWithBytes_length_(src, len(src))
         ci_image = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
             data, w * 8, (w, h), Quartz.kCIFormatRGBAh, srgb_colorspace(),
         )
         ci_context().render_toCVPixelBuffer_(ci_image, pb)
         return
 
-    h, w, _ = frame.shape
-    rgba = np.empty((h, w, 4), dtype=np.uint8)
-    rgba[..., 0:3] = frame
-    rgba[..., 3] = 255
-    data = Foundation.NSData.dataWithBytes_length_(rgba.tobytes(), rgba.nbytes)
+    # uint8 RGB -> opaque RGBA8 for CoreImage.
+    f = frame if isinstance(frame, mx.array) else mx.array(frame)
+    alpha = mx.full((h, w, 1), 255, dtype=mx.uint8)
+    src = _frame_bytes(mx.concatenate([f, alpha], axis=-1))
+    data = Foundation.NSData.dataWithBytes_length_(src, len(src))
     ci_image = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
         data, w * 4, (w, h), Quartz.kCIFormatRGBA8, srgb_colorspace(),
     )

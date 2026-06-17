@@ -35,7 +35,7 @@ Output formats
                    any further casting.
 
 Both converters force-clear MLX's cache after producing the
-Python-owned numpy copies, so the Metal buffers from the chunk decode
+Python-owned MLX frame copies, so the Metal buffers from the chunk decode
 don't sit pinned across the downstream iteration.  See
 `scripts/vsr_harness.py`'s `chunk_to_rgba_fp16` for the original
 rationale and the bench numbers that drove the per-frame-list shape
@@ -50,7 +50,6 @@ from collections.abc import Iterator
 from typing import Any
 
 import mlx.core as mx
-import numpy as np
 
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
@@ -64,23 +63,22 @@ from ..model.video_vae.tiling import TilingConfig, decode_tiled
 _CHUNK_AS_ARRAY = os.environ.get("LTX_STREAM_CHUNK_AS_ARRAY", "0") == "1"
 
 
-def chunk_to_uint8_frames(chunk: Any) -> list[np.ndarray]:
+def chunk_to_uint8_frames(chunk: Any) -> list[mx.array]:
     """(B, C, T, H, W) bf16/fp32 in [-1, 1] -> list[(H, W, 3) uint8].
 
-    Rescale + clip + cast happens in MLX so we never materialize a
-    chunk-sized float numpy intermediate.  Each frame becomes an
-    independently-allocated Python-owned numpy buffer that the caller
-    can free as it iterates.
+    Rescale + clip + cast + transpose all happen in MLX; each frame is an
+    independent contiguous MLX array (its own buffer) that the caller can free
+    as it iterates.  Bytes reach the encoder straight from that buffer, no numpy.
     """
     rescaled = mx.clip((chunk + 1.0) * 127.5, 0, 255).astype(mx.uint8)
     transposed = mx.transpose(rescaled, (0, 2, 3, 4, 1))  # (B, T, H, W, 3)
     mx.eval(transposed)
     if _CHUNK_AS_ARRAY:
-        arr = np.array(transposed, copy=True)
+        arr = mx.contiguous(transposed)
         result = [arr[0, t] for t in range(arr.shape[1])]
     else:
         result = [
-            np.array(transposed[0, t], copy=True)
+            mx.contiguous(transposed[0, t])
             for t in range(transposed.shape[1])
         ]
     del rescaled, transposed
@@ -91,12 +89,13 @@ def chunk_to_uint8_frames(chunk: Any) -> list[np.ndarray]:
     return result
 
 
-def chunk_to_rgba_fp16_frames(chunk: Any) -> list[np.ndarray]:
+def chunk_to_rgba_fp16_frames(chunk: Any) -> list[mx.array]:
     """(B, C, T, H, W) bf16/fp32 in [-1, 1] -> list[(H, W, 4) float16].
 
     Direct path for VSR's RGBAHalf source format.  Skips the uint8
-    quantization that `chunk_to_uint8_frames` would impose, so the
-    VAE's bf16 precision survives into VSR / the encoder.
+    quantization that `chunk_to_uint8_frames` would impose, so the VAE's bf16
+    precision survives into VSR / the encoder.  Each frame is an independent
+    contiguous MLX array; bytes reach the encoder from that buffer, no numpy.
     """
     B, C, T, H, W = chunk.shape
     rescaled = mx.clip((chunk + 1.0) * 0.5, 0.0, 1.0).astype(mx.float16)
@@ -105,11 +104,11 @@ def chunk_to_rgba_fp16_frames(chunk: Any) -> list[np.ndarray]:
     transposed = mx.transpose(rgba, (0, 2, 3, 4, 1))  # (B, T, H, W, 4)
     mx.eval(transposed)
     if _CHUNK_AS_ARRAY:
-        arr = np.array(transposed, copy=True)
+        arr = mx.contiguous(transposed)
         result = [arr[0, t] for t in range(arr.shape[1])]
     else:
         result = [
-            np.array(transposed[0, t], copy=True)
+            mx.contiguous(transposed[0, t])
             for t in range(transposed.shape[1])
         ]
     del rescaled, alpha, rgba, transposed
@@ -138,8 +137,8 @@ def iter_decoded_chunks(
     tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
     compute_dtype: Any = mx.bfloat16,
-) -> Iterator[list[np.ndarray]]:
-    """Yield decoded chunks as per-frame numpy lists.
+) -> Iterator[list[mx.array]]:
+    """Yield decoded chunks as per-frame MLX-array lists.
 
     Each yield delivers one VAE chunk's worth of frames; the caller
     iterates over the inner list to feed frames into a downstream
@@ -191,7 +190,7 @@ def iter_decoded_frames(
     tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
     compute_dtype: Any = mx.bfloat16,
-) -> Iterator[np.ndarray]:
+) -> Iterator[mx.array]:
     """Flat per-frame iterator over the chunked decode.
 
     Wraps `iter_decoded_chunks` and chains the inner lists into a
