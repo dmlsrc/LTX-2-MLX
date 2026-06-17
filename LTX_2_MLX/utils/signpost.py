@@ -191,13 +191,6 @@ def _try_init() -> None:
                 begin.restype = None
                 end.restype = None
                 _sids[phase] = lib.ltx_signpost_id_generate()
-            lib.ltx_signpost_event_step_begin.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
-            lib.ltx_signpost_event_step_end.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
-            lib.ltx_signpost_event_block.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
-            lib.ltx_signpost_event_step_begin.restype = None
-            lib.ltx_signpost_event_step_end.restype = None
-            lib.ltx_signpost_event_block.restype = None
-            _sids["__events__"] = lib.ltx_signpost_id_generate()
             _lib = lib
             print(
                 f"  [LTX_PROFILE_SIGNPOSTS] loaded {_LIB.name}, "
@@ -272,27 +265,6 @@ def signpost_barrier(*arrays) -> None:
     # Lazy import: only pulled in when sync mode is actually engaged.
     import mlx.core as _mx
     _mx.eval(*arrays)
-
-
-def step_begin(step_idx: int) -> None:
-    _try_init()
-    if _lib is None:
-        return
-    _lib.ltx_signpost_event_step_begin(_sids["__events__"], int(step_idx))
-
-
-def step_end(step_idx: int) -> None:
-    _try_init()
-    if _lib is None:
-        return
-    _lib.ltx_signpost_event_step_end(_sids["__events__"], int(step_idx))
-
-
-def block_event(block_idx: int) -> None:
-    _try_init()
-    if _lib is None:
-        return
-    _lib.ltx_signpost_event_block(_sids["__events__"], int(block_idx))
 
 
 # Eager init at module import.  Without this, _try_init() fires lazily on

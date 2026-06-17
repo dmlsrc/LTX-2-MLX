@@ -1,25 +1,10 @@
 """Diffusion stepping strategies for LTX-2 sampling."""
 
 import math
-from typing import Protocol
 
 import mlx.core as mx
 
 from LTX_2_MLX.core_utils import to_velocity
-
-
-class DiffusionStepProtocol(Protocol):
-    """Protocol for diffusion sampling steps."""
-
-    def step(
-        self,
-        sample: mx.array,
-        denoised_sample: mx.array,
-        sigmas: mx.array,
-        step_index: int,
-    ) -> mx.array:
-        """Take a single diffusion step from current sigma to next."""
-        ...
 
 
 class EulerDiffusionStep:
@@ -75,68 +60,6 @@ class EulerDiffusionStep:
         if sample_dtype == mx.float32:
             return result
         return result.astype(sample_dtype)
-
-
-class EulerAncestralDiffusionStep:
-    """
-    Euler ancestral sampler - adds noise injection at each step.
-
-    Matches ComfyUI's euler_ancestral_cfg_pp sampler behavior.
-    At each step:
-      1. Compute velocity from denoised prediction
-      2. Step to sigma_down (deterministic part)
-      3. Add noise scaled by sigma_up (stochastic part)
-
-    The noise injection helps with audio quality and diversity.
-    """
-
-    @staticmethod
-    def _get_ancestral_step(sigma_from: float, sigma_to: float, eta: float = 1.0):
-        """Compute sigma_up and sigma_down for ancestral sampling."""
-        if sigma_to == 0.0:
-            return 0.0, 0.0
-        sigma_up = min(sigma_to, eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5)
-        sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
-        return sigma_up, sigma_down
-
-    def step(
-        self,
-        sample: mx.array,
-        denoised_sample: mx.array,
-        sigmas: mx.array,
-        step_index: int,
-    ) -> mx.array:
-        """
-        Take an ancestral Euler step with noise injection.
-
-        Args:
-            sample: Current noisy sample.
-            denoised_sample: Predicted denoised sample.
-            sigmas: Full sigma schedule.
-            step_index: Current step index.
-
-        Returns:
-            Updated sample with injected noise.
-        """
-        sigma = float(sigmas[step_index])
-        sigma_next = float(sigmas[step_index + 1])
-
-        sigma_up, sigma_down = self._get_ancestral_step(sigma, sigma_next)
-
-        velocity = to_velocity(sample, mx.array(sigma), denoised_sample)
-
-        # Deterministic step to sigma_down
-        dt = sigma_down - sigma
-        sample_f32 = sample.astype(mx.float32)
-        velocity_f32 = velocity.astype(mx.float32)
-        result = sample_f32 + velocity_f32 * dt
-
-        # Stochastic noise injection
-        if sigma_up > 0:
-            noise = mx.random.normal(shape=result.shape, dtype=mx.float32)
-            result = result + noise * sigma_up
-
-        return result.astype(sample.dtype)
 
 
 class HeunDiffusionStep:

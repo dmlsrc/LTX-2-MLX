@@ -81,12 +81,6 @@ def configure_kv_downsample(
     reset_kv_downsample_stats()
 
 
-def clear_kv_downsample() -> None:
-    global _KV_DOWNSAMPLE_CONFIG
-    _KV_DOWNSAMPLE_CONFIG = None
-    reset_kv_downsample_stats()
-
-
 def reset_kv_downsample_stats() -> None:
     _KV_DOWNSAMPLE_COUNTS["applied"] = 0
     _KV_DOWNSAMPLE_COUNTS["fallback"] = 0

@@ -2,25 +2,8 @@
 
 import math
 from dataclasses import dataclass, field
-from typing import Protocol
 
 import mlx.core as mx
-
-
-class GuiderProtocol(Protocol):
-    """Protocol for guidance strategies."""
-
-    def delta(self, cond: mx.array, uncond: mx.array) -> mx.array:
-        """Compute the guidance delta between conditioned and unconditioned samples."""
-        ...
-
-    def guide(self, cond: mx.array, uncond: mx.array) -> mx.array:
-        """Apply guidance to get the final output: cond + delta(cond, uncond)."""
-        ...
-
-    def enabled(self) -> bool:
-        """Return True if guidance is active."""
-        ...
 
 
 @dataclass(frozen=True)

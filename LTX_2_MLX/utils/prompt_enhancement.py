@@ -69,16 +69,6 @@ def resize_aspect_ratio_preserving(
     return np.array(pil_image)
 
 
-def load_image_for_enhancement(
-    image_path: str,
-    long_side: int = 896,
-) -> np.ndarray:
-    """Load an image and resize for prompt enhancement."""
-    image = Image.open(image_path).convert("RGB")
-    image_np = np.array(image)
-    return resize_aspect_ratio_preserving(image_np, long_side)
-
-
 def create_t2v_chat_prompt(
     user_prompt: str,
     system_prompt: str | None = None,

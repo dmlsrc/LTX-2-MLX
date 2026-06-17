@@ -1,7 +1,6 @@
 """Patchification strategies for LTX-2 latent tensors."""
 
 import math
-from typing import Protocol
 
 import mlx.core as mx
 
@@ -10,27 +9,6 @@ from LTX_2_MLX.types import (
     SpatioTemporalScaleFactors,
     VideoLatentShape,
 )
-
-
-class PatchifierProtocol(Protocol):
-    """Protocol for patchification strategies."""
-
-    @property
-    def patch_size(self) -> tuple[int, int, int]:
-        """Return the patch size (temporal, height, width)."""
-        ...
-
-    def patchify(self, latents: mx.array) -> mx.array:
-        """Convert latents to patch sequence."""
-        ...
-
-    def unpatchify(
-        self,
-        latents: mx.array,
-        output_shape: VideoLatentShape | AudioLatentShape,
-    ) -> mx.array:
-        """Convert patch sequence back to latents."""
-        ...
 
 
 class VideoLatentPatchifier:

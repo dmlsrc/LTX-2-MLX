@@ -501,22 +501,3 @@ def load_gemma3_weights(
                 loaded_count += 1
 
     print(f"  Loaded {loaded_count} weight tensors")
-
-
-def create_gemma3_model(weights_dir: str | None = None) -> Gemma3Model:
-    """
-    Create and optionally load a Gemma 3 model.
-
-    Args:
-        weights_dir: Optional path to weights directory.
-
-    Returns:
-        Gemma3Model instance.
-    """
-    config = Gemma3Config()
-    model = Gemma3Model(config)
-
-    if weights_dir:
-        load_gemma3_weights(model, weights_dir)
-
-    return model

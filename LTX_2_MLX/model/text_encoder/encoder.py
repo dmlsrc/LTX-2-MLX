@@ -32,35 +32,6 @@ class AudioVideoGemmaEncoderOutput:
     attention_mask: mx.array  # Shape: [B, T]
 
 
-class CaptionProjection(nn.Module):
-    """
-    Project text embeddings from Gemma dimension to transformer cross-attention dimension.
-
-    This is a 2-layer MLP that converts from 3840 (Gemma) to 4096 (transformer).
-
-    DEPRECATED: This class is kept for backwards compatibility but is no longer used
-    in the text encoder. Caption projection is now handled by the transformer model's
-    PixArtAlphaTextProjection, matching PyTorch LTX-2 architecture.
-    """
-
-    def __init__(
-        self,
-        in_features: int = 3840,
-        hidden_features: int = 4096,
-        out_features: int = 4096,
-    ):
-        super().__init__()
-        self.linear_1 = nn.Linear(in_features, hidden_features)
-        self.linear_2 = nn.Linear(hidden_features, out_features)
-
-    def __call__(self, x: mx.array) -> mx.array:
-        """Project embeddings."""
-        x = self.linear_1(x)
-        x = nn.silu(x)
-        x = self.linear_2(x)
-        return x
-
-
 class VideoGemmaTextEncoderModel(nn.Module):
     """
     Video Gemma Text Encoder Model.

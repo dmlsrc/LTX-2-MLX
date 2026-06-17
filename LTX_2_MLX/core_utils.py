@@ -1,7 +1,5 @@
 """Utility functions for LTX-2 MLX."""
 
-from typing import Any
-
 import mlx.core as mx
 
 
@@ -22,13 +20,6 @@ def rms_norm(
         RMS normalized tensor.
     """
     return mx.fast.rms_norm(x, weight, eps)
-
-
-def check_config_value(config: dict, key: str, expected: Any) -> None:
-    """Check that a config value matches the expected value."""
-    actual = config.get(key)
-    if actual != expected:
-        raise ValueError(f"Config value {key} is {actual}, expected {expected}")
 
 
 def to_velocity(

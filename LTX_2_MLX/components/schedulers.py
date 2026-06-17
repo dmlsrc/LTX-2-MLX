@@ -1,20 +1,11 @@
 """Sigma schedule generators for LTX-2 diffusion sampling."""
 
 import math
-from typing import Protocol
 
 import mlx.core as mx
 
 BASE_SHIFT_ANCHOR = 1024
 MAX_SHIFT_ANCHOR = 4096
-
-
-class SchedulerProtocol(Protocol):
-    """Protocol for sigma schedulers."""
-
-    def execute(self, steps: int, **kwargs) -> mx.array:
-        """Generate a sigma schedule with the given number of steps."""
-        ...
 
 
 class LTX2Scheduler:
@@ -161,11 +152,6 @@ class LinearQuadraticScheduler:
         sigma_schedule = [1.0 - x for x in sigma_schedule]
 
         return mx.array(sigma_schedule, dtype=mx.float32)
-
-
-def flux_time_shift(mu: float, sigma: float, t: float) -> float:
-    """Compute flux time shift transformation."""
-    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
 # Predefined sigma values for distilled models

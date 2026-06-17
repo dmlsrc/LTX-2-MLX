@@ -464,7 +464,7 @@ class AVPipeline:
             sigmas: Sigma schedule.
             positive_context: Positive text context.
             negative_context: Negative text context.
-            guider: Any guider implementing GuiderProtocol (CFG, CFG*, APG, etc.).
+            guider: Any guider implementing the guider interface (CFG, CFG*, APG, etc.).
             stepper: Diffusion stepper.
             callback: Optional callback(step, total_steps).
             stg_guider: Optional STG guider for temporal coherence.

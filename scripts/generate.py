@@ -440,17 +440,6 @@ def parse_compute_dtype(dtype_name: str | mx.Dtype) -> mx.Dtype:
         raise ValueError(f"Unsupported compute dtype '{dtype_name}'. Valid values: {valid}") from exc
 
 
-def parse_positive_float(value: str) -> float:
-    """Parse a strictly positive float for user-facing CLI limits."""
-    try:
-        parsed = float(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"Expected a positive number, got '{value}'") from exc
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError(f"Expected a positive number, got {parsed}")
-    return parsed
-
-
 def parse_non_negative_float(value: str) -> float:
     """Parse a non-negative float for user-facing CLI limits."""
     try:
@@ -1022,51 +1011,6 @@ class RunTimings:
         }
 
 
-
-def batched_cfg_forward(
-    model,
-    latent_patchified: mx.array,
-    text_encoding: mx.array,
-    text_mask: mx.array,
-    null_encoding: mx.array,
-    null_mask: mx.array,
-    sigma: float,
-    positions: mx.array,
-) -> tuple:
-    """
-    Run CFG forward pass with batched inputs (2x speedup).
-
-    Instead of two separate forward passes for cond and uncond,
-    we stack them along the batch dimension and do a single pass.
-
-    Returns:
-        Tuple of (cond_output, uncond_output) both shape [1, T, C]
-    """
-    # Stack along batch dimension: [1, T, C] -> [2, T, C]
-    batched_latent = mx.concatenate([latent_patchified, latent_patchified], axis=0)
-    batched_context = mx.concatenate([text_encoding, null_encoding], axis=0)
-    batched_positions = mx.concatenate([positions, positions], axis=0)
-    batched_timesteps = mx.array([sigma, sigma])
-
-    # Single batched modality
-    # NOTE: context_mask=None matches PyTorch behavior - they don't use text masks
-    batched_modality = Modality(
-        latent=batched_latent,
-        context=batched_context,
-        context_mask=None,
-        timesteps=batched_timesteps,
-        positions=batched_positions,
-        enabled=True,
-    )
-
-    # Single forward pass (2x faster than two separate passes)
-    batched_output = model(batched_modality)
-
-    # Split back: [2, T, C] -> two [1, T, C]
-    cond_output = batched_output[0:1]
-    uncond_output = batched_output[1:2]
-
-    return cond_output, uncond_output
 from LTX_2_MLX.model.text_encoder.encoder import (
     create_av_text_encoder,
     create_av_text_encoder_v2_from_checkpoint,
@@ -1373,13 +1317,6 @@ def load_tokenizer(model_path: str):
         return None
 
 
-def create_chat_prompt(user_prompt: str) -> str:
-    """Create a chat-format prompt for Gemma 3."""
-    # Gemma 3 instruction-tuned format
-    chat = f"<bos><start_of_turn>user\n{T2V_SYSTEM_PROMPT}\n{user_prompt}<end_of_turn>\n<start_of_turn>model\n"
-    return chat
-
-
 def enhance_prompt(
     prompt: str,
     gemma_path: str,
@@ -1541,29 +1478,6 @@ def encode_with_gemma(
     mx.metal.clear_cache()
 
     return encoded, original_mask
-
-
-def encode_with_av_gemma(
-    prompt: str,
-    gemma_path: str,
-    ltx_weights_path: str,
-    max_length: int = 1024,
-) -> tuple:
-    """
-    Encode a single text prompt using the AudioVideo Gemma 3 + LTX-2 text encoder.
-
-    Returns:
-        Tuple of (video_encoding, audio_encoding, attention_mask) as MLX arrays.
-    """
-    results = encode_av_gemma_batch(
-        prompts=[prompt],
-        gemma_path=gemma_path,
-        ltx_weights_path=ltx_weights_path,
-        max_length=max_length,
-    )
-    if results is None:
-        return None, None, None
-    return results[0]
 
 
 def encode_av_gemma_batch(

@@ -1,7 +1,6 @@
 """Diffusion components: schedulers, guiders, noisers, etc."""
 
 from .diffusion_steps import (
-    EulerAncestralDiffusionStep,
     EulerDiffusionStep,
     HeunDiffusionStep,
     Res2sDiffusionStep,

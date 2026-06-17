@@ -1,18 +1,8 @@
 """Noise injection strategies for LTX-2 diffusion sampling."""
 
-from typing import Protocol
-
 import mlx.core as mx
 
 from LTX_2_MLX.types import LatentState
-
-
-class NoiserProtocol(Protocol):
-    """Protocol for adding noise to a latent state during diffusion."""
-
-    def __call__(self, latent_state: LatentState, noise_scale: float) -> LatentState:
-        """Add noise to the latent state."""
-        ...
 
 
 class GaussianNoiser:
