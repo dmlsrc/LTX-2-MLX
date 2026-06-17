@@ -1373,10 +1373,9 @@ class LTXModel(nn.Module):
 
             # Capture audio state after each block (first denoising step only)
             if capture and audio_args is not None:
-                import numpy as _np
                 mx.eval(audio_args.x)
                 path = f"{self._audio_layer_debug_dir}/audio_layer_{i:04d}.npy"
-                _np.save(path, _np.array(audio_args.x.astype(mx.float32)))
+                mx.save(path, audio_args.x.astype(mx.float32))
                 if i == 0:
                     print("  [debug] Capturing audio layer states...")
                 if i == total_blocks - 1:

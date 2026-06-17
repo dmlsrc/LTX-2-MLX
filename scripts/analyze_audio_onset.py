@@ -104,6 +104,7 @@ from LTX_2_MLX.audio.onset import (
     DEFAULT_DETECT_WINDOW_MS,
     detect_onset_spike,
 )
+from LTX_2_MLX.sidecars import load_sidecar
 
 # Default analysis parameters.  Picked to localize sub-100 ms transients
 # while staying readable as ASCII tables in a terminal.  The coarse window
@@ -246,7 +247,16 @@ def report_audio_latents(
     two-stage runs (which expose stage_1 / stage_2 / final keys).
     """
     print(f"\nNPZ: {npz}")
-    d = np.load(npz, allow_pickle=False)
+    arrays, _metadata = load_sidecar(str(npz))
+    # The comparison math below is NumPy; convert the MLX arrays once. bf16 has
+    # no NumPy dtype, so widen it to float32 (this is also what the npz backend
+    # stored on disk) before handing it to the stats code.
+    import mlx.core as mx
+
+    d = {
+        k: np.array(v.astype(mx.float32) if v.dtype == mx.bfloat16 else v)
+        for k, v in arrays.items()
+    }
     audio_keys = [k for k in d.keys() if "audio_latent" in k and "_mlx_dtype" not in k]
     if not audio_keys:
         print("  (no audio-latent keys found in NPZ)")

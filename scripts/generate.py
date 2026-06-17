@@ -17,6 +17,7 @@ import numpy as np
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from LTX_2_MLX import sidecars
 from LTX_2_MLX.components import (
     DISTILLED_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -869,26 +870,17 @@ def build_default_output_path(
 
 def latent_sidecar_path(output_path: str) -> str:
     """Use the requested output stem for the final-latents sidecar."""
-    return os.path.splitext(output_path)[0] + ".npz"
+    return sidecars.sidecar_path(output_path)
 
 
 def text_sidecar_path(output_path: str) -> str:
     """Use the requested output stem for the text-conditioning sidecar."""
-    return os.path.splitext(output_path)[0] + "_text.npz"
+    return sidecars.sidecar_path(output_path, "_text")
 
 
 def run_log_sidecar_path(output_path: str) -> str:
     """Use the requested output stem for the run metadata sidecar."""
     return os.path.splitext(output_path)[0] + "_run.json"
-
-
-def mlx_array_to_numpy(array: mx.array) -> np.ndarray:
-    """Convert an MLX array to NumPy, preserving dtype where NumPy supports it."""
-    mx.eval(array)
-    try:
-        return np.array(array)
-    except (TypeError, RuntimeError):
-        return np.array(array.astype(mx.float32))
 
 
 def save_text_conditioning_sidecar(
@@ -910,32 +902,25 @@ def save_text_conditioning_sidecar(
     negative fields are absent.
     """
     arrays = {
-        "schema_version": np.array(1, dtype=np.int32),
-        "prompt": np.array(prompt or ""),
-        "negative_prompt": np.array(negative_prompt or ""),
-        "positive_video_encoding": mlx_array_to_numpy(positive_video_encoding),
-        "positive_video_encoding_mlx_dtype": str(positive_video_encoding.dtype),
-        "positive_attention_mask": mlx_array_to_numpy(positive_mask),
-        "positive_attention_mask_mlx_dtype": str(positive_mask.dtype),
+        "schema_version": mx.array(1, dtype=mx.int32),
+        "positive_video_encoding": positive_video_encoding,
+        "positive_attention_mask": positive_mask,
     }
     if negative_video_encoding is not None:
-        arrays["negative_video_encoding"] = mlx_array_to_numpy(negative_video_encoding)
-        arrays["negative_video_encoding_mlx_dtype"] = str(negative_video_encoding.dtype)
+        arrays["negative_video_encoding"] = negative_video_encoding
     if negative_mask is not None:
-        arrays["negative_attention_mask"] = mlx_array_to_numpy(negative_mask)
-        arrays["negative_attention_mask_mlx_dtype"] = str(negative_mask.dtype)
+        arrays["negative_attention_mask"] = negative_mask
     if positive_audio_encoding is not None:
-        arrays["positive_audio_encoding"] = mlx_array_to_numpy(positive_audio_encoding)
-        arrays["positive_audio_encoding_mlx_dtype"] = str(positive_audio_encoding.dtype)
+        arrays["positive_audio_encoding"] = positive_audio_encoding
     if negative_audio_encoding is not None:
-        arrays["negative_audio_encoding"] = mlx_array_to_numpy(negative_audio_encoding)
-        arrays["negative_audio_encoding_mlx_dtype"] = str(negative_audio_encoding.dtype)
+        arrays["negative_audio_encoding"] = negative_audio_encoding
 
-    output_dir = os.path.dirname(path)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    np.savez(path, **arrays)
-    print(f"  Saved text conditioning: {path}")
+    metadata = {
+        "prompt": prompt or "",
+        "negative_prompt": negative_prompt or "",
+    }
+    written = sidecars.save_sidecar(path, arrays, metadata)
+    print(f"  Saved text conditioning: {written}")
 
 
 def save_run_log_sidecar(
@@ -1770,51 +1755,11 @@ def load_text_embedding(embedding_path: str) -> tuple:
     return embedding, mask
 
 
-def _npz_scalar_str(data: np.lib.npyio.NpzFile, key: str) -> str | None:
-    if key not in data.files:
-        return None
-    value = data[key]
-    if isinstance(value, np.ndarray) and value.shape == ():
-        return str(value.item())
-    return str(value)
-
-
-def _mlx_dtype_from_metadata(dtype_name: str | None) -> mx.Dtype | None:
-    if not dtype_name:
-        return None
-    normalized = dtype_name.lower()
-    if "bfloat16" in normalized:
-        return mx.bfloat16
-    if "float16" in normalized:
-        return mx.float16
-    if "float32" in normalized:
-        return mx.float32
-    if "int32" in normalized:
-        return mx.int32
-    if "int64" in normalized:
-        return mx.int64
-    if "bool" in normalized:
-        return mx.bool_
-    return None
-
-
-def _load_mlx_npz_array(
-    data: np.lib.npyio.NpzFile,
-    key: str,
-    dtype_key: str | None = None,
-) -> mx.array:
-    array = mx.array(data[key])
-    dtype = _mlx_dtype_from_metadata(_npz_scalar_str(data, dtype_key) if dtype_key else None)
-    if dtype is not None and array.dtype != dtype:
-        array = array.astype(dtype)
-    return array
-
-
 def load_text_conditioning(embedding_path: str, use_av_encoder: bool) -> dict:
     """Load legacy text embeddings or the richer `_text.npz` conditioning sidecar."""
-    data = np.load(embedding_path)
+    arrays, metadata = sidecars.load_sidecar(embedding_path)
 
-    if "positive_video_encoding" not in data.files:
+    if "positive_video_encoding" not in arrays:
         embedding, mask = load_text_embedding(embedding_path)
         loaded = {
             "format": "legacy",
@@ -1831,44 +1776,20 @@ def load_text_conditioning(embedding_path: str, use_av_encoder: bool) -> dict:
 
     loaded = {
         "format": "text_conditioning",
-        "positive_video_encoding": _load_mlx_npz_array(
-            data,
-            "positive_video_encoding",
-            "positive_video_encoding_mlx_dtype",
-        ),
-        "positive_attention_mask": _load_mlx_npz_array(
-            data,
-            "positive_attention_mask",
-            "positive_attention_mask_mlx_dtype",
-        ),
-        "negative_video_encoding": _load_mlx_npz_array(
-            data,
-            "negative_video_encoding",
-            "negative_video_encoding_mlx_dtype",
-        ) if "negative_video_encoding" in data.files else None,
-        "negative_attention_mask": _load_mlx_npz_array(
-            data,
-            "negative_attention_mask",
-            "negative_attention_mask_mlx_dtype",
-        ) if "negative_attention_mask" in data.files else None,
-        "positive_audio_encoding": _load_mlx_npz_array(
-            data,
-            "positive_audio_encoding",
-            "positive_audio_encoding_mlx_dtype",
-        ) if "positive_audio_encoding" in data.files else None,
-        "negative_audio_encoding": _load_mlx_npz_array(
-            data,
-            "negative_audio_encoding",
-            "negative_audio_encoding_mlx_dtype",
-        ) if "negative_audio_encoding" in data.files else None,
+        "positive_video_encoding": arrays["positive_video_encoding"],
+        "positive_attention_mask": arrays["positive_attention_mask"],
+        "negative_video_encoding": arrays.get("negative_video_encoding"),
+        "negative_attention_mask": arrays.get("negative_attention_mask"),
+        "positive_audio_encoding": arrays.get("positive_audio_encoding"),
+        "negative_audio_encoding": arrays.get("negative_audio_encoding"),
     }
 
     print(f"  Loaded text conditioning from {embedding_path}")
     print(f"  Video shape: {loaded['positive_video_encoding'].shape}")
     if loaded["positive_audio_encoding"] is not None:
         print(f"  Audio shape: {loaded['positive_audio_encoding'].shape}")
-    if _npz_scalar_str(data, "prompt"):
-        print(f"  Original prompt: {_npz_scalar_str(data, 'prompt')}")
+    if metadata.get("prompt"):
+        print(f"  Original prompt: {metadata['prompt']}")
     return loaded
 
 
@@ -4692,7 +4613,7 @@ def generate_video(
     # Save denoised latent
     latent_path = output_path.replace('.mp4', '_latent.npz')
     print(f"\nSaving denoised latent to {latent_path}...")
-    np.savez(latent_path, latent=np.array(latent))
+    sidecars.save_sidecar(latent_path, {"latent": latent})
     print(f"  Latent shape: {latent.shape}")
 
     # Apply spatial upscaling if requested

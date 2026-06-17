@@ -26,6 +26,8 @@ from PIL import Image
 # Add repo root to import path when run as scripts/decode_latent_debug.py.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from LTX_2_MLX.sidecars import load_sidecar  # noqa: E402
+
 
 def format_duration(seconds: float) -> str:
     if seconds >= 60:
@@ -147,32 +149,32 @@ def load_latents(
     else:
         raise ValueError(f"unknown stage {stage!r}; expected 'final', 'stage1', or 'stage2'")
 
-    with np.load(path) as data:
-        keys = sorted(data.files)
-        if video_key not in data:
-            raise KeyError(
-                f"{path} does not contain {video_key} (stage={stage!r}, {missing_hint}); keys={keys}"
-            )
-        if dtype_key not in data:
-            raise KeyError(
-                f"{path} is missing {dtype_key} (stage={stage!r}); keys={keys}"
-            )
+    arrays, metadata = load_sidecar(path)
+    keys = sorted([*arrays.keys(), *metadata.keys()])
+    if video_key not in arrays:
+        raise KeyError(
+            f"{path} does not contain {video_key} (stage={stage!r}, {missing_hint}); keys={keys}"
+        )
+    if dtype_key not in metadata:
+        raise KeyError(
+            f"{path} is missing {dtype_key} (stage={stage!r}); keys={keys}"
+        )
 
-        latent_np = data[video_key]
-        stored_dtype = str(data[dtype_key])
-        has_audio = audio_key in data
-        audio_np = data[audio_key] if has_audio else None
-        audio_shape = audio_np.shape if audio_np is not None else None
-        audio_dtype = str(data[audio_dtype_key]) if audio_dtype_key in data else None
+    latent_array = arrays[video_key]
+    stored_dtype = metadata[dtype_key]
+    has_audio = audio_key in arrays
+    audio_array = arrays[audio_key] if has_audio else None
+    audio_shape = audio_array.shape if audio_array is not None else None
+    audio_dtype = metadata.get(audio_dtype_key)
 
     print(f"NPZ keys: {', '.join(keys)}")
     print(f"Stage:    {stage} (video_key={video_key!r}, audio_key={audio_key!r})")
-    print(f"Loaded video latent: shape={latent_np.shape}, numpy_dtype={latent_np.dtype}, mlx_dtype={stored_dtype or 'unknown'}")
+    print(f"Loaded video latent: shape={latent_array.shape}, mlx_dtype={stored_dtype or 'unknown'}")
     if has_audio:
         print(f"Found audio latent (key={audio_key!r}): shape={audio_shape}, mlx_dtype={audio_dtype or 'unknown'}")
     elif audio_key in keys:
-        # Defensive: shouldn't happen because we checked `audio_key in data`, but
-        # if a future code path strips the key after the with-block, surface it.
+        # Defensive: shouldn't happen because we checked `audio_key in arrays`, but
+        # if a future code path strips the key after the load, surface it.
         print(f"Audio key {audio_key!r} present but not loaded - check load_latents logic.")
     else:
         # Explicitly state we looked for the matching-stage audio and found none.
@@ -182,18 +184,18 @@ def load_latents(
     if resolved == "auto":
         resolved = parse_dtype(mx_mod, stored_dtype)
 
-    latent = mx_mod.array(latent_np)
+    latent = latent_array
     if resolved is not None:
         latent = latent.astype(resolved)
     mx_mod.eval(latent)
     print(f"Decode latent dtype: {latent.dtype}")
 
     audio_latent = None
-    if audio_np is not None:
+    if audio_array is not None:
         if audio_dtype is None:
             raise KeyError(f"{path} contains final_audio_latent but is missing final_audio_latent_mlx_dtype")
         audio_resolved = parse_dtype(mx_mod, audio_dtype)
-        audio_latent = mx_mod.array(audio_np).astype(audio_resolved)
+        audio_latent = audio_array.astype(audio_resolved)
         mx_mod.eval(audio_latent)
         print(f"Decode audio latent dtype: {audio_latent.dtype}")
 

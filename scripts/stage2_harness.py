@@ -33,6 +33,7 @@ import generate as gen  # noqa: E402
 
 from LTX_2_MLX.pipelines.common import audio_modality_from_state, modality_from_state  # noqa: E402
 from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
+from LTX_2_MLX.sidecars import load_sidecar  # noqa: E402
 
 
 def adjacent_run_log_path(latents_path: str) -> str:
@@ -54,28 +55,18 @@ def load_adjacent_run_params(latents_path: str) -> dict:
 
 
 def load_stage1_latents(path: str) -> tuple[mx.array, mx.array | None, dict]:
-    data = np.load(path)
-    if "stage_1_video_latent" not in data.files:
+    arrays, file_metadata = load_sidecar(path)
+    if "stage_1_video_latent" not in arrays:
         raise ValueError(
             f"{path} does not contain stage_1_video_latent. "
             "Use a distilled two-stage latent sidecar saved with --save-latents."
         )
 
-    video = gen._load_mlx_npz_array(
-        data,
-        "stage_1_video_latent",
-        "stage_1_video_latent_mlx_dtype",
-    )
-    audio = None
-    if "stage_1_audio_latent" in data.files:
-        audio = gen._load_mlx_npz_array(
-            data,
-            "stage_1_audio_latent",
-            "stage_1_audio_latent_mlx_dtype",
-        )
+    video = arrays["stage_1_video_latent"]
+    audio = arrays.get("stage_1_audio_latent")
 
     metadata = {
-        "pipeline": gen._npz_scalar_str(data, "pipeline"),
+        "pipeline": file_metadata.get("pipeline"),
         "video_shape": tuple(video.shape),
         "audio_shape": tuple(audio.shape) if audio is not None else None,
     }

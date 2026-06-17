@@ -26,6 +26,7 @@ from LTX_2_MLX.model.video_vae.native_decoder import (
     _unpatchify_spatial_bfhwc,
     load_native_vae_decoder_weights,
 )
+from LTX_2_MLX.sidecars import load_sidecar
 from scripts.generate import get_vae_config, parse_compute_dtype
 
 # Default weights path is taken from $LTX_DEFAULT_WEIGHTS_PATH (a personal
@@ -40,10 +41,10 @@ def _memory_snapshot() -> dict[str, float]:
 
 
 def _load_latent(path: Path, key: str, dtype: mx.Dtype) -> mx.array:
-    data = np.load(path)
-    if key not in data.files:
-        raise ValueError(f"{path} does not contain {key!r}; found {data.files}")
-    latent = mx.array(data[key]).astype(dtype)
+    arrays, _metadata = load_sidecar(str(path))
+    if key not in arrays:
+        raise ValueError(f"{path} does not contain {key!r}; found {sorted(arrays)}")
+    latent = arrays[key].astype(dtype)
     if latent.ndim == 4:
         latent = latent[None]
     mx.eval(latent)

@@ -30,6 +30,12 @@ from typing import Any
 
 import numpy as np
 
+# Run as scripts/compare_npz_sidecars.py: put the repo root on the path so the
+# centralized sidecar loader (which transparently handles both the npz and
+# safetensors backends) is importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from LTX_2_MLX.sidecars import load_sidecar  # noqa: E402
+
 DEFAULT_RUN_KEYS = (
     "prompt",
     "negative_prompt",
@@ -296,18 +302,38 @@ def _resolve_keys(
     return sorted(keys)
 
 
+def _load_sidecar_as_numpy(path: Path) -> dict[str, np.ndarray]:
+    """Load a sidecar via the centralized loader and return a NumPy-keyed dict.
+
+    The comparison math below is NumPy, so each MLX array is converted once.
+    bf16 has no NumPy dtype, so widen it to float32 (which is also what the npz
+    backend stored on disk) before the stats code touches it. The ``_mlx_dtype``
+    tags and string metadata come back through ``load_sidecar``'s metadata dict,
+    so they remain comparable keys exactly as the raw npz exposed them.
+    """
+    import mlx.core as mx
+
+    arrays, metadata = load_sidecar(str(path))
+    out: dict[str, np.ndarray] = {}
+    for key, value in arrays.items():
+        if value.dtype == mx.bfloat16:
+            value = value.astype(mx.float32)
+        out[key] = np.array(value)
+    for key, value in metadata.items():
+        out[key] = np.array(value)
+    return out
+
+
 def _npz_selected_keys(
     left_path: Path,
     right_path: Path,
     *,
     keys: list[str] | None,
     include_missing: bool,
-    allow_pickle: bool,
 ) -> list[str]:
-    with np.load(left_path, allow_pickle=allow_pickle) as left, np.load(
-        right_path, allow_pickle=allow_pickle
-    ) as right:
-        return _resolve_keys(left.files, right.files, keys, include_missing)
+    left = _load_sidecar_as_numpy(left_path)
+    right = _load_sidecar_as_numpy(right_path)
+    return _resolve_keys(left.keys(), right.keys(), keys, include_missing)
 
 
 def compare_npz(
@@ -317,7 +343,6 @@ def compare_npz(
     label: str,
     keys: list[str] | None,
     include_missing: bool,
-    allow_pickle: bool,
     wrap_width: int | None,
     key_width: int,
     colors: Colors,
@@ -326,34 +351,33 @@ def compare_npz(
     _print_wrapped_field("left", left_path, indent="", wrap_width=wrap_width)
     _print_wrapped_field("right", right_path, indent="", wrap_width=wrap_width)
 
-    with np.load(left_path, allow_pickle=allow_pickle) as left, np.load(
-        right_path, allow_pickle=allow_pickle
-    ) as right:
-        selected_keys = _resolve_keys(left.files, right.files, keys, include_missing)
-        if not selected_keys:
-            print("No comparable keys.")
-            return []
+    left = _load_sidecar_as_numpy(left_path)
+    right = _load_sidecar_as_numpy(right_path)
+    selected_keys = _resolve_keys(left.keys(), right.keys(), keys, include_missing)
+    if not selected_keys:
+        print("No comparable keys.")
+        return []
 
-        results: list[CompareResult] = []
-        for key in selected_keys:
-            if key not in left or key not in right:
-                print(
-                    f"{key:<{key_width}} {_missing_status(colors)} "
-                    f"left={key not in left} right={key not in right}"
-                )
-                results.append(CompareResult(key, exact=False, comparable=False, missing=True))
-                continue
-            results.append(
-                _compare_value(
-                    key,
-                    left[key],
-                    right[key],
-                    key_width=key_width,
-                    wrap_width=wrap_width,
-                    colors=colors,
-                )
+    results: list[CompareResult] = []
+    for key in selected_keys:
+        if key not in left or key not in right:
+            print(
+                f"{key:<{key_width}} {_missing_status(colors)} "
+                f"left={key not in left} right={key not in right}"
             )
-        return results
+            results.append(CompareResult(key, exact=False, comparable=False, missing=True))
+            continue
+        results.append(
+            _compare_value(
+                key,
+                left[key],
+                right[key],
+                key_width=key_width,
+                wrap_width=wrap_width,
+                colors=colors,
+            )
+        )
+    return results
 
 
 def _json_get(data: dict[str, Any], dotted_key: str) -> Any:
@@ -476,7 +500,10 @@ def main() -> int:
     parser.add_argument(
         "--allow-pickle",
         action="store_true",
-        help="Pass allow_pickle=True to numpy.load. Off by default for safer sidecar reads.",
+        help=(
+            "Retained for compatibility; now a no-op. Sidecars load through the "
+            "centralized loader, which reads object-free npz (and safetensors)."
+        ),
     )
     parser.add_argument(
         "--require-exact",
@@ -497,7 +524,6 @@ def main() -> int:
             args.right,
             keys=args.keys,
             include_missing=args.include_missing,
-            allow_pickle=args.allow_pickle,
         )
     ]
     if args.with_text:
@@ -507,7 +533,6 @@ def main() -> int:
                 right_text,
                 keys=None,
                 include_missing=args.include_missing,
-                allow_pickle=args.allow_pickle,
             )
         )
     if args.with_run_log:
@@ -522,7 +547,6 @@ def main() -> int:
             label="latents",
             keys=args.keys,
             include_missing=args.include_missing,
-            allow_pickle=args.allow_pickle,
             wrap_width=args.wrap_width,
             key_width=global_key_width,
             colors=colors,
@@ -537,7 +561,6 @@ def main() -> int:
                 label="text conditioning",
                 keys=None,
                 include_missing=args.include_missing,
-                allow_pickle=args.allow_pickle,
                 wrap_width=args.wrap_width,
                 key_width=global_key_width,
                 colors=colors,

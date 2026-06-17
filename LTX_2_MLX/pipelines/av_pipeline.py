@@ -16,7 +16,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import mlx.core as mx
-import numpy as np
 
 # LTX_VELOCITY_MODE=1 makes the simple AV distilled loop bypass X0Model and
 # do the velocity-form Euler update inline:
@@ -76,6 +75,7 @@ from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
+from ..sidecars import save_sidecar
 from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
 from .common import (
     ImageCondition,
@@ -232,15 +232,6 @@ class AVPipeline:
             model.profile_transformer_label = label
             model.profile_transformer_blocks = blocks
 
-    @staticmethod
-    def _latent_to_numpy(latent: mx.array) -> np.ndarray:
-        """Convert an MLX latent to a NumPy array suitable for npz storage."""
-        mx.eval(latent)
-        try:
-            return np.array(latent)
-        except (TypeError, RuntimeError):
-            return np.array(latent.astype(mx.float32))
-
     @classmethod
     def _save_final_latents(
         cls,
@@ -254,18 +245,10 @@ class AVPipeline:
         See `_save_distilled_two_stage_latents` for the
         `progress_message` rationale - same fallback semantics.
         """
-        arrays = {
-            "final_video_latent": cls._latent_to_numpy(video_latent),
-            "final_video_latent_mlx_dtype": str(video_latent.dtype),
-        }
+        arrays = {"final_video_latent": video_latent}
         if audio_latent is not None:
-            arrays["final_audio_latent"] = cls._latent_to_numpy(audio_latent)
-            arrays["final_audio_latent_mlx_dtype"] = str(audio_latent.dtype)
-
-        output_dir = os.path.dirname(path)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        np.savez(path, **arrays)
+            arrays["final_audio_latent"] = audio_latent
+        path = save_sidecar(path, arrays)
         message = f"  Saved final latents: {path}"
         if progress_message is not None:
             progress_message(message)
@@ -291,31 +274,17 @@ class AVPipeline:
         write.  Default (no callable) falls back to `print()` for
         callers that don't have a progress UI active.
         """
-        stage_1_video_np = cls._latent_to_numpy(stage_1_video_latent)
-        stage_2_video_np = cls._latent_to_numpy(stage_2_video_latent)
         arrays = {
-            "pipeline": np.array("distilled_two_stage"),
-            "stage_1_video_latent": stage_1_video_np,
-            "stage_1_video_latent_mlx_dtype": str(stage_1_video_latent.dtype),
-            "stage_2_video_latent": stage_2_video_np,
-            "stage_2_video_latent_mlx_dtype": str(stage_2_video_latent.dtype),
-            "final_video_latent": stage_2_video_np,
-            "final_video_latent_mlx_dtype": str(stage_2_video_latent.dtype),
+            "stage_1_video_latent": stage_1_video_latent,
+            "stage_2_video_latent": stage_2_video_latent,
+            "final_video_latent": stage_2_video_latent,
         }
         if stage_1_audio_latent is not None:
-            arrays["stage_1_audio_latent"] = cls._latent_to_numpy(stage_1_audio_latent)
-            arrays["stage_1_audio_latent_mlx_dtype"] = str(stage_1_audio_latent.dtype)
+            arrays["stage_1_audio_latent"] = stage_1_audio_latent
         if stage_2_audio_latent is not None:
-            stage_2_audio_np = cls._latent_to_numpy(stage_2_audio_latent)
-            arrays["stage_2_audio_latent"] = stage_2_audio_np
-            arrays["stage_2_audio_latent_mlx_dtype"] = str(stage_2_audio_latent.dtype)
-            arrays["final_audio_latent"] = stage_2_audio_np
-            arrays["final_audio_latent_mlx_dtype"] = str(stage_2_audio_latent.dtype)
-
-        output_dir = os.path.dirname(path)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-        np.savez(path, **arrays)
+            arrays["stage_2_audio_latent"] = stage_2_audio_latent
+            arrays["final_audio_latent"] = stage_2_audio_latent
+        path = save_sidecar(path, arrays, metadata={"pipeline": "distilled_two_stage"})
         message = f"  Saved distilled stage latents: {path}"
         if progress_message is not None:
             progress_message(message)
