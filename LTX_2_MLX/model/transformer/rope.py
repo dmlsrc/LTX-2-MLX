@@ -5,7 +5,6 @@ from enum import Enum
 from functools import lru_cache
 
 import mlx.core as mx
-import numpy as np
 
 
 class LTXRopeType(Enum):
@@ -91,13 +90,18 @@ def apply_split_rotary_emb(
 
 
 @lru_cache(maxsize=5)
-def generate_freq_grid_np(
+def generate_freq_grid_float64_host(
     positional_embedding_theta: float,
     positional_embedding_max_pos_count: int,
     inner_dim: int,
 ) -> mx.array:
     """
-    Generate frequency grid using numpy (cached).
+    Generate the frequency grid with host float64 math, returning float32.
+
+    MLX does not support float64 on the GPU, and its CPU float64 elementary
+    functions are not bit-identical to the historical NumPy implementation
+    after the final float32 cast.  Keep this tiny cached parity island in
+    Python's host float math so LTX-2.3 RoPE frequencies stay unchanged.
 
     Args:
         positional_embedding_theta: Base theta value.
@@ -108,20 +112,24 @@ def generate_freq_grid_np(
         Frequency indices array.
     """
     theta = positional_embedding_theta
-    start = 1
-    end = theta
+    start = 1.0
+    end = float(theta)
 
     n_elem = 2 * positional_embedding_max_pos_count
-    pow_indices = np.power(
-        theta,
-        np.linspace(
-            np.log(start) / np.log(theta),
-            np.log(end) / np.log(theta),
-            inner_dim // n_elem,
-            dtype=np.float64,
-        ),
-    )
-    return mx.array(pow_indices * math.pi / 2, dtype=mx.float32)
+    log_start = math.log(start) / math.log(theta)
+    log_end = math.log(end) / math.log(theta)
+    num_indices = inner_dim // n_elem
+
+    if num_indices <= 0:
+        return mx.array([], dtype=mx.float32)
+    if num_indices == 1:
+        exponents = (log_start,)
+    else:
+        step = (log_end - log_start) / (num_indices - 1)
+        exponents = (log_start + step * i for i in range(num_indices))
+
+    values = [math.pow(theta, exponent) * (math.pi / 2) for exponent in exponents]
+    return mx.array(values, dtype=mx.float32)
 
 
 def generate_freq_grid(
@@ -297,8 +305,8 @@ def precompute_freqs_cis(
         use_middle_indices_grid: If True, use middle of position bounds.
         num_attention_heads: Number of attention heads.
         rope_type: Type of RoPE.
-        use_double_precision: Use float64 for frequency grid computation
-            (matches ComfyUI's generate_freq_grid_np). Required for V2.3.
+        use_double_precision: Use host float64 math for frequency grid
+            computation before casting to float32. Required for V2.3.
 
     Returns:
         Tuple of (cos_freqs, sin_freqs).
@@ -309,7 +317,7 @@ def precompute_freqs_cis(
     # Generate frequency indices
     n_pos_dims = indices_grid.shape[1]
     if use_double_precision:
-        indices = generate_freq_grid_np(theta, n_pos_dims, dim)
+        indices = generate_freq_grid_float64_host(theta, n_pos_dims, dim)
     else:
         indices = generate_freq_grid(theta, n_pos_dims, dim)
 

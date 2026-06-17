@@ -135,8 +135,8 @@ class Embeddings1DConnector(nn.Module):
             rope_type: Type of RoPE.
             norm_eps: Epsilon for normalization.
             apply_gated_attention: Enable per-head gating (V2).
-            double_precision_rope: Use float64 for RoPE frequency computation
-                (matches ComfyUI's generate_freq_grid_np). Required for V2.3.
+            double_precision_rope: Use host float64 math for RoPE frequency
+                computation before casting to float32. Required for V2.3.
         """
         super().__init__()
 
@@ -251,8 +251,8 @@ class Embeddings1DConnector(nn.Module):
         indices_grid = mx.arange(seq_len, dtype=mx.float32)[None, None, :]
 
         # Compute RoPE frequencies
-        # When double_precision_rope is True, use generate_freq_grid_np (float64)
-        # to match ComfyUI's behavior for V2.3 models.
+        # V2.3 metadata requests float64 frequency construction before the
+        # final hidden-dtype cast.
         freqs_cis = precompute_freqs_cis(
             indices_grid=indices_grid,
             dim=self.inner_dim,
