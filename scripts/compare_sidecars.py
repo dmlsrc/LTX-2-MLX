@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Compare two NumPy NPZ sidecars.
+"""Compare two generation sidecars (safetensors or npz).
 
-Designed for LTX generation sidecars, but intentionally generic:
+Recognizes the format of each file it is given (through the centralized sidecar
+loader) and behaves the same on either - you can even compare a safetensors
+sidecar against an npz one:
 
-  - compares every common NPZ key by default
+  - compares every common key by default
   - reports exact equality plus numeric drift stats for array payloads
-  - can compare adjacent ``*_text.npz`` sidecars with ``--with-text``
+  - can compare adjacent ``*_text.*`` sidecars with ``--with-text`` (mirroring
+    the given file's extension)
   - can compare selected fields from adjacent ``*_run.json`` logs
 
 Examples:
-    scripts/compare_npz_sidecars.py a.npz b.npz
-    scripts/compare_npz_sidecars.py a.npz b.npz --with-text --require-exact
-    scripts/compare_npz_sidecars.py a.npz b.npz --keys final_video_latent final_audio_latent
+    scripts/compare_sidecars.py a.safetensors b.safetensors
+    scripts/compare_sidecars.py a.npz b.npz --with-text --require-exact
+    scripts/compare_sidecars.py a.safetensors b.npz --keys final_video_latent
 """
 
 from __future__ import annotations
@@ -449,8 +452,8 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("left", type=Path, help="Left .npz sidecar.")
-    parser.add_argument("right", type=Path, help="Right .npz sidecar.")
+    parser.add_argument("left", type=Path, help="Left sidecar (safetensors or npz).")
+    parser.add_argument("right", type=Path, help="Right sidecar (safetensors or npz).")
     parser.add_argument(
         "--keys",
         nargs="+",
@@ -465,7 +468,7 @@ def main() -> int:
     parser.add_argument(
         "--with-text",
         action="store_true",
-        help="Also compare adjacent *_text.npz sidecars.",
+        help="Also compare adjacent *_text.* sidecars.",
     )
     parser.add_argument("--left-text", type=Path, default=None, help="Explicit left text sidecar.")
     parser.add_argument("--right-text", type=Path, default=None, help="Explicit right text sidecar.")
@@ -496,14 +499,6 @@ def main() -> int:
         choices=("auto", "always", "never"),
         default="auto",
         help="Colorize status by severity: green exact, yellow mismatch, red missing/structural.",
-    )
-    parser.add_argument(
-        "--allow-pickle",
-        action="store_true",
-        help=(
-            "Retained for compatibility; now a no-op. Sidecars load through the "
-            "centralized loader, which reads object-free npz (and safetensors)."
-        ),
     )
     parser.add_argument(
         "--require-exact",

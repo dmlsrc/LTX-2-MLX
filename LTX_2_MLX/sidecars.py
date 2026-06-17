@@ -24,10 +24,11 @@ import os
 import mlx.core as mx
 
 SIDECAR_FORMAT_ENV = "LTX_SIDECAR_FORMAT"
-# Default to the legacy NumPy format for byte-compatibility with existing
-# sidecars and readers. Set LTX_SIDECAR_FORMAT=safetensors for the modern,
-# NumPy-free format; flip this default once all readers go through load_sidecar.
-_DEFAULT_FORMAT = "npz"
+# Default to the modern safetensors format: native dtypes (bf16 included) + header
+# metadata, NumPy-free. All readers go through load_sidecar, which also reads the
+# legacy npz format, so existing .npz sidecars keep loading. Set
+# LTX_SIDECAR_FORMAT=npz to write the legacy NumPy format.
+_DEFAULT_FORMAT = "safetensors"
 _FORMATS = ("npz", "safetensors")
 
 
@@ -51,6 +52,21 @@ def sidecar_path(base_path: str, suffix: str = "", fmt: str | None = None) -> st
     fmt = fmt or default_format()
     stem = os.path.splitext(base_path)[0]
     return f"{stem}{suffix}{_ext_for(fmt)}"
+
+
+def find_sidecar(base_path: str, suffix: str = "") -> str | None:
+    """Return the existing sidecar next to ``base_path`` (extension stripped) with
+    the given ``suffix``, trying safetensors then npz; None if neither exists.
+
+    Use this when deriving a sidecar path from a run's output stem so a reader
+    finds the file regardless of which format it was written in.
+    """
+    stem = os.path.splitext(str(base_path))[0]
+    for ext in (".safetensors", ".npz"):
+        candidate = f"{stem}{suffix}{ext}"
+        if os.path.exists(candidate):
+            return candidate
+    return None
 
 
 def save_sidecar(

@@ -22,9 +22,9 @@ if str(REPO_ROOT) not in sys.path:
 from LTX_2_MLX.loader import ensure_weight_family_caches
 from LTX_2_MLX.model.video_vae.native_decoder import (
     NativeConv3dVideoDecoder,
-    _pixel_norm_bfhwc,
-    _unpatchify_spatial_bfhwc,
     load_native_vae_decoder_weights,
+    pixel_norm_bfhwc,
+    unpatchify_spatial_bfhwc,
 )
 from LTX_2_MLX.sidecars import load_sidecar
 from scripts.generate import get_vae_config, parse_compute_dtype
@@ -423,11 +423,11 @@ def main() -> None:
             stages.append(_reduce_tail_bfhwc(stage, x, args.tail_frames))
             _print_stage(stages[-1])
 
-    x = decoder.conv_out(nn.silu(_pixel_norm_bfhwc(x)), causal=causal)
+    x = decoder.conv_out(nn.silu(pixel_norm_bfhwc(x)), causal=causal)
     stages.append(_reduce_tail_bfhwc("conv_out", x, args.tail_frames))
     _print_stage(stages[-1])
 
-    x = _unpatchify_spatial_bfhwc(x, patch_size=4)
+    x = unpatchify_spatial_bfhwc(x, patch_size=4)
     stages.append(_reduce_tail_bfhwc("unpatchify", x, args.tail_frames, final_rgb=True))
     _print_stage(stages[-1])
 

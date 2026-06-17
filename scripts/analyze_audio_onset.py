@@ -104,7 +104,7 @@ from LTX_2_MLX.audio.onset import (
     DEFAULT_DETECT_WINDOW_MS,
     detect_onset_spike,
 )
-from LTX_2_MLX.sidecars import load_sidecar
+from LTX_2_MLX.sidecars import find_sidecar, load_sidecar
 
 # Default analysis parameters.  Picked to localize sub-100 ms transients
 # while staying readable as ASCII tables in a terminal.  The coarse window
@@ -132,14 +132,14 @@ def resolve_sidecars(run_path: Path) -> tuple[Path, Path | None]:
     """
     stem_base = run_path.with_suffix("")
     wav = stem_base.with_suffix(".wav")
-    npz = stem_base.with_suffix(".npz")
     if not wav.exists():
         raise SystemExit(
             f"No WAV sidecar at {wav}.  Re-run generate.py with "
             f"--save-audio-sidecar (or --save-all-sidecars) so the "
             f"decoded audio is preserved next to the mp4."
         )
-    return wav, (npz if npz.exists() else None)
+    latent_sidecar = find_sidecar(str(stem_base))
+    return wav, (Path(latent_sidecar) if latent_sidecar else None)
 
 
 # ---------------------------------------------------------------------------
