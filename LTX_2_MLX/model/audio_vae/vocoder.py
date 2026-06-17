@@ -153,7 +153,7 @@ class ResBlock1(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Anti-aliased resampling helpers (kaiser-sinc filters) for BigVGAN v2
+# Anti-aliased resampling helpers for BigVGAN v2
 # ---------------------------------------------------------------------------
 
 
@@ -173,50 +173,6 @@ class SnakeBeta(nn.Module):
         alpha = mx.exp(self.alpha[None, :, None])
         beta = mx.exp(self.beta[None, :, None])
         return x + (1.0 / (beta + self.eps)) * mx.power(mx.sin(x * alpha), 2)
-
-
-def kaiser_sinc_filter1d(
-    cutoff: float, half_width: float, kernel_size: int
-) -> mx.array:
-    """Compute a kaiser-windowed sinc filter and return an MLX array.
-
-    NumPy remains here only for filter construction: MLX has no Kaiser window
-    or Bessel i0 primitive, and its CPU sin/cos path is not bit-identical to
-    NumPy for the Hann filter after float32 cast. The result is immediately
-    converted to MLX.
-
-    Returns shape (1, 1, kernel_size).
-    """
-    even = kernel_size % 2 == 0
-    half_size = kernel_size // 2
-
-    # Compute kaiser beta from amplitude
-    delta_f = 4 * half_width
-    amplitude = 2.285 * (half_size - 1) * math.pi * delta_f + 7.95
-    if amplitude > 50.0:
-        beta = 0.1102 * (amplitude - 8.7)
-    elif amplitude >= 21.0:
-        beta = 0.5842 * (amplitude - 21) ** 0.4 + 0.07886 * (amplitude - 21.0)
-    else:
-        beta = 0.0
-
-    window = np.kaiser(kernel_size, beta)
-
-    if even:
-        time = np.arange(-half_size, half_size) + 0.5
-    else:
-        time = np.arange(kernel_size) - half_size
-
-    if cutoff == 0:
-        filter_ = np.zeros_like(time)
-    else:
-        x = 2 * cutoff * time
-        safe_denom = np.where(x == 0, 1.0, np.pi * x)
-        sinc = np.where(x == 0, 1.0, np.sin(np.pi * x) / safe_denom)
-        filter_ = 2 * cutoff * window * sinc
-        filter_ /= filter_.sum()
-
-    return mx.array(filter_.reshape(1, 1, kernel_size).astype(np.float32))
 
 
 def _replicate_pad_1d(x: mx.array, pad_left: int, pad_right: int) -> mx.array:
@@ -279,12 +235,10 @@ def _depthwise_conv_transpose1d(
 
 
 class LowPassFilter1d(nn.Module):
-    """Low-pass filter using depthwise conv1d with a kaiser sinc kernel."""
+    """Checkpoint-backed low-pass filter using depthwise conv1d."""
 
     def __init__(
         self,
-        cutoff: float = 0.5,
-        half_width: float = 0.6,
         stride: int = 1,
         padding: bool = True,
         kernel_size: int = 12,
@@ -296,9 +250,16 @@ class LowPassFilter1d(nn.Module):
         self.pad_right = kernel_size // 2
         self.stride = stride
         self.do_padding = padding
-        self.filter = kaiser_sinc_filter1d(cutoff, half_width, kernel_size)
+        self._checkpoint_filter_loaded = False
+        # BigVGAN AMP filters are serialized in the vocoder checkpoint. Keep a
+        # shape-correct placeholder and require the checkpoint tensor at load.
+        self.filter = mx.zeros((1, 1, kernel_size), dtype=mx.float32)
 
     def __call__(self, x: mx.array) -> mx.array:
+        if not self._checkpoint_filter_loaded:
+            raise ValueError(
+                "LowPassFilter1d requires a filter loaded from the vocoder checkpoint."
+            )
         if self.do_padding:
             x = _replicate_pad_1d(x, self.pad_left, self.pad_right)
         return _depthwise_conv1d(x, self.filter, stride=self.stride)
@@ -311,11 +272,12 @@ class UpSample1d(nn.Module):
         self,
         ratio: int = 2,
         kernel_size: int | None = None,
-        window_type: str = "kaiser",
+        window_type: str = "checkpoint",
     ) -> None:
         super().__init__()
         self.ratio = ratio
         self.stride = ratio
+        self._checkpoint_filter_loaded = False
 
         if window_type == "hann":
             # Hann-windowed sinc filter (matches torchaudio.functional.resample)
@@ -343,8 +305,8 @@ class UpSample1d(nn.Module):
             )
             sinc_filter = (sinc_vals * window * rolloff / ratio).reshape(1, 1, -1)
             self.filter = mx.array(sinc_filter.astype(np.float32))
-        else:
-            # Kaiser-windowed sinc filter (BigVGAN default)
+            self._checkpoint_filter_loaded = True
+        elif window_type == "checkpoint":
             self.kernel_size = (
                 int(6 * ratio // 2) * 2 if kernel_size is None else kernel_size
             )
@@ -355,14 +317,17 @@ class UpSample1d(nn.Module):
             self.pad_right = self.pad * self.stride + (
                 self.kernel_size - self.stride + 1
             ) // 2
-            sinc_filter = kaiser_sinc_filter1d(
-                cutoff=0.5 / ratio,
-                half_width=0.6 / ratio,
-                kernel_size=self.kernel_size,
-            )
-            self.filter = sinc_filter.reshape(1, 1, -1)
+            # BigVGAN AMP filters are serialized in the vocoder checkpoint. Keep
+            # a shape-correct placeholder and require the checkpoint tensor at load.
+            self.filter = mx.zeros((1, 1, self.kernel_size), dtype=mx.float32)
+        else:
+            raise ValueError(f"Unsupported upsample window_type={window_type!r}")
 
     def __call__(self, x: mx.array) -> mx.array:
+        if not self._checkpoint_filter_loaded:
+            raise ValueError(
+                "UpSample1d requires a filter loaded from the vocoder checkpoint."
+            )
         x = _replicate_pad_1d(x, self.pad, self.pad)
         x = self.ratio * _depthwise_conv_transpose1d(x, self.filter, stride=self.stride)
         return x[:, :, self.pad_left : x.shape[2] - self.pad_right]
@@ -380,8 +345,6 @@ class DownSample1d(nn.Module):
             int(6 * ratio // 2) * 2 if kernel_size is None else kernel_size
         )
         self.lowpass = LowPassFilter1d(
-            cutoff=0.5 / ratio,
-            half_width=0.6 / ratio,
             stride=ratio,
             kernel_size=self.kernel_size,
         )
@@ -860,18 +823,35 @@ def _load_snakebeta_weights(weights: dict, prefix: str, snake: SnakeBeta) -> Non
             setattr(snake, param_name, weights[pt_key])
 
 
+def _load_required_filter(
+    weights: dict, pt_key: str, expected_shape: tuple[int, ...]
+) -> mx.array:
+    if pt_key not in weights:
+        raise ValueError(
+            "Missing required vocoder filter tensor "
+            f"{pt_key!r}; checkpoint-backed BigVGAN AMP filters are not optional."
+        )
+    value = weights[pt_key]
+    if tuple(value.shape) != expected_shape:
+        raise ValueError(
+            f"Unexpected shape for vocoder filter tensor {pt_key!r}: "
+            f"expected {expected_shape}, got {tuple(value.shape)}."
+        )
+    return value
+
+
 def _load_lowpass_filter_weights(weights: dict, prefix: str, lpf: LowPassFilter1d) -> None:
     """Load LowPassFilter1d filter buffer."""
     pt_key = f"{prefix}.filter"
-    if pt_key in weights:
-        lpf.filter = weights[pt_key]
+    lpf.filter = _load_required_filter(weights, pt_key, tuple(lpf.filter.shape))
+    lpf._checkpoint_filter_loaded = True
 
 
 def _load_upsample1d_weights(weights: dict, prefix: str, up: UpSample1d) -> None:
     """Load UpSample1d filter buffer."""
     pt_key = f"{prefix}.filter"
-    if pt_key in weights:
-        up.filter = weights[pt_key]
+    up.filter = _load_required_filter(weights, pt_key, tuple(up.filter.shape))
+    up._checkpoint_filter_loaded = True
 
 
 def _load_activation1d_weights(weights: dict, prefix: str, act1d: Activation1d) -> None:
