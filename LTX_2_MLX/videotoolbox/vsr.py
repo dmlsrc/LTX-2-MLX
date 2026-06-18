@@ -12,8 +12,6 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-import numpy as np
-
 from . import pixel_buffers as _pb
 from ._compat import require_pyobjc, vt
 
@@ -226,7 +224,7 @@ class VsrSession:
     # Public API
     # ------------------------------------------------------------------------
 
-    def upscale_to_buffer(self, frame: np.ndarray, frame_index: int) -> Any:
+    def upscale_to_buffer(self, frame: Any, frame_index: int) -> Any:
         """Upscale one frame. Returns the dst CVPixelBuffer (RGBAHalf for HQ,
         NV12 for LL) ready to append to AVWriter.
         """

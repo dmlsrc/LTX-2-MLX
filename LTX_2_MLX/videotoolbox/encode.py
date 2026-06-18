@@ -42,7 +42,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+import mlx.core as mx
 
 from ..progress import StackedPhaseBars
 from . import pixel_buffers as _pb
@@ -63,7 +63,7 @@ def _human_size(n: float) -> str:
 
 def _peek_frames(
     frames: Any,
-) -> tuple[np.ndarray, Iterator[np.ndarray], int | None]:
+) -> tuple[Any, Iterator[Any], int | None]:
     """Return (first_frame, full_iterator, total_or_none).
 
     Accepts list / tuple / ndarray (3D peek-first dim) / iterator. For a
@@ -72,7 +72,7 @@ def _peek_frames(
     the input shape; None for pure iterators where we'd have to consume
     the stream to count.
     """
-    if isinstance(frames, np.ndarray) and frames.ndim == 4:
+    if getattr(frames, "ndim", None) == 4:  # 4D mlx or numpy array
         if frames.shape[0] == 0:
             raise ValueError("encode_video_videotoolbox: empty frames array")
         return (
@@ -108,19 +108,19 @@ def _pick_hevc_profile(vsr_spatial_mode: str | None, encode_chroma: str) -> str:
     )
 
 
-def _normalize_audio_for_track(audio_waveform: Any) -> np.ndarray:
-    """Final encoder boundary: (B,C,T) or (C,T) MLX/ndarray -> NumPy (C,T).
+def _normalize_audio_for_track(audio_waveform: Any) -> Any:
+    """Final encoder boundary: (B,C,T) or (C,T) MLX/ndarray -> MLX (C,T) f32.
 
     AudioTrack expects (channels, samples). Pipeline outputs are (B,C,T).
     """
-    arr = np.asarray(audio_waveform)
+    arr = mx.array(audio_waveform, dtype=mx.float32)
     if arr.ndim == 3:
         arr = arr[0]
     if arr.ndim != 2:
         raise ValueError(
             f"audio_waveform must be (B,C,T) or (C,T); got shape {arr.shape}"
         )
-    return arr.astype(np.float32, copy=False)
+    return arr
 
 
 def _allocate_writer_src_buffer(adaptor: Any, width: int, height: int, fmt: int) -> Any:
@@ -140,7 +140,7 @@ def _allocate_writer_src_buffer(adaptor: Any, width: int, height: int, fmt: int)
 
 
 def encode_video_videotoolbox(
-    frames: Sequence[np.ndarray] | Iterable[np.ndarray] | np.ndarray,
+    frames: Sequence[Any] | Iterable[Any],
     output_path: str | Path,
     *,
     fps: float,
