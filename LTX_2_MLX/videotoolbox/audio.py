@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+import mlx.core as mx
 
 from ._compat import CoreAudio, CoreMedia, require_pyobjc
 
@@ -19,7 +19,7 @@ class AudioTrack:
     """In-memory audio decoded from a latent. No disk WAV unless save_wav()
     is called explicitly.
 
-    Constructed from a (channels, samples) float32 ndarray. Builds
+    Constructed from a (channels, samples) float32 array (mlx or numpy). Builds
     CMSampleBuffers on demand via `make_sample_buffer(start_frame, end_frame)`
     - the AVWriter's GCD audio pump pulls these in chunks as the encoder
     drains.
@@ -29,20 +29,20 @@ class AudioTrack:
     conversion.
     """
 
-    def __init__(self, waveform: np.ndarray, sample_rate: int):
+    def __init__(self, waveform: Any, sample_rate: int):
         require_pyobjc()
-        if waveform.dtype != np.float32:
-            waveform = waveform.astype(np.float32)
-        if waveform.ndim != 2:
+        # Accept an mlx or numpy (channels, samples) array; normalize to mlx f32.
+        w = mx.array(waveform, dtype=mx.float32)
+        if w.ndim != 2:
             raise ValueError(
-                f"AudioTrack expects (channels, samples); got {waveform.shape}"
+                f"AudioTrack expects (channels, samples); got {w.shape}"
             )
         self.sample_rate = int(sample_rate)
-        self.channels = int(waveform.shape[0])
-        self.n_samples = int(waveform.shape[1])
-        # Interleave: (channels, samples) -> (samples, channels) flat bytes.
-        interleaved = np.ascontiguousarray(waveform.T)
-        self._bytes = interleaved.tobytes()
+        self.channels = int(w.shape[0])
+        self.n_samples = int(w.shape[1])
+        # Interleave: (channels, samples) -> (samples, channels) row-major bytes,
+        # straight from the MLX buffer.
+        self._bytes = bytes(memoryview(mx.contiguous(mx.transpose(w))))
         bytes_per_frame = 4 * self.channels
 
         asbd = CoreAudio.AudioStreamBasicDescription(
@@ -67,10 +67,10 @@ class AudioTrack:
         """Write the in-memory PCM out as a float32 WAV (for --save-audio-sidecar)."""
         from LTX_2_MLX.video_encoder import write_wav_float32
 
-        interleaved = np.frombuffer(self._bytes, dtype=np.float32).reshape(
+        samples = mx.array(memoryview(self._bytes).cast("f")).reshape(
             self.n_samples, self.channels,
         )
-        write_wav_float32(interleaved.T, path, self.sample_rate)
+        write_wav_float32(mx.transpose(samples), path, self.sample_rate)
 
     def make_sample_buffer(self, start_frame: int, end_frame: int) -> Any:
         """Build a CMSampleBuffer for audio frames [start_frame, end_frame).
