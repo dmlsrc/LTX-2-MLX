@@ -84,44 +84,19 @@ def _compile_transformer_block_group(blocks: list[nn.Module]):
 
 
 class LTXModelType(Enum):
-    """Model type variants."""
+    """Model type variants.
+
+    LTX-2.3 ships a single AudioVideo variant; it is the only model type
+    the pipeline constructs.
+    """
 
     AudioVideo = "ltx av model"
-    VideoOnly = "ltx video only model"
-    AudioOnly = "ltx audio only model"
 
     def is_video_enabled(self) -> bool:
-        return self in (LTXModelType.AudioVideo, LTXModelType.VideoOnly)
+        return self == LTXModelType.AudioVideo
 
     def is_audio_enabled(self) -> bool:
-        return self in (LTXModelType.AudioVideo, LTXModelType.AudioOnly)
-
-
-class PixArtAlphaTextProjection(nn.Module):
-    """
-    Projects caption embeddings with GELU activation.
-
-    Adapted from PixArt-alpha implementation.
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        hidden_size: int,
-        out_features: int | None = None,
-    ):
-        super().__init__()
-        if out_features is None:
-            out_features = hidden_size
-
-        self.linear_1 = nn.Linear(in_features, hidden_size, bias=True)
-        self.linear_2 = nn.Linear(hidden_size, out_features, bias=True)
-
-    def __call__(self, caption: mx.array) -> mx.array:
-        hidden_states = self.linear_1(caption)
-        hidden_states = nn.gelu_approx(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
-        return hidden_states
+        return self == LTXModelType.AudioVideo
 
 
 @dataclass
@@ -149,7 +124,6 @@ class TransformerArgsPreprocessor:
     Handles:
     - Patchify projection (linear embedding)
     - Timestep embedding via AdaLN
-    - Caption projection
     - Position embedding computation (RoPE)
     """
 
@@ -157,7 +131,7 @@ class TransformerArgsPreprocessor:
         self,
         patchify_proj: nn.Linear,
         adaln: AdaLayerNormSingle,
-        caption_projection: PixArtAlphaTextProjection | None,
+        caption_projection: nn.Module | None,
         inner_dim: int,
         max_pos: list[int],
         num_attention_heads: int,
@@ -228,8 +202,6 @@ class TransformerArgsPreprocessor:
             Projected context, shape (B, S, inner_dim).
         """
         batch_size = x.shape[0]
-        if self.caption_projection is not None:
-            context = self.caption_projection(context)
         context = context.reshape(batch_size, -1, x.shape[-1])
         return context
 
@@ -527,9 +499,8 @@ class MultiModalTransformerArgsPreprocessor:
 
 class LTXModel(nn.Module):
     """
-    LTX-2 Transformer Model (Unified Video/Audio).
+    LTX-2.3 AudioVideo transformer model.
 
-    Wrapper for both VideoOnly and AudioVideo variants.
     Architecture:
     - Input: Patchified video latents (and optional audio latents)
     - 48 transformer blocks with self-attention, cross-attention, and FFN
@@ -550,7 +521,7 @@ class LTXModel(nn.Module):
 
     def __init__(
         self,
-        model_type: LTXModelType = LTXModelType.VideoOnly,
+        model_type: LTXModelType = LTXModelType.AudioVideo,
         num_attention_heads: int = 32,
         attention_head_dim: int = 128,
         in_channels: int = 128,
@@ -558,7 +529,7 @@ class LTXModel(nn.Module):
         num_layers: int = 48,
         cross_attention_dim: int = 4096,
         norm_eps: float = 1e-6,
-        caption_channels: int | None = 3840,
+        caption_channels: int | None = None,
         positional_embedding_theta: float = 10000.0,
         positional_embedding_max_pos: list[int] | None = None,
         timestep_scale_multiplier: int = 1000,
@@ -581,7 +552,7 @@ class LTXModel(nn.Module):
         Initialize LTX model.
 
         Args:
-            model_type: Type of model (VideoOnly, AudioVideo, AudioOnly).
+            model_type: Model type (AudioVideo; the only LTX-2.3 variant).
             num_attention_heads: Number of attention heads (32).
             attention_head_dim: Dimension per head (128).
             in_channels: Input channels from VAE (128).
@@ -589,7 +560,8 @@ class LTXModel(nn.Module):
             num_layers: Number of transformer blocks (48).
             cross_attention_dim: Text context dimension (4096).
             norm_eps: Epsilon for normalization.
-            caption_channels: Caption embedding dimension (3840 from Gemma).
+            caption_channels: Unused on LTX-2.3 (the V2 feature extractor
+                projects directly, so the model carries no caption projection).
             positional_embedding_theta: Base theta for RoPE.
             positional_embedding_max_pos: Max positions [time, height, width].
             timestep_scale_multiplier: Scale for timestep (1000).
@@ -655,7 +627,7 @@ class LTXModel(nn.Module):
         self.audio_inner_dim = self.AUDIO_ATTENTION_HEADS * self.AUDIO_HEAD_DIM
 
         # V2: 9 adaln params (6 base + 3 for cross-attention Q modulation)
-        adaln_num_embeddings = 9 if cross_attention_adaln else 6
+        adaln_num_embeddings = 9
 
         # =================
         # VIDEO COMPONENTS
@@ -670,19 +642,13 @@ class LTXModel(nn.Module):
             )
 
             # V2: prompt adaln for cross-attention KV modulation
-            self.prompt_adaln_single = (
-                AdaLayerNormSingle(self.video_inner_dim, num_embeddings=2)
-                if cross_attention_adaln else None
+            self.prompt_adaln_single = AdaLayerNormSingle(
+                self.video_inner_dim, num_embeddings=2
             )
 
-            # Caption projection (None for V2 models where feature extractor projects directly)
-            if caption_channels is not None:
-                self.caption_projection = PixArtAlphaTextProjection(
-                    in_features=caption_channels,
-                    hidden_size=self.video_inner_dim,
-                )
-            else:
-                self.caption_projection = None
+            # V2 feature extractor projects directly to the transformer dims,
+            # so the diffusion model carries no caption projection.
+            self.caption_projection = None
 
             # Output projection
             self.scale_shift_table = mx.zeros((2, self.video_inner_dim), dtype=mx.float32)
@@ -704,19 +670,13 @@ class LTXModel(nn.Module):
             )
 
             # V2: prompt adaln for audio cross-attention KV modulation
-            self.audio_prompt_adaln_single = (
-                AdaLayerNormSingle(self.audio_inner_dim, num_embeddings=2)
-                if cross_attention_adaln else None
+            self.audio_prompt_adaln_single = AdaLayerNormSingle(
+                self.audio_inner_dim, num_embeddings=2
             )
 
-            # Caption projection (None for V2 models where feature extractor projects directly)
-            if caption_channels is not None:
-                self.audio_caption_projection = PixArtAlphaTextProjection(
-                    in_features=caption_channels,
-                    hidden_size=self.audio_inner_dim,
-                )
-            else:
-                self.audio_caption_projection = None
+            # V2 feature extractor projects directly to the transformer dims,
+            # so the diffusion model carries no caption projection.
+            self.audio_caption_projection = None
 
             # Output projection
             self.audio_scale_shift_table = mx.zeros((2, self.audio_inner_dim), dtype=mx.float32)
@@ -1426,16 +1386,14 @@ class LTXModel(nn.Module):
         Forward pass.
 
         Args:
-            video: Input video modality (required for VideoOnly/AudioVideo).
-            audio: Input audio modality (required for AudioVideo/AudioOnly).
+            video: Input video modality.
+            audio: Input audio modality (absent for video-only inference).
             perturbations: Optional perturbation config for STG guidance.
                 Supports 4 types: skip_video_self_attn, skip_audio_self_attn,
                 skip_a2v_cross_attn, skip_v2a_cross_attn.
 
         Returns:
-            VideoOnly: video_velocity
-            AudioOnly: audio_velocity
-            AudioVideo: (video_velocity, audio_velocity)
+            (video_velocity, audio_velocity)
         """
         profile_this_call = self.profile_transformer_once
         self.profile_transformer_once = False
@@ -1560,10 +1518,6 @@ class LTXModel(nn.Module):
             self.profile_transformer_blocks = ()
 
         # --- Return Logic ---
-        if self.model_type == LTXModelType.VideoOnly:
-            return video_out
-        if self.model_type == LTXModelType.AudioOnly:
-            return audio_out
         return video_out, audio_out
 
 
@@ -1571,7 +1525,9 @@ class X0Model(nn.Module):
     """
     Wrapper that returns denoised outputs instead of velocities.
 
-    Handles both VideoOnly (returns tensor) and AudioVideo (returns tuple).
+    The AudioVideo model returns a (video, audio) velocity tuple; this
+    converts each to its denoised (X0) prediction. Video-only inference
+    (audio modality absent) returns just the denoised video.
     """
 
     def __init__(self, velocity_model: LTXModel):
@@ -1613,7 +1569,7 @@ class X0Model(nn.Module):
                 # Video-only inference on AV model - return video only
                 return denoised_video
             return denoised_video, denoised_audio
-        # VideoOnly or AudioOnly case
+        # Defensive fallback for a single-tensor velocity output.
         if video is not None:
             return denoise(video, output)
         if audio is not None:

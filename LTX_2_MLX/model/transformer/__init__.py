@@ -15,7 +15,6 @@ from .model import (
     LTXModelType,
     Modality,
     MultiModalTransformerArgsPreprocessor,
-    PixArtAlphaTextProjection,
     TransformerArgsPreprocessor,
     X0AVModel,
     X0Model,
@@ -81,5 +80,4 @@ __all__ = [
     "MultiModalTransformerArgsPreprocessor",
     # Shared
     "Modality",
-    "PixArtAlphaTextProjection",
 ]

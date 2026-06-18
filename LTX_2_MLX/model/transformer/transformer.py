@@ -339,14 +339,12 @@ class BasicAVTransformerBlock(nn.Module):
         self.idx = idx
         self.norm_eps = norm_eps
 
-        self.cross_attention_adaln = (
-            (video_config is not None and video_config.cross_attention_adaln)
-            or (audio_config is not None and audio_config.cross_attention_adaln)
-        )
+        # LTX-2.3 always uses cross-attention AdaLN (KV modulation on the text
+        # cross-attention via per-block prompt scale/shift tables).
+        self.cross_attention_adaln = True
 
-        # V2: 9 adaln params (6 base + 3 cross-attn: shift_q, scale_q, gate)
-        # V1: 6 adaln params (shift, scale, gate for self-attn and ffn)
-        adaln_params = 9 if self.cross_attention_adaln else 6
+        # 9 adaln params (6 base + 3 cross-attn: shift_q, scale_q, gate).
+        adaln_params = 9
 
         # Video components
         if video_config is not None:
@@ -395,9 +393,9 @@ class BasicAVTransformerBlock(nn.Module):
             self.audio_scale_shift_table = mx.zeros((adaln_params, audio_config.dim), dtype=mx.float32)
 
         # V2 cross-attention adaln: per-block prompt scale/shift tables for KV modulation
-        if self.cross_attention_adaln and video_config is not None:
+        if video_config is not None:
             self.prompt_scale_shift_table = mx.zeros((2, video_config.dim), dtype=mx.float32)
-        if self.cross_attention_adaln and audio_config is not None:
+        if audio_config is not None:
             self.audio_prompt_scale_shift_table = mx.zeros((2, audio_config.dim), dtype=mx.float32)
 
         # Cross-modal attention (audio <-> video)
@@ -501,50 +499,37 @@ class BasicAVTransformerBlock(nn.Module):
         profile_name: str | None = None,
         mark_profile: Callable[..., None] | None = None,
     ) -> mx.array:
-        """Apply text cross-attention, with optional V2 AdaLN modulation."""
+        """Apply text cross-attention with V2 AdaLN modulation."""
         profile_attention = profile_name is not None and mark_profile is not None
-        if self.cross_attention_adaln:
-            # V2: AdaLN on Q (from indices 6-8) and KV (from prompt tables)
-            shift_q, scale_q, gate = self.get_ada_values(
-                scale_shift_table, x.shape[0], timestep, 6, 9
-            )
-            # prompt_timestep: (B, T, 2, D), prompt_scale_shift_table: (2, D)
-            kv_modulation = (
-                prompt_scale_shift_table[None, None, :, :]
-                + prompt_timestep
-            )
-            shift_kv = kv_modulation[:, :, 0, :]
-            scale_kv = kv_modulation[:, :, 1, :]
-            # Cast back to activation dtype: scale_q/shift_q/gate/scale_kv/shift_kv
-            # come from FP32 scale_shift tables and would otherwise promote
-            # attn_input/encoder_hidden_states to FP32, forcing SDPA to use
-            # pure float32 steel kernels (~2x slower than BF16).
-            attn_input = (rms_norm(x, eps=self.norm_eps) * (1 + scale_q) + shift_q).astype(x.dtype)
-            encoder_hidden_states = (context * (1 + scale_kv) + shift_kv).astype(context.dtype)
-            if profile_attention:
-                mark_profile(f"{profile_name} setup", attn_input, encoder_hidden_states, gate)
-                attn_out = attn.profile(
-                    attn_input,
-                    profile_name,
-                    mark_profile,
-                    context=encoder_hidden_states,
-                    mask=context_mask,
-                )
-            else:
-                attn_out = attn(attn_input, context=encoder_hidden_states, mask=context_mask)
-            return (attn_out * gate).astype(attn_out.dtype)
-        # V1: simple RMSNorm on Q, no modulation
-        attn_input = rms_norm(x, eps=self.norm_eps)
+        # AdaLN on Q (from indices 6-8) and KV (from prompt tables).
+        shift_q, scale_q, gate = self.get_ada_values(
+            scale_shift_table, x.shape[0], timestep, 6, 9
+        )
+        # prompt_timestep: (B, T, 2, D), prompt_scale_shift_table: (2, D)
+        kv_modulation = (
+            prompt_scale_shift_table[None, None, :, :]
+            + prompt_timestep
+        )
+        shift_kv = kv_modulation[:, :, 0, :]
+        scale_kv = kv_modulation[:, :, 1, :]
+        # Cast back to activation dtype: scale_q/shift_q/gate/scale_kv/shift_kv
+        # come from FP32 scale_shift tables and would otherwise promote
+        # attn_input/encoder_hidden_states to FP32, forcing SDPA to use
+        # pure float32 steel kernels (~2x slower than BF16).
+        attn_input = (rms_norm(x, eps=self.norm_eps) * (1 + scale_q) + shift_q).astype(x.dtype)
+        encoder_hidden_states = (context * (1 + scale_kv) + shift_kv).astype(context.dtype)
         if profile_attention:
-            mark_profile(f"{profile_name} setup", attn_input)
-            return attn.profile(
+            mark_profile(f"{profile_name} setup", attn_input, encoder_hidden_states, gate)
+            attn_out = attn.profile(
                 attn_input,
                 profile_name,
                 mark_profile,
-                context=context,
+                context=encoder_hidden_states,
                 mask=context_mask,
             )
-        return attn(attn_input, context=context, mask=context_mask)
+        else:
+            attn_out = attn(attn_input, context=encoder_hidden_states, mask=context_mask)
+        return (attn_out * gate).astype(attn_out.dtype)
 
     def __call__(
         self,
