@@ -1,6 +1,6 @@
 """Side-by-side composite for `comparison.mp4`: NEAREST-upscaled pre vs VSR post.
 
-The pre half is the input frame scaled up with `np.repeat` (true pixel
+The pre half is the input frame scaled up with `repeat` (true pixel
 nearest-neighbor), the post half is the VSR output CVPixelBuffer. Both
 halves are composited via CoreImage and rendered into a single BGRA buffer
 in one GPU pass.
@@ -13,14 +13,14 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
+import mlx.core as mx
 
 from . import pixel_buffers as _pb
 from ._compat import Foundation, Quartz, require_pyobjc
 
 
 def render_comparison(
-    pre_frame: np.ndarray,
+    pre_frame: Any,
     post_pb: Any,
     scale: int,
     dest_pb: Any,
@@ -31,30 +31,26 @@ def render_comparison(
     right. Output dimensions are (2 * pre_W * scale, pre_H * scale).
     """
     require_pyobjc()
-    in_h, in_w = pre_frame.shape[:2]
+    in_h, in_w = int(pre_frame.shape[0]), int(pre_frame.shape[1])
     out_w, out_h = in_w * scale, in_h * scale
 
-    # NEAREST upscale via np.repeat - exact integer-replicated pixels.
-    pre_up = np.repeat(np.repeat(pre_frame, scale, axis=0), scale, axis=1)
+    f = pre_frame if isinstance(pre_frame, mx.array) else mx.array(pre_frame)
+    # NEAREST upscale via repeat - exact integer-replicated pixels.
+    pre_up = mx.repeat(mx.repeat(f, scale, axis=0), scale, axis=1)
 
     # Coerce to uint8 RGBA8 for CIImage(kCIFormatRGBA8). The pre half is a
-    # deliberately-blocky visualization, so 8-bit is fine.
-    if pre_up.dtype == np.float16 or pre_up.dtype == np.float32:
-        rgba = np.clip(pre_up * 255.0, 0, 255).astype(np.uint8)
-        if rgba.shape[-1] == 3:
-            full = np.empty((out_h, out_w, 4), dtype=np.uint8)
-            full[..., 0:3] = rgba
-            full[..., 3] = 255
-            rgba = full
+    # deliberately-blocky visualization, so 8-bit is fine. Channel math runs in
+    # MLX and the bytes come from the array buffer, so no numpy.
+    if str(pre_up.dtype).split(".")[-1] in ("float16", "float32"):
+        rgba = mx.clip(pre_up * 255.0, 0, 255).astype(mx.uint8)
     else:
-        rgba = np.empty((out_h, out_w, 4), dtype=np.uint8)
-        if pre_up.shape[-1] == 4:
-            rgba[:] = pre_up
-        else:
-            rgba[..., 0:3] = pre_up
-            rgba[..., 3] = 255
+        rgba = pre_up
+    if rgba.shape[-1] == 3:
+        alpha = mx.full((out_h, out_w, 1), 255, dtype=mx.uint8)
+        rgba = mx.concatenate([rgba, alpha], axis=-1)
 
-    data = Foundation.NSData.dataWithBytes_length_(rgba.tobytes(), rgba.nbytes)
+    src = bytes(memoryview(mx.contiguous(rgba)))
+    data = Foundation.NSData.dataWithBytes_length_(src, len(src))
     pre_ci = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
         data, out_w * 4, (out_w, out_h),
         Quartz.kCIFormatRGBA8, _pb.srgb_colorspace(),
