@@ -58,7 +58,7 @@ ltx2mlx "A cat walking" \
     --height 512 --width 704 \
     --cfg 5.0 --steps-stage1 15 \
     --spatial-upscaler-weights /path/to/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-    --distilled-lora weights/ltx-2/ltx-2-19b-distilled-lora-384.safetensors \
+    --distilled-lora /path/to/ltx-2.3-22b-distilled-lora-384-1.1.safetensors \
     --dtype bfloat16
 ```
 

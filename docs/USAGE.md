@@ -28,7 +28,7 @@ ltx2mlx "A rocket launching into space" \
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/LTX-2-MLX.git
+git clone https://github.com/dmlsrc/LTX-2-MLX.git
 cd LTX-2-MLX
 
 # Install dependencies
@@ -44,15 +44,16 @@ brew install ffmpeg
 
 ### Download Weights
 
+Fetch the weights with the HuggingFace CLI (`hf` ships with `huggingface_hub` -
+`uv pip install huggingface_hub` if you don't have it), or download the files by
+hand from each model's "Files" tab on huggingface.co. Accept the Gemma license
+first at https://huggingface.co/google/gemma-3-12b-it.
+
 ```bash
-# Interactive download (recommended)
-uv run scripts/download_weights.py
-
-# Or download specific weights
-uv run scripts/download_weights.py --weights distilled gemma
-
-# Or download everything
-uv run scripts/download_weights.py --weights all
+hf download Lightricks/LTX-2.3 ltx-2.3-22b-distilled-1.1.safetensors
+hf download Lightricks/LTX-2.3 ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+hf download Lightricks/LTX-2.3 ltx-2.3-22b-distilled-lora-384-1.1.safetensors
+hf download google/gemma-3-12b-it
 ```
 
 At runtime, `LTX_2_MLX/generate.py` resolves cached LTX-2.3 and Gemma weights from
@@ -75,15 +76,14 @@ The available split overrides are `--transformer-weights`,
 bundle unless you also provide `--config-weights`, since model version, VAE
 shape, and vocoder type are read from the config source.
 
-Available weights from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-2):
+Available weights from [`Lightricks/LTX-2.3`](https://huggingface.co/Lightricks/LTX-2.3):
 
 | Weight | Size | Description |
 |--------|------|-------------|
-| `ltx-2-19b-distilled.safetensors` | 43GB | Fast generation (8 steps) |
-| `ltx-2-19b-dev.safetensors` | 43GB | Higher quality (25-50 steps) |
-| `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | 950MB | 2x resolution |
-| `ltx-2-temporal-upscaler-x2-1.0.safetensors` | 262MB | 2x framerate |
-| `ltx-2-19b-distilled-lora-384.safetensors` | 1.5GB | LoRA for two-stage |
+| `ltx-2.3-22b-distilled-1.1.safetensors` | ~46GB | 22B distilled, 8 steps (default) |
+| `ltx-2.3-22b-dev.safetensors` | ~46GB | 22B dev, higher quality (more steps) |
+| `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | ~950MB | 2x spatial upscaler (two-stage) |
+| `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` | ~1.5GB | distilled two-stage LoRA |
 
 ## Generation Options
 
@@ -631,7 +631,7 @@ ltx2mlx "A cat walking" --no-gemma --height 128 --width 128
 LTX-2 requires **Gemma 3 12B** (~25GB download, ~12GB in memory at 16-bit precision):
 
 ```bash
-uv run scripts/download_weights.py --weights gemma
+hf download google/gemma-3-12b-it
 ```
 
 **Requirements:**

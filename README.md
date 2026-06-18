@@ -46,46 +46,50 @@ https://github.com/user-attachments/assets/a508dc05-6d02-453e-9ee9-07878613a137
 ## Quick Start
 
 ```bash
-# 1. Install uv
+# 1. Install
 curl -LsSf https://astral.sh/uv/install.sh | sh
+uv pip install -e .
 
-# 2. Download weights
-uv run scripts/download_weights.py
+# 2. Download weights with the HuggingFace CLI. `hf` ships with huggingface_hub
+#    (`uv pip install huggingface_hub` if you don't have it), or grab the files
+#    by hand from each model's "Files" tab on huggingface.co. Accept the Gemma
+#    license first: https://huggingface.co/google/gemma-3-12b-it
+hf download Lightricks/LTX-2.3 ltx-2.3-22b-distilled-1.1.safetensors
+hf download Lightricks/LTX-2.3 ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+hf download Lightricks/LTX-2.3 ltx-2.3-22b-distilled-lora-384-1.1.safetensors
+hf download google/gemma-3-12b-it
 
-# 3. Generate video (auto-resolves cached LTX/Gemma weights from HF_HOME)
+# 3. Generate (auto-resolves the cached LTX-2.3 + Gemma weights from the HF cache)
 ltx2mlx "A golden retriever running through a meadow"
-
-# Or specify the 2.3 checkpoint explicitly
-ltx2mlx --weights weights/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
-  "A golden retriever running through a meadow"
 ```
 
 ## Required Models
 
-### LTX-2.3 (Recommended)
+All weights live on HuggingFace. Fetch them with the `hf` CLI (it ships with
+`huggingface_hub` - `uv pip install huggingface_hub` if you don't have it), or
+download any file by hand from the model's "Files" tab. Downloaded files land in
+the HuggingFace cache, which `ltx2mlx` resolves automatically.
 
-Download from [Lightricks/LTX-2](https://huggingface.co/Lightricks/LTX-2) on HuggingFace:
+### LTX-2.3 (recommended) - [`Lightricks/LTX-2.3`](https://huggingface.co/Lightricks/LTX-2.3)
 
-| Model | Size | Description |
-|-------|------|-------------|
-| [`ltx-2.3-22b-distilled.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2.3-22b-distilled.safetensors) | 46GB | **Latest** - 22B params, 8 steps |
+| File | Size | Description |
+|------|------|-------------|
+| `ltx-2.3-22b-distilled-1.1.safetensors` | ~46GB | 22B distilled, 8 steps (default) |
+| `ltx-2.3-22b-dev.safetensors` | ~46GB | 22B dev, higher quality (more steps) |
+| `ltx-2.3-spatial-upscaler-x2-1.1.safetensors` | ~950MB | 2x spatial upscaler (two-stage) |
+| `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` | ~1.5GB | distilled two-stage LoRA |
 
-### LTX-2.0
-
-| Model | Size | Description |
-|-------|------|-------------|
-| [`ltx-2-19b-distilled.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled.safetensors) | 43GB | Fast generation (8 steps) |
-| [`ltx-2-19b-dev.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-dev.safetensors) | 43GB | Higher quality (25-50 steps) |
-| [`ltx-2.3-spatial-upscaler-x2-1.1.safetensors`](https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.1.safetensors) | 950MB | 2x resolution upscaling |
-| [`ltx-2-temporal-upscaler-x2-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-temporal-upscaler-x2-1.0.safetensors) | 262MB | 2x framerate upscaling |
-| [`ltx-2-19b-distilled-lora-384.safetensors`](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled-lora-384.safetensors) | 1.5GB | LoRA for two-stage refinement |
-
-**Text Encoder**: [Gemma 3 12B](https://huggingface.co/google/gemma-3-12b-it) (~25GB) - Requires accepting license
-
-Or use the interactive downloader:
 ```bash
-uv run scripts/download_weights.py --weights all
+hf download Lightricks/LTX-2.3 ltx-2.3-22b-distilled-1.1.safetensors
+hf download Lightricks/LTX-2.3 ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+hf download Lightricks/LTX-2.3 ltx-2.3-22b-distilled-lora-384-1.1.safetensors
 ```
+
+**Text Encoder**: [`google/gemma-3-12b-it`](https://huggingface.co/google/gemma-3-12b-it)
+(~25GB, gated) - accept the license, then `hf download google/gemma-3-12b-it`.
+
+The older LTX-2 19B checkpoints in [`Lightricks/LTX-2`](https://huggingface.co/Lightricks/LTX-2)
+also work via the same `hf download` / `--weights` pattern.
 
 ## Available Pipelines
 
