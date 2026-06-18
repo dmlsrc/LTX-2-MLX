@@ -609,7 +609,7 @@ def test_write_handles_multiline_messages() -> None:
 
 
 def test_lazy_bar_add_after_write() -> None:
-    """Mirrors `scripts/generate.py`'s distilled-two-stage flow:
+    """Mirrors `LTX_2_MLX/generate.py`'s distilled-two-stage flow:
     one bar is added, ticks to completion, the caller emits
     inter-stage messages via `bars.write()`, then a SECOND bar is
     added lazily and runs to completion.

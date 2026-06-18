@@ -236,7 +236,7 @@ from the default stack when running A/Bs.
 | `--vae-decoder native` | only option | medium | none for denoise | The historical `legacy` (`SimpleVideoDecoder`, PyTorch-layout slice-conv) backend was removed 2026-05-23 after the native Conv3d decoder had been the production default for an extended bake-in period; the old source remains available in git history.  The matching `SimpleVideoEncoder` was removed at the same time and replaced by `NativeConv3dVideoEncoder` (parity cos sim 0.99965 FP32; ~2-3x per-call speedup). |
 | Terminal redraw throttling | default | none | -5.9 % bakery total on macOS | `DenoiseProgress` no longer spawns a heartbeat thread; `tqdm` uses `ascii=True + mininterval=1-2s`.  Bakery 31m 28s → 29m 38s.  Stage 2 alone -8 %.  See [Terminal redraw throttling](#terminal-redraw-throttling) for the full story. |
 | **--- compute-precision opt-ins ---** | | | | |
-| `--video-ff-dtype float16` | opt-in | none | **-4.6 % bakery 384x640x20s (8m 00s → 7m 38s)** | Cache-baked: cast project_in and project_out weights to FP16 at cache-build time, run the FF interior in FP16 (silu+geglu+matmuls), cast the residual back to BF16 at FF exit.  Attention/RMSNorm/RoPE/SDPA stay BF16.  ~15 % per-matmul FP16 win at production FF shapes (BF16/FP16 ratio 1.17–1.18x) translates to 4.6 % wall savings because FF is ~22 % of total compute and the FF-block win includes boundary casts.  Cosine sim ~0.71 vs BF16 — perceptually close, not bit-equivalent.  **Auto-pairs** with `project_in:pretranspose,project_out:pretranspose` (enforced in `scripts/generate.py:_ensure_ff_layout_for_dtype`).  FP16 *requires* pretranspose: at project_out (K=16384) the FP16 naive kernel falls off a deeper kernel-selection cliff than BF16 (4.95 vs 5.86 TFlops/s, then both recover to >8 TFlops/s with pretranspose).  Disabling pretranspose with FP16 on would be -18 % regression vs BF16 baseline.  Tried `--video-attn-dtype float16` too: net regression (+0.6 % wall) because the SDPA boundary's projection casts outweigh the matmul win; flag dropped.  See "FF FP16 + FP16 cliff" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
+| `--video-ff-dtype float16` | opt-in | none | **-4.6 % bakery 384x640x20s (8m 00s -> 7m 38s)** | Cache-baked: cast project_in and project_out weights to FP16 at cache-build time, run the FF interior in FP16 (silu+geglu+matmuls), cast the residual back to BF16 at FF exit.  Attention/RMSNorm/RoPE/SDPA stay BF16.  ~15 % per-matmul FP16 win at production FF shapes (BF16/FP16 ratio 1.17-1.18x) translates to 4.6 % wall savings because FF is ~22 % of total compute and the FF-block win includes boundary casts.  Cosine sim ~0.71 vs BF16 - perceptually close, not bit-equivalent.  **Auto-pairs** with `project_in:pretranspose,project_out:pretranspose` (enforced in `LTX_2_MLX/generate.py:_ensure_ff_layout_for_dtype`).  FP16 *requires* pretranspose: at project_out (K=16384) the FP16 naive kernel falls off a deeper kernel-selection cliff than BF16 (4.95 vs 5.86 TFlops/s, then both recover to >8 TFlops/s with pretranspose).  Disabling pretranspose with FP16 on would be -18 % regression vs BF16 baseline.  Tried `--video-attn-dtype float16` too: net regression (+0.6 % wall) because the SDPA boundary's projection casts outweigh the matmul win; flag dropped.  See "FF FP16 + FP16 cliff" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
 | `--audio-ff-dtype float16` | opt-in (curiosity) | none | **none measurable** (real-world A/B: +4.6 s within noise on bakery) | Mirror of `--video-ff-dtype` for the audio branch.  Per-matmul FP16 win at audio shapes is real (~10–13 % on audio.FF.project_in K=2048 N=8192 and audio.FF.project_out K=8192 N=2048) but per-call wall is ~2 ms vs video's 200+ ms.  Microbench predicted ~0.32 s savings (0.07 %); bakery A/B (video+audio-FF-FP16 7m 42.2s vs video-only-FF-FP16 7m 37.6s = +4.6s) is fully within single-run noise — output save phase alone varied by +2.6 s between the two runs.  Audio latent cos sim ≥0.997 vs the video-only-FP16 reference; perceptually unchanged by listening test on bakery dialogue.  **No kernel cliff at audio K=8192** — unlike video K=16384, FP16 naive is actually FASTER than BF16 naive there.  Auto-pairs audio FF pretranspose (avoids FP16 x BF16 → FP32 mixed-dtype promotion, not because of a cliff).  Kept as a documented opt-in for future hardware / workload shifts that might change the math.  See "Audio FF FP16" entry in `PERFORMANCE_NOTES.md` and `scripts/bench_pretranspose_dtype.py`. |
 | **--- env-toggle opt-ins ---** | | | | |
 | `LTX_VELOCITY_MODE=1` | opt-in | low | neutral | Inline velocity-form Euler update in `_denoise_loop_simple_av`.  Same math.  Kept env-gated for future MLX versions. |
@@ -336,7 +336,7 @@ K=16384 in the naive layout, BF16 falls to 5.86 TFlops/s (the historical
 naive falls *further* to 4.95 TFlops/s — i.e. FP16 naive is 18 % slower
 than BF16 naive on this shape.  Both layouts recover to >8 TFlops/s with
 pretranspose.  The auto-pair helper `_ensure_ff_layout_for_dtype` in
-`scripts/generate.py` enforces `project_in:pretranspose,project_out:pretranspose`
+`LTX_2_MLX/generate.py` enforces `project_in:pretranspose,project_out:pretranspose`
 whenever `--video-ff-dtype float16` is set, so a user can't accidentally
 trip the cliff.  Tested via
 `scripts/bench_pretranspose_dtype.py`.
@@ -568,7 +568,7 @@ BEFORE importing any LTX-2-MLX modules, log every call's
 `(q.dtype, k.dtype, v.dtype, mask.dtype, shapes)`, then run one denoise step:
 
 ```python
-# scripts/sdpa_dtype_probe.py — runs scripts/generate.py under a
+# scripts/sdpa_dtype_probe.py - runs LTX_2_MLX/generate.py under a
 # monkey-patched SDPA that records every call's dtype.
 ```
 
@@ -964,7 +964,7 @@ LTX_PROFILE_STOP_AFTER_STEPS=2 \
 LTX_PROFILE_SIGNPOSTS=1 \
 LTX_PROFILE_SIGNPOSTS_SYNC=1 \
 LTX_PROFILE_SIGNPOST_LOG="${TMPDIR:-/tmp}/ltx_signposts.log" \
-caffeinate -di python scripts/generate.py "$BAKERY" \
+caffeinate -di ltx2mlx "$BAKERY" \
   --pipeline distilled --height 576 --width 1024 --duration 20 --seed 124 \
   --generate-audio --fast-mode --save-all-sidecars \
   --output-prefix bakery_trace
@@ -1118,7 +1118,7 @@ latent-exact replacement for stock MLX SDPA.
 ```bash
 LTX_STEEL_ATTN_PROBE=1 \
 PYTHONDONTWRITEBYTECODE=1 \
-python scripts/generate.py "$PROMPT" \
+ltx2mlx "$PROMPT" \
   --pipeline distilled \
   --height 320 --width 576 --duration 30 --seed 42 \
   --generate-audio --fast-mode --save-all-sidecars

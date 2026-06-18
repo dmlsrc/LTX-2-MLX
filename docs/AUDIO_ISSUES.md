@@ -64,7 +64,7 @@ This is a numerical precision divergence across 48 transformer layers. Audio spe
 - **Problem:** Padding trimmed to next multiple of 128 instead of exact real token count
 - **Fix:** Trim to exact real token count (matching ComfyUI)
 - **Impact:** No audio impact
-- **File:** `scripts/generate.py`
+- **File:** `LTX_2_MLX/generate.py`
 
 ---
 

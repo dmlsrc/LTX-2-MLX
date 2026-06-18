@@ -68,7 +68,7 @@ All recipes:
 ## Bakery — full quality (`distilled` two-stage, 1024x576, ~25 min)
 
 ```bash
-caffeinate -di python scripts/generate.py "$BAKERY" \
+caffeinate -di ltx2mlx "$BAKERY" \
   --pipeline distilled \
   --height 576 --width 1024 --duration 20 --seed 124 \
   --generate-audio \
@@ -84,7 +84,7 @@ upscaler, no stage-2 refinement.  Same 8-step distilled schedule.
 Fast for iterating on the prompt or doing seed sweeps.
 
 ```bash
-caffeinate -di python scripts/generate.py "$BAKERY" \
+caffeinate -di ltx2mlx "$BAKERY" \
   --pipeline one-stage \
   --height 288 --width 512 --duration 20 --seed 124 \
   --generate-audio \
@@ -96,7 +96,7 @@ caffeinate -di python scripts/generate.py "$BAKERY" \
 ## Kitten — full quality (`distilled` two-stage, 1024x576, ~45 min)
 
 ```bash
-caffeinate -di python scripts/generate.py "$KITTEN" \
+caffeinate -di ltx2mlx "$KITTEN" \
   --pipeline distilled \
   --height 576 --width 1024 --duration 30 --seed 42 \
   --generate-audio \
@@ -108,7 +108,7 @@ caffeinate -di python scripts/generate.py "$KITTEN" \
 ## Kitten — smoke (`one-stage`, 512x288, ~11-12 min)
 
 ```bash
-caffeinate -di python scripts/generate.py "$KITTEN" \
+caffeinate -di ltx2mlx "$KITTEN" \
   --pipeline one-stage \
   --height 288 --width 512 --duration 30 --seed 42 \
   --generate-audio \

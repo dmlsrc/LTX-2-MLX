@@ -43,7 +43,7 @@ For quick verification without loading weights (works on low-RAM machines):
 
 ```bash
 # Verify Two-Stage Pipeline Logic
-python scripts/generate.py "test" \
+ltx2mlx "test" \
   --pipeline two-stage \
   --placeholder \
   --distilled-lora weights/dummy.safetensors \

@@ -2,7 +2,7 @@
 
 Single-line bars rendered directly to stderr via carriage-return +
 ANSI cursor movement - no tqdm dependency. The layout matches
-scripts/generate.py's `DenoiseProgress` shape, minus the STEP1 column
+LTX_2_MLX/generate.py's `DenoiseProgress` shape, minus the STEP1 column
 (meaningful for seconds-long denoise steps, useless for 50 ms VSR
 frames that round to "0m 00s"):
 
@@ -48,7 +48,7 @@ __all__ = ["PhaseBar", "StackedPhaseBars"]
 
 
 # ---------------------------------------------------------------------------
-# Formatting helpers - matched 1:1 to scripts/generate.py
+# Formatting helpers - matched 1:1 to LTX_2_MLX/generate.py
 # ---------------------------------------------------------------------------
 
 def _fmt_duration(seconds: float) -> str:
@@ -251,7 +251,7 @@ class PhaseBar:
         so timing/pace/STEP1 capture work identically.  Useful for
         callbacks that report progress as `(current_step, total_steps)`
         tuples rather than per-update deltas - e.g.,
-        `scripts/generate.py`'s denoise stage callback.
+        `LTX_2_MLX/generate.py`'s denoise stage callback.
 
         Backward steps (n < self._n) are clamped to a no-op rather
         than rewinding the count.  Backward progress would invalidate
@@ -346,7 +346,7 @@ class PhaseBar:
 
         # Optional STEP1 column: wall-clock cost of the first update
         # (origin -> first update timestamp).  Matches the DenoiseProgress
-        # surface in scripts/generate.py so a PhaseBar can drop-in
+        # surface in LTX_2_MLX/generate.py so a PhaseBar can drop-in
         # replace it for denoise-style runs where the first step is
         # typically warmup-heavy.  Same 8-char `_fmt_duration` format
         # as RUN / ETA.

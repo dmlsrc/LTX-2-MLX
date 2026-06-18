@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "ltx-2-mlx"
 version = "0.1.0"
-description = "LTX-2 19B video generation model ported to Apple MLX"
+description = "LTX-2 / LTX-2.3 video generation ported to Apple MLX (Apple Silicon)"
 readme = "README.md"
 requires-python = ">=3.14"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "LTX-2-MLX Contributors"}
 ]
-keywords = ["video generation", "diffusion", "mlx", "apple silicon", "ltx-2"]
+keywords = ["video generation", "diffusion", "mlx", "apple silicon", "ltx-2", "ltx-2.3"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -67,10 +67,10 @@ ic-lora = [
     "numpy>=2.4.6",
 ]
 [project.urls]
-Homepage = "https://github.com/username/LTX-2-MLX"
-Repository = "https://github.com/username/LTX-2-MLX"
-Documentation = "https://github.com/username/LTX-2-MLX/blob/main/README.md"
-Issues = "https://github.com/username/LTX-2-MLX/issues"
+Homepage = "https://github.com/dmlsrc/LTX-2-MLX"
+Repository = "https://github.com/dmlsrc/LTX-2-MLX"
+Documentation = "https://github.com/dmlsrc/LTX-2-MLX/blob/main/README.md"
+Issues = "https://github.com/dmlsrc/LTX-2-MLX/issues"
 
 [project.scripts]
 ltx2mlx = "LTX_2_MLX.generate:main"

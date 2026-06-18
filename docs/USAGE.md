@@ -6,10 +6,10 @@ Complete guide for generating videos with LTX-2 on Apple Silicon.
 
 ```bash
 # Generate a video with default settings
-python scripts/generate.py "A golden retriever running through a meadow"
+ltx2mlx "A golden retriever running through a meadow"
 
 # Generate with specific settings
-python scripts/generate.py "A rocket launching into space" \
+ltx2mlx "A rocket launching into space" \
     --height 512 --width 768 \
     --frames 65 --steps 8 \
     --seed 42 --output rocket.mp4
@@ -55,7 +55,7 @@ uv run scripts/download_weights.py --weights distilled gemma
 uv run scripts/download_weights.py --weights all
 ```
 
-At runtime, `scripts/generate.py` resolves cached LTX-2.3 and Gemma weights from
+At runtime, `LTX_2_MLX/generate.py` resolves cached LTX-2.3 and Gemma weights from
 `HF_HUB_CACHE`, `$HF_HOME/hub`, then the normal user cache
 (`~/.cache/huggingface/hub`). Use `--weights` or `--gemma-path` only when you
 want to override that cache lookup.
@@ -64,7 +64,7 @@ want to override that cache lookup.
 override individual subsystems without changing the rest of the bundle:
 
 ```bash
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --weights /path/to/full-ltx-bundle.safetensors \
     --transformer-weights /path/to/transformer-only.safetensors
 ```
@@ -100,7 +100,7 @@ Height and width must be divisible by 32:
 | 768x1024 | 3:4 | Maximum quality |
 
 ```bash
-python scripts/generate.py "Your prompt" --height 512 --width 768
+ltx2mlx "Your prompt" --height 512 --width 768
 ```
 
 ### Frame Count
@@ -116,7 +116,7 @@ Frames must satisfy `frames % 8 == 1`:
 | 121 | 5.0s | 16 |
 
 ```bash
-python scripts/generate.py "Your prompt" --frames 65
+ltx2mlx "Your prompt" --frames 65
 ```
 
 ### Steps
@@ -129,7 +129,7 @@ More steps = higher quality but slower:
 | Dev | 30 by default, 25-50 for experiments |
 
 ```bash
-python scripts/generate.py "Your prompt" --steps 8
+ltx2mlx "Your prompt" --steps 8
 ```
 
 CFG is also model-aware by default: distilled runs at CFG `1.0`, while dev runs
@@ -141,7 +141,7 @@ guidance.
 Control randomness for reproducible results:
 
 ```bash
-python scripts/generate.py "Your prompt" --seed 42
+ltx2mlx "Your prompt" --seed 42
 ```
 
 ## Pipelines
@@ -151,7 +151,7 @@ python scripts/generate.py "Your prompt" --seed 42
 Optimized for speed with no-CFG two-stage generation:
 
 ```bash
-python scripts/generate.py "A cat walking through a garden" \
+ltx2mlx "A cat walking through a garden" \
     --pipeline distilled \
     --height 512 --width 768 \
     --frames 65
@@ -189,7 +189,7 @@ stage-2 denoise, VAE/audio decode, and export.
 Full CFG control for maximum quality:
 
 ```bash
-python scripts/generate.py "A majestic eagle soaring over mountains" \
+ltx2mlx "A majestic eagle soaring over mountains" \
     --pipeline one-stage \
     --frames 65 --steps 20 \
     --cfg 5.0
@@ -206,7 +206,7 @@ python scripts/generate.py "A majestic eagle soaring over mountains" \
 High-resolution output with upscaling:
 
 ```bash
-python scripts/generate.py "A waterfall in a tropical forest" \
+ltx2mlx "A waterfall in a tropical forest" \
     --pipeline two-stage \
     --height 768 --width 1024 \
     --frames 65 \
@@ -227,7 +227,7 @@ python scripts/generate.py "A waterfall in a tropical forest" \
 BF16 is the default and is usually the best balance of memory and quality:
 
 ```bash
-python scripts/generate.py "Your prompt" --dtype bfloat16
+ltx2mlx "Your prompt" --dtype bfloat16
 ```
 
 Precision exceptions are intentionally narrow:
@@ -261,7 +261,7 @@ For the common low-RAM transformer path, use the preset instead of spelling out
 the resident-block knobs:
 
 ```bash
-python scripts/generate.py "Your prompt" --stream-transformer
+ltx2mlx "Your prompt" --stream-transformer
 ```
 
 This enables 16 resident transformer blocks, resident-group compile, and
@@ -282,7 +282,7 @@ it is usually slower and mostly redundant for distilled single-pass runs using
 `--stream-transformer`:
 
 ```bash
-python scripts/generate.py "Your prompt" --low-memory
+ltx2mlx "Your prompt" --low-memory
 ```
 
 ### Sequential Loading
@@ -296,28 +296,28 @@ Models are loaded/unloaded sequentially by default:
 
 ### Nature Scenes
 ```bash
-python scripts/generate.py "Ocean waves crashing on a sandy beach at sunset, golden hour lighting"
-python scripts/generate.py "A serene forest with sunlight filtering through the trees"
-python scripts/generate.py "Snow falling gently in a mountain landscape"
+ltx2mlx "Ocean waves crashing on a sandy beach at sunset, golden hour lighting"
+ltx2mlx "A serene forest with sunlight filtering through the trees"
+ltx2mlx "Snow falling gently in a mountain landscape"
 ```
 
 ### Action Sequences
 ```bash
-python scripts/generate.py "A golden retriever running through a sunny meadow with wildflowers"
-python scripts/generate.py "A rocket ship launching into space with flames and smoke"
-python scripts/generate.py "A sports car racing on a winding mountain road"
+ltx2mlx "A golden retriever running through a sunny meadow with wildflowers"
+ltx2mlx "A rocket ship launching into space with flames and smoke"
+ltx2mlx "A sports car racing on a winding mountain road"
 ```
 
 ### Urban/Architectural
 ```bash
-python scripts/generate.py "A bustling city street at night with neon lights and rain reflections"
-python scripts/generate.py "Time-lapse of clouds moving over a modern cityscape"
+ltx2mlx "A bustling city street at night with neon lights and rain reflections"
+ltx2mlx "Time-lapse of clouds moving over a modern cityscape"
 ```
 
 ### Cinematic Style
 ```bash
-python scripts/generate.py "Cinematic shot of a lone astronaut on Mars, dramatic lighting"
-python scripts/generate.py "Epic wide shot of a medieval castle at dawn"
+ltx2mlx "Cinematic shot of a lone astronaut on Mars, dramatic lighting"
+ltx2mlx "Epic wide shot of a medieval castle at dawn"
 ```
 
 ## Prompt Tips
@@ -359,24 +359,24 @@ rewrites it to `.mov`.
 ```bash
 # Default timestamped output (default tier -> AVAssetWriter HEVC + ALAC,
 # no ffmpeg involved).
-python scripts/generate.py "Your prompt"
+ltx2mlx "Your prompt"
 
 # Force the ffmpeg backend even for the default tier (useful for A/B).
-python scripts/generate.py "Your prompt" --output-backend ffmpeg
+ltx2mlx "Your prompt" --output-backend ffmpeg
 
 # Web-compat output (H.264 + AAC) for browser embed — ffmpeg only.
-python scripts/generate.py "Your prompt" --encode-tier web
+ltx2mlx "Your prompt" --encode-tier web
 
 # Editor-grade output (ProRes 422 HQ in .mov) — ffmpeg only.
-python scripts/generate.py "Your prompt" --encode-tier export
+ltx2mlx "Your prompt" --encode-tier export
 
 # Custom output directory and filename prefix
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --output-dir /path/to/outputs \
     --output-prefix ltx_bakery_r16
 
 # Exact output path override
-python scripts/generate.py "Your prompt" --output my_video.mp4
+ltx2mlx "Your prompt" --output my_video.mp4
 ```
 
 ### VideoToolbox post-processing (VSR, VTFRC)
@@ -420,16 +420,16 @@ These are independent of the model-based `--upscale-spatial` /
 ```bash
 # Generate at 384x216 and let VideoToolbox upscale 4x to 1536x864
 # with the HQ "Image" model (no prev-frame feedback -> smoother motion).
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --width 384 --height 216 \
     --vsr-spatial-mode image
 
 # 2x slow-mo: render at 24fps, interpolate to 48fps via VTFRC.
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --vsr-target-fps 48 --vsr-temporal-mode high
 
 # 4x VSR + 60fps interp, AAC instead of ALAC for size.
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --width 384 --height 216 \
     --vsr-spatial-mode balanced --vsr-target-fps 60
 
@@ -437,7 +437,7 @@ python scripts/generate.py "Your prompt" \
 # in one model run, for side-by-side comparison.  Outputs:
 #   sample.mp4      (1536x864, 4x VSR)
 #   sample_orig.mp4 (384x216, no VSR)
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --width 384 --height 216 \
     --vsr-spatial-mode image --vsr-save-original \
     --output outputs/sample.mp4
@@ -453,7 +453,7 @@ Use `--save-latents` to write final video/audio latents as an NPZ sidecar next t
 the requested output. The sidecar uses the same basename as the MP4.
 
 ```bash
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --generate-audio \
     --save-latents \
     --output outputs/sample.mp4
@@ -495,7 +495,7 @@ without loading Gemma again. Legacy embedding NPZs with `embedding` and
 `attention_mask` are still supported, but they do not carry audio conditioning.
 
 ```bash
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --generate-audio \
     --save-text-embeddings \
     --output outputs/sample.mp4
@@ -537,13 +537,13 @@ in sync to the millisecond.
 
 ```bash
 # Default — detect, trim leading 120 ms only when the click is present
-python scripts/generate.py "..." --generate-audio
+ltx2mlx "..." --generate-audio
 
 # Disable the check (e.g. when re-deriving the raw vocoder output)
-python scripts/generate.py "..." --generate-audio --audio-onset-trim off
+ltx2mlx "..." --generate-audio --audio-onset-trim off
 
 # Force a specific trim duration in milliseconds (regardless of detection)
-python scripts/generate.py "..." --generate-audio --audio-onset-trim 150
+ltx2mlx "..." --generate-audio --audio-onset-trim 150
 ```
 
 The cleaned waveform feeds both the muxed track and the optional
@@ -590,7 +590,7 @@ This is typically a timestep conditioning issue. Ensure you're using the latest 
 
 The old `DistilledPipeline` library wrapper has been archived. Programmatic
 distilled two-stage generation now uses the same `AVPipeline` /
-`AVPipeline.generate_distilled_two_stage` route as `scripts/generate.py`.
+`AVPipeline.generate_distilled_two_stage` route as `LTX_2_MLX/generate.py`.
 Use the CLI as the reference entry point unless you are wiring the model
 components directly.
 
@@ -615,7 +615,7 @@ from `HF_HUB_CACHE`, `$HF_HOME/hub`, the shared Hugging Face cache, or the
 normal user cache:
 
 ```bash
-python scripts/generate.py "A cat walking through a garden"
+ltx2mlx "A cat walking through a garden"
 ```
 
 ### Dummy Embeddings (Testing)
@@ -623,7 +623,7 @@ python scripts/generate.py "A cat walking through a garden"
 For testing the pipeline without Gemma:
 
 ```bash
-python scripts/generate.py "A cat walking" --no-gemma --height 128 --width 128
+ltx2mlx "A cat walking" --no-gemma --height 128 --width 128
 ```
 
 ### Gemma 3 Requirements

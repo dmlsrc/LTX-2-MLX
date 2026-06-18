@@ -53,10 +53,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv run scripts/download_weights.py
 
 # 3. Generate video (auto-resolves cached LTX/Gemma weights from HF_HOME)
-uv run python scripts/generate.py "A golden retriever running through a meadow"
+ltx2mlx "A golden retriever running through a meadow"
 
 # Or specify the 2.3 checkpoint explicitly
-uv run python scripts/generate.py --weights weights/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+ltx2mlx --weights weights/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
   "A golden retriever running through a meadow"
 ```
 
@@ -98,16 +98,16 @@ uv run scripts/download_weights.py --weights all
 
 ```bash
 # Fast two-stage distilled preview
-python scripts/generate.py "Your prompt" --pipeline distilled
+ltx2mlx "Your prompt" --pipeline distilled
 
 # Existing single-pass distilled path
-python scripts/generate.py "Your prompt" --pipeline one-stage --model-variant distilled
+ltx2mlx "Your prompt" --pipeline one-stage --model-variant distilled
 
 # High quality dev-style sampling
-python scripts/generate.py "Your prompt" --pipeline one-stage --steps 20 --cfg 5.0
+ltx2mlx "Your prompt" --pipeline one-stage --steps 20 --cfg 5.0
 
 # High resolution
-python scripts/generate.py "Your prompt" --pipeline two-stage --height 768 --width 1024
+ltx2mlx "Your prompt" --pipeline two-stage --height 768 --width 1024
 ```
 
 See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.

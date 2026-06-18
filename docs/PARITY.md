@@ -193,13 +193,13 @@ x0 = latent - sigma * velocity
 
 **Issue**: Our `encode_with_gemma` / `encode_av_gemma_batch` tokenized the raw prompt, while Lightricks' `LTXVGemmaTokenizer.tokenize_with_weights` does `text.strip()` first.
 
-**Fix**: [`scripts/generate.py:1361,1539`](../scripts/generate.py) — apply `.strip()` to the prompt before passing it to the HF tokenizer.  Removes trailing-whitespace token mismatches.
+**Fix**: [`LTX_2_MLX/generate.py:1361,1539`](../LTX_2_MLX/generate.py) - apply `.strip()` to the prompt before passing it to the HF tokenizer.  Removes trailing-whitespace token mismatches.
 
 ### 7. Pad-to-Max Tokenization Default (V2.3 — May 21, 2026)
 
 **Issue**: `encode_av_gemma_batch` defaulted to unpadded tokenization (variable-length, faster), but Lightricks always pads to `max_length=1024` before Gemma forward.  Real-token hidden states are bit-equivalent either way (RoPE-relative attention), but the canonical numerics path is padded.
 
-**Fix**: [`scripts/generate.py:1532`](../scripts/generate.py) — `LTX_PAD_PROMPT_TO_MAX` now defaults to `"1"` (pad), opt out with `=0`.  Reproduces stock LTX-2 numerics exactly.
+**Fix**: [`LTX_2_MLX/generate.py:1532`](../LTX_2_MLX/generate.py) - `LTX_PAD_PROMPT_TO_MAX` now defaults to `"1"` (pad), opt out with `=0`.  Reproduces stock LTX-2 numerics exactly.
 
 ### 8. Audio Noise Normalization (V2.3 — May 21, 2026)
 

@@ -51,7 +51,7 @@ class so the runtime boundary-cast code is shared, and (b) the dtype
 dimension is interesting to keep available for future workloads where
 audio is a larger compute share.  `_AUDIO_FF_KEY_PATTERNS` and
 `_ensure_audio_ff_layout_for_dtype` mirror their video equivalents in
-`LTX_2_MLX/loader/transformer_cache.py` and `scripts/generate.py`.
+`LTX_2_MLX/loader/transformer_cache.py` and `LTX_2_MLX/generate.py`.
 `_video_cache_dtype_for_key` was renamed to `_ff_cache_dtype_for_key`
 to dispatch on both video and audio FF prefixes.
 
@@ -362,7 +362,7 @@ new layer.
    warning at model construction time if any `Linear` in the
    transformer has `weight.shape[1] >= 13312` (BF16) / `>= 10240`
    (FP16) AND lacks a pretranspose layout spec.  ~30 lines in
-   `loader/transformer_cache.py` or `scripts/generate.py`.
+   `loader/transformer_cache.py` or `LTX_2_MLX/generate.py`.
    - **Cost:** trivial.
    - **Benefit:** protects future LTX versions or alternate models
      from silently regressing if a new large-K matmul is introduced
@@ -392,7 +392,7 @@ wall savings; observed denoise savings ~12 s on ~6m 27s denoise = 3.1
 pre/post phases (audio decode, save, encode).
 
 **Auto-pair is mandatory for FP16:** `_ensure_ff_layout_for_dtype` /
-`_ensure_audio_ff_layout_for_dtype` in `scripts/generate.py` force
+`_ensure_audio_ff_layout_for_dtype` in `LTX_2_MLX/generate.py` force
 `project_in:pretranspose,project_out:pretranspose` whenever the
 corresponding FF dtype is FP16.  Two reasons stack: (a) without
 dtype-baked pretransposed cache, project_in does FP16 x BF16 → FP32
@@ -424,7 +424,7 @@ detail in this scratchpad's git history (commits 2026-05-17/18).
 
 ### 2026-05-17: Pretranspose default cleanup -- project_out is the only real win `[PROMOTED]`
 
-Defaults trimmed in `scripts/generate.py`:
+Defaults trimmed in `LTX_2_MLX/generate.py`:
 - `DEFAULT_VIDEO_FF_LAYOUT_SPECS = (("project_out", "pretranspose"),)`
   (dropped `project_in:pretranspose`)
 - `DEFAULT_VIDEO_ATTN_LAYOUT_SPECS = ()` (dropped all attention layouts)
@@ -1407,7 +1407,7 @@ small-T workloads who notice a regression can restore the audio
 layouts manually (no LTX-side env-var-only opt-out exists; would
 need to pass `--video-attn-layout to_q:pretranspose,...` and similar
 audio flags, or reintroduce the historical defaults in
-`scripts/generate.py`).
+`LTX_2_MLX/generate.py`).
 
 Opt out the broader audio-pretranspose mechanism via
 `LTX_DISABLE_AUDIO_PRETRANSPOSE=1` (legacy env, still honored).

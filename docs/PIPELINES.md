@@ -9,7 +9,7 @@ LTX-2 MLX provides **6 specialized pipelines** for different use cases. Use the 
 Standard text-to-video generation with simple CFG denoising.
 
 ```bash
-python scripts/generate.py "A cat walking" \
+ltx2mlx "A cat walking" \
     --pipeline text-to-video \
     --frames 25
 ```
@@ -21,7 +21,7 @@ python scripts/generate.py "A cat walking" \
 Two-stage distilled model optimized for speed (no CFG, 11 total denoise steps).
 
 ```bash
-python scripts/generate.py "A cat walking" \
+ltx2mlx "A cat walking" \
     --pipeline distilled \
     --frames 25
 ```
@@ -37,7 +37,7 @@ python scripts/generate.py "A cat walking" \
 Single-stage CFG with full control and adaptive sigma scheduling.
 
 ```bash
-python scripts/generate.py "A cat walking" \
+ltx2mlx "A cat walking" \
     --pipeline one-stage \
     --cfg 5.0 --steps 20 \
     --frames 25
@@ -53,7 +53,7 @@ python scripts/generate.py "A cat walking" \
 Two-stage pipeline with spatial upscaling for high-resolution output.
 
 ```bash
-python scripts/generate.py "A cat walking" \
+ltx2mlx "A cat walking" \
     --pipeline two-stage \
     --height 512 --width 704 \
     --cfg 5.0 --steps-stage1 15 \
@@ -131,14 +131,14 @@ the existing single-pass distilled path.
 ### Fast Previews
 
 ```bash
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --pipeline distilled --height 512 --width 768 --frames 65
 ```
 
 ### High Quality
 
 ```bash
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --pipeline one-stage --frames 65 \
     --steps 15 --cfg 4.0 --dtype bfloat16
 ```
@@ -146,7 +146,7 @@ python scripts/generate.py "Your prompt" \
 ### High Resolution
 
 ```bash
-python scripts/generate.py "Your prompt" \
+ltx2mlx "Your prompt" \
     --pipeline two-stage --height 768 --width 1024 --frames 65 \
     --steps-stage1 15 --cfg 5.0 --dtype bfloat16
 ```
