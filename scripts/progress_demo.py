@@ -4,7 +4,7 @@
 Renders one or more live-bar visual scenarios so the appearance can be
 eyeballed by hand (alignment holds, pace columns widen on demand,
 bars.write() lands messages above bars without duplication, STEP1 column
-matches scripts/generate.py's DenoiseProgress layout).
+matches LTX_2_MLX/generate.py's DenoiseProgress layout).
 
 This is a manual-inspection tool, NOT a test.  The automated assertions
 for PhaseBar / StackedPhaseBars live in tests/test_progress.py.
@@ -44,7 +44,7 @@ def _header(title: str, blurb: str = "") -> None:
 
 def demo_vae_vsr_streaming() -> None:
     """The streaming-encode happy path: VAE chunks (slow) feeding a VT
-    encode bar (fast).  Mirrors the layout `scripts/generate.py` produces
+    encode bar (fast).  Mirrors the layout `LTX_2_MLX/generate.py` produces
     on a tiled distilled-two-stage run with `--output-backend videotoolbox`.
 
     What to look for:
@@ -84,7 +84,7 @@ def demo_vae_vsr_streaming() -> None:
 def demo_denoise_with_step1() -> None:
     """Single PhaseBar with `show_step1=True`, simulating a denoise pass
     where the first step is warmup-heavy.  Demonstrates the STEP1 column
-    matching the layout `scripts/generate.py`'s `DenoiseProgress` shows.
+    matching the layout `LTX_2_MLX/generate.py`'s `DenoiseProgress` shows.
 
     What to look for:
       * STEP1 column populates only after the first update.
@@ -112,7 +112,7 @@ def demo_denoise_with_step1() -> None:
 
 
 def demo_denoise_stacked() -> None:
-    """Mirrors `scripts/generate.py`'s distilled-two-stage flow:
+    """Mirrors `LTX_2_MLX/generate.py`'s distilled-two-stage flow:
     Stage 1 bar is added at start, runs to completion, then between
     stages the pipeline emits "Upsampling latent 2x..." and "Distilled
     stage 2: ..." messages via `bars.write()`.  Stage 2 bar is added

@@ -105,7 +105,7 @@ fi
 
 LTX_T0=$(date +%s)
 LTX_PROFILE_STOP_AFTER_STEPS="$STEPS" \
-caffeinate -di python scripts/generate.py "$BAKERY" \
+caffeinate -di python LTX_2_MLX/generate.py "$BAKERY" \
   --pipeline distilled \
   --height "$HEIGHT" --width "$WIDTH" \
   --duration 20 --seed "$SEED" \

@@ -125,7 +125,7 @@ run_variant() {
     if [ "$PREWARM" != "0" ]; then
         echo "[$label] pre-warming (cache build + Metal JIT) ..."
         LTX_PROFILE_STOP_AFTER_STEPS=1 \
-        caffeinate -di python scripts/generate.py "$BAKERY" \
+        caffeinate -di python LTX_2_MLX/generate.py "$BAKERY" \
           --pipeline distilled \
           --height "$HEIGHT" --width "$WIDTH" \
           --duration 20 --seed "$SEED" \
@@ -144,7 +144,7 @@ run_variant() {
     echo "[$label] starting timed run..."
     local t0=$(date +%s)
     LTX_PROFILE_STOP_AFTER_STEPS="$STEPS" \
-    caffeinate -di python scripts/generate.py "$BAKERY" \
+    caffeinate -di python LTX_2_MLX/generate.py "$BAKERY" \
       --pipeline distilled \
       --height "$HEIGHT" --width "$WIDTH" \
       --duration 20 --seed "$SEED" \

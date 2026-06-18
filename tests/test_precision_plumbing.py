@@ -181,7 +181,7 @@ def test_fused_adaln_falls_back_for_non_default_eps(monkeypatch):
 
 
 def test_load_av_transformer_uses_transformer_precision_metadata(monkeypatch):
-    from scripts import generate as gen
+    from LTX_2_MLX import generate as gen
 
     captured = {}
 
@@ -215,7 +215,7 @@ def test_load_av_transformer_uses_transformer_precision_metadata(monkeypatch):
 
 
 def test_load_av_transformer_warns_for_missing_rope_metadata(monkeypatch, capsys):
-    from scripts import generate as gen
+    from LTX_2_MLX import generate as gen
 
     captured = {}
 
@@ -244,7 +244,7 @@ def test_load_av_transformer_warns_for_missing_rope_metadata(monkeypatch, capsys
 
 
 def test_load_av_transformer_rejects_interleaved_rope_metadata(monkeypatch):
-    from scripts import generate as gen
+    from LTX_2_MLX import generate as gen
 
     monkeypatch.setattr(
         gen,

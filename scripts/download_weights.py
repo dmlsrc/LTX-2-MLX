@@ -286,7 +286,7 @@ def download_weights(selected: set[str], token: str | None = None):
     if success:
         console.print()
         console.print("[bold]You can now run:[/bold]")
-        console.print("  uv run python scripts/generate.py \"Your prompt here\"")
+        console.print("  uv run python LTX_2_MLX/generate.py \"Your prompt here\"")
 
 
 def main():

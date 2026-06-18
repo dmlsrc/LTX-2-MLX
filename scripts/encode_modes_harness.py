@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Encode-mode harness for VAE-decoded video + audio.
 
-Loads a final latent NPZ (from `scripts/generate.py --save-latents`), decodes
+Loads a final latent NPZ (from `LTX_2_MLX/generate.py --save-latents`), decodes
 video + audio ONCE through the VAE / vocoder, then re-encodes the SAME decoded
 result through a list of named ffmpeg presets so codec / bit-depth / chroma /
 audio-codec choices can be A/B compared without re-running diffusion.
@@ -68,12 +68,12 @@ def make_video_decoder(
     *,
     backend: str = "native",
 ):
-    """Build a VAE decoder matching scripts/generate.py's happy-path defaults."""
+    """Build a VAE decoder matching LTX_2_MLX/generate.py's happy-path defaults."""
+    from LTX_2_MLX.generate import get_vae_config
     from LTX_2_MLX.model.video_vae.native_decoder import (
         NativeConv3dVideoDecoder,
         load_native_vae_decoder_weights,
     )
-    from scripts.generate import get_vae_config
 
     cfg = get_vae_config(weights_path)
     decoder_blocks = cfg.get("decoder_blocks")
@@ -310,7 +310,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         default="native",
         help=(
             "VAE decoder backend. Both do 3D convolution. "
-            "native (default, matches scripts/generate.py's happy path) uses "
+            "native (default, matches LTX_2_MLX/generate.py's happy path) uses "
             "MLX-native nn.Conv3d. legacy is the older slice-based Conv3d "
             "emulation, kept as the A/B baseline."
         ),
@@ -408,7 +408,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif not args.skip_audio:
         print("NPZ has no audio latent; encoding video-only.")
 
-    # Resolve tiling the same way scripts/generate.py does. With the
+    # Resolve tiling the same way LTX_2_MLX/generate.py does. With the
     # native backend `TilingConfig.auto` may return None (no tiling
     # needed) and the decode runs as a single pass through decode_latent -
     # NO spatial seams. The legacy simple-decoder branch always splits

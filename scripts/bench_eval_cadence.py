@@ -34,6 +34,14 @@ from LTX_2_MLX.components.patchifiers import (
     VideoLatentPatchifier,
 )
 from LTX_2_MLX.conditioning.tools import AudioLatentTools, VideoLatentTools
+
+# Reuse the production loader so the bench has the exact same layout/quant
+# pipeline (pretranspose, V2 cross_attention_adaln, gated attention, etc).
+from LTX_2_MLX.generate import (
+    DEFAULT_VIDEO_ATTN_LAYOUT_SPECS,
+    DEFAULT_VIDEO_FF_LAYOUT_SPECS,
+    load_av_transformer,
+)
 from LTX_2_MLX.pipelines.common import (
     audio_modality_from_state,
     modality_from_state,
@@ -42,14 +50,6 @@ from LTX_2_MLX.types import (
     AudioLatentShape,
     VideoLatentShape,
     VideoPixelShape,
-)
-
-# Reuse the production loader so the bench has the exact same layout/quant
-# pipeline (pretranspose, V2 cross_attention_adaln, gated attention, etc).
-from scripts.generate import (
-    DEFAULT_VIDEO_ATTN_LAYOUT_SPECS,
-    DEFAULT_VIDEO_FF_LAYOUT_SPECS,
-    load_av_transformer,
 )
 
 

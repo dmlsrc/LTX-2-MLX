@@ -42,7 +42,7 @@ Temporal modes (only relevant when --target-fps is set)
     high      VTFrameRateConversion's QualityPrioritizationQuality - more
               compute per interpolated frame, cleaner motion.
 
-The VAE decoder defaults track scripts/generate.py's happy path
+The VAE decoder defaults track LTX_2_MLX/generate.py's happy path
 (native backend + zero spatial padding) via the encode_modes_harness
 helpers. Chunks are cast to fp16 RGBA inside MLX so the full bf16
 precision is preserved through to VSR's RGBAHalf source format -
@@ -377,7 +377,7 @@ def run(args: argparse.Namespace) -> None:
     out_root = Path(args.output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    from scripts.generate import sanitize_output_prefix
+    from LTX_2_MLX.generate import sanitize_output_prefix
     stem = f"{sanitize_output_prefix(args.output_prefix)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     pre_dir = out_root / f"{stem}_pre"
     post_dir = out_root / f"{stem}_post"

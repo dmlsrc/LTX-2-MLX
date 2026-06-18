@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from LTX_2_MLX.generate import get_vae_config, parse_compute_dtype
 from LTX_2_MLX.loader import ensure_weight_family_caches
 from LTX_2_MLX.model.video_vae.native_decoder import (
     NativeConv3dVideoDecoder,
@@ -26,7 +27,6 @@ from LTX_2_MLX.model.video_vae.native_decoder import (
     unpatchify_spatial_bfhwc,
 )
 from LTX_2_MLX.sidecars import load_sidecar
-from scripts.generate import get_vae_config, parse_compute_dtype
 
 # Default weights path is taken from $LTX_DEFAULT_WEIGHTS_PATH (a personal
 # convenience for repeated invocations).  When unset, --weights is required.

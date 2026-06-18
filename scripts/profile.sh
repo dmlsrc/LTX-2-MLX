@@ -18,7 +18,7 @@
 #
 # Example:
 #   scripts/profile.sh /tmp/smoke.txt 60 -- \
-#     python scripts/generate.py "test" --pipeline distilled \
+#     python LTX_2_MLX/generate.py "test" --pipeline distilled \
 #       --height 256 --width 256 --duration 1 --fps 24 --seed 124
 #
 # View results:

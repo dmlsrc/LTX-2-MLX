@@ -465,7 +465,7 @@ def write_metrics(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--latent", required=True, help="NPZ sidecar produced by scripts/generate.py --save-latents.")
+    parser.add_argument("--latent", required=True, help="NPZ sidecar produced by LTX_2_MLX/generate.py --save-latents.")
     parser.add_argument("--weights", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--fps", type=float, default=24.0)

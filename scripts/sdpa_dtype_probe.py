@@ -12,7 +12,7 @@ Runs by:
 5. Printing a histogram of (dtype, shape) signatures + timing summary at exit.
 
 Usage (from the LTX-2-MLX repo root):
-    python scripts/sdpa_dtype_probe.py <args you'd pass to scripts/generate.py>
+    python scripts/sdpa_dtype_probe.py <args you'd pass to LTX_2_MLX/generate.py>
 
 Environment variables:
     LTX_PROBE_LIMIT=N       Cap unique signatures logged (default 50).
@@ -26,7 +26,7 @@ Environment variables:
     LTX_PROBE_TIME_LOG=path Dump per-call timing to a JSONL file
                             (one record per SDPA call). Implies LTX_PROBE_TIME_SDPA=1.
     LTX_PROBE_SCRIPT=path   Override the default target script
-                            (default: scripts/generate.py, resolved relative
+                            (default: LTX_2_MLX/generate.py, resolved relative
                             to cwd).
     LTX_PROBE_MODULE=dotted Run a dotted module path instead of a script file
                             (e.g. mlx_video.models.ltx_2.generate for A/B
@@ -245,7 +245,7 @@ atexit.register(_dump_report)
 
 
 # Now invoke the target generate.py with the remaining args.
-# Default to LTX-2-MLX's scripts/generate.py via run_path; set
+# Default to LTX-2-MLX's LTX_2_MLX/generate.py via run_path; set
 # LTX_PROBE_MODULE to a dotted module path (e.g.
 # mlx_video.models.ltx_2.generate) for projects that use
 # package-relative imports - those need run_module so the package
@@ -263,7 +263,7 @@ if _cwd not in sys.path:
     print(f"[probe] added cwd to sys.path: {_cwd}", flush=True)
 
 _target_module = os.environ.get("LTX_PROBE_MODULE")
-_target_script = os.environ.get("LTX_PROBE_SCRIPT", "scripts/generate.py")
+_target_script = os.environ.get("LTX_PROBE_SCRIPT", "LTX_2_MLX/generate.py")
 
 if _target_module:
     sys.argv = [_target_module] + sys.argv[1:]

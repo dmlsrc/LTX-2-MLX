@@ -119,7 +119,7 @@ run_one() {
     # shellcheck disable=SC2086
     $env_prefix \
         LTX_PROFILE_STOP_AFTER_STEPS="$STEPS" \
-        caffeinate -di python scripts/generate.py "$PROMPT" \
+        caffeinate -di python LTX_2_MLX/generate.py "$PROMPT" \
             --pipeline distilled \
             --height "$HEIGHT" --width "$WIDTH" \
             --duration 20 --seed "$SEED" \
