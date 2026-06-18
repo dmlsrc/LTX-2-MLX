@@ -31,6 +31,17 @@ dependencies = [
     "tqdm>=4.68.2",
     "einops>=0.8.2",
     "transformers>=5.12.0",
+    # Native macOS audio/video I/O (AVFoundation AVAudioFile, VideoToolbox,
+    # CVPixelBuffer, CoreMedia). Mandatory: this is an Apple-Silicon-only project
+    # and the default encode + audio paths are native, not ffmpeg/stdlib.
+    "pyobjc-core>=12.2",
+    "pyobjc-framework-AVFoundation>=12.2",
+    "pyobjc-framework-CoreAudio>=12.2",
+    "pyobjc-framework-CoreMedia>=12.2",
+    "pyobjc-framework-Cocoa>=12.2",     # Foundation
+    "pyobjc-framework-libdispatch>=12.2",
+    "pyobjc-framework-Quartz>=12.2",
+    "pyobjc-framework-VideoToolbox>=12.2",
 ]
 
 [project.optional-dependencies]
@@ -56,19 +67,6 @@ ic-lora = [
     "opencv-python>=4.5",
     "numpy>=2.4.6",
 ]
-vsr = [
-    # Used only by scripts/vsr_harness.py (VideoToolbox Super Resolution).
-    # macOS 15+ only; install with: uv pip install '.[vsr]'
-    "pyobjc-core>=12.2",
-    "pyobjc-framework-AVFoundation>=12.2",
-    "pyobjc-framework-CoreAudio>=12.2",
-    "pyobjc-framework-CoreMedia>=12.2",
-    "pyobjc-framework-Cocoa>=12.2",     # Foundation
-    "pyobjc-framework-libdispatch>=12.2",
-    "pyobjc-framework-Quartz>=12.2",
-    "pyobjc-framework-VideoToolbox>=12.2",
-]
-
 [project.urls]
 Homepage = "https://github.com/username/LTX-2-MLX"
 Repository = "https://github.com/username/LTX-2-MLX"
