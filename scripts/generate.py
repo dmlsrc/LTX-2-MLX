@@ -1284,14 +1284,13 @@ CRITICAL RULES:
 
 
 def load_tokenizer(model_path: str):
-    """Load the Gemma tokenizer from HuggingFace transformers."""
+    """Load the native Gemma 3 tokenizer (HF tokenizers on tokenizer.json)."""
     try:
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        return tokenizer
-    except ImportError as e:
-        print(f"Error: transformers library required for tokenizer: {e}")
-        print("Install with: pip install transformers")
+        from LTX_2_MLX.model.text_encoder.gemma_tokenizer import GemmaTokenizer
+        return GemmaTokenizer(model_path)
+    except Exception as e:
+        print(f"Error: could not load Gemma tokenizer from {model_path}: {e}")
+        print("Install the tokenizer backend with: uv pip install tokenizers")
         return None
 
 
@@ -1338,11 +1337,6 @@ def encode_with_gemma(
     if tokenizer is None:
         return None, None
 
-    # Match PyTorch tokenizer behavior: left padding with EOS as pad token.
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
     print("  Loading Gemma 3 model...")
     config = Gemma3Config()
     gemma = Gemma3Model(config)
@@ -1359,17 +1353,9 @@ def encode_with_gemma(
     # Without template: 0.71 correlation for blue vs red (good)
     # With template: 0.98 correlation (bad - template tokens dominate)
     print("  Tokenizing prompt...")
-    # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace before tokenizing.
-    encoding = tokenizer(
-        (prompt or "").strip(),  # Use raw prompt, not chat template
-        return_tensors="np",
-        padding="max_length",
-        truncation=True,
-        max_length=max_length,
-    )
-
-    input_ids = mx.array(encoding["input_ids"])
-    attention_mask = mx.array(encoding["attention_mask"])
+    # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace, left-pad with <pad>,
+    # BOS-prefix, truncate to max_length (GemmaTokenizer handles all of this).
+    input_ids, attention_mask = tokenizer.encode(prompt, max_length=max_length)
 
     num_tokens = int(attention_mask.sum())
     print(f"  Token count: {num_tokens}/{max_length}")
@@ -1495,10 +1481,6 @@ def encode_av_gemma_batch(
     if tokenizer is None:
         return None
 
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
     print("  Loading Gemma 3 model...")
     config = Gemma3Config()
     gemma = Gemma3Model(config)
@@ -1516,27 +1498,12 @@ def encode_av_gemma_batch(
     for i, prompt in enumerate(prompts):
         label = prompt_label(i, len(prompts))
         print(f"  Tokenizing {label}...")
-        # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace before tokenizing.
+        # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace, BOS-prefix,
+        # truncate; left-pad to max_length unless LTX_PAD_PROMPT_TO_MAX=0.
         prompt_text = (prompt or "").strip()
-        if pad_to_max:
-            encoding = tokenizer(
-                prompt_text,
-                return_tensors="np",
-                padding="max_length",
-                truncation=True,
-                max_length=max_length,
-            )
-        else:
-            encoding = tokenizer(
-                prompt_text,
-                return_tensors="np",
-                padding=False,
-                truncation=True,
-                max_length=max_length,
-            )
-
-        input_ids = mx.array(encoding["input_ids"])
-        attention_mask = mx.array(encoding["attention_mask"])
+        input_ids, attention_mask = tokenizer.encode(
+            prompt_text, max_length=max_length, pad_to_max=pad_to_max
+        )
 
         num_tokens = int(attention_mask.sum())
         print(f"  Token count: {num_tokens}/{max_length}")
