@@ -117,10 +117,10 @@ def load_audio_file(
         Tuple of (waveform as MLX array [channels, samples], sample_rate).
     """
     try:
-        import soundfile as sf
-        data, sr = sf.read(audio_path)
-    except ImportError:
-        # Fallback to ffmpeg
+        from LTX_2_MLX.videotoolbox.audio import read_wav
+        sr, data = read_wav(audio_path)  # (channels, frames) float32 in [-1, 1]
+    except Exception:
+        # Fallback: ffmpeg transcodes any input to int16 WAV, read with stdlib wave.
         import subprocess
         import tempfile
         import wave

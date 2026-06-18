@@ -105,6 +105,41 @@ class AudioTrack:
         return sample_buf
 
 
+def read_wav(path: Any) -> tuple[int, mx.array]:
+    """Read a WAV (or any AVFoundation-supported audio file) into
+    ``(sample_rate, (channels, frames) float32 mlx array in [-1, 1])``.
+
+    Uses AVFoundation's AVAudioFile, which reads PCM int16/24/32 AND IEEE float32
+    - including the float32 sidecars that stdlib ``wave`` rejects - with no numpy /
+    scipy / soundfile. Samples come straight from the AVAudioPCMBuffer's
+    deinterleaved float channels via the buffer protocol.
+    """
+    require_pyobjc()
+    from ._compat import Foundation, av
+
+    url = Foundation.NSURL.fileURLWithPath_(str(path))
+    audio_file, err = av.AVAudioFile.alloc().initForReading_error_(url, None)
+    if audio_file is None:
+        raise RuntimeError(f"AVAudioFile could not open {path}: {err}")
+    fmt = audio_file.processingFormat()
+    buf = av.AVAudioPCMBuffer.alloc().initWithPCMFormat_frameCapacity_(
+        fmt, int(audio_file.length()),
+    )
+    ok, err = audio_file.readIntoBuffer_error_(buf, None)
+    if not ok:
+        raise RuntimeError(f"AVAudioFile could not read {path}: {err}")
+    channels = int(fmt.channelCount())
+    frames = int(buf.frameLength())
+    fcd = buf.floatChannelData()  # deinterleaved float32: channels x frames
+    # as_buffer(n) exposes n elements (4 bytes each) as a uint8 view; cast to f32.
+    chans = [
+        mx.array(memoryview(fcd[c].as_buffer(frames)).cast("f"))
+        for c in range(channels)
+    ]
+    samples = chans[0][None, :] if channels == 1 else mx.stack(chans, axis=0)
+    return int(fmt.sampleRate()), samples
+
+
 def audio_writer_settings(codec: str, sample_rate: int, channels: int) -> dict:
     """AVAssetWriterInput output settings for the configured audio codec."""
     require_pyobjc()

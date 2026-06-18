@@ -69,8 +69,9 @@ dedicated diag tool means:
 
 Implementation notes
 --------------------
-- WAV is read with `scipy.io.wavfile` (Python's stdlib `wave` doesn't
-  parse IEEE_FLOAT format=3, which is what our audio writer emits).
+- WAV is read with AVFoundation's AVAudioFile (via the shared
+  LTX_2_MLX.videotoolbox.audio.read_wav), which handles the IEEE_FLOAT
+  format=3 our audio writer emits and that stdlib `wave` rejects.
 - Audio latent shape is `(B=1, C=8, T, F=16)`.  The frame rate is
   `T / duration_seconds`; LTX-2.3 lands at 25 fps_lat for 30-second
   clips (752/30).  Older models or different durations may differ -
@@ -93,7 +94,6 @@ import sys
 from pathlib import Path
 
 import mlx.core as mx
-from scipy.io import wavfile
 
 # Thresholds for "is this a spike" come from the same module the encoders
 # use for the mitigation, so the diagnostic and the production gate move
@@ -147,24 +147,16 @@ def resolve_sidecars(run_path: Path) -> tuple[Path, Path | None]:
 # ---------------------------------------------------------------------------
 
 def read_wav(path: Path) -> tuple[mx.array, int]:
-    """Load any WAV format supported by scipy (PCM int16/int24/int32, float32).
+    """Load any WAV format (PCM int16/24/32, float32) via AVFoundation's AVAudioFile.
 
-    scipy hands back a NumPy array; convert it to MLX at this boundary and keep
-    everything downstream native. Returns (samples (N, channels) float32 in
-    [-1, 1] as an MLX array, sample_rate).
+    Returns (samples (N, channels) float32 in [-1, 1] as an MLX array,
+    sample_rate). The shared reader hands back (channels, frames); transpose to
+    (frames, channels) for the per-window analysis below.
     """
-    sr, arr = wavfile.read(str(path))
-    if arr.ndim == 1:
-        arr = arr[:, None]
-    samples = mx.array(arr).astype(mx.float32)
-    dtype = str(arr.dtype)
-    if dtype == "int16":
-        samples = samples / 32768.0
-    elif dtype == "int32":
-        samples = samples / 2147483648.0
-    elif dtype == "uint8":
-        samples = (samples - 128.0) / 128.0
-    return samples, sr
+    from LTX_2_MLX.videotoolbox.audio import read_wav as _read_wav
+
+    sample_rate, samples_cf = _read_wav(path)  # (channels, frames) float32 [-1, 1]
+    return mx.transpose(samples_cf), int(sample_rate)
 
 
 def windowed_rms(

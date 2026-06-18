@@ -55,3 +55,21 @@ def test_audiotrack_save_wav(container, tmp_path):
     track.save_wav(p)
     data = p.read_bytes()
     assert (_sha(data), len(data)) == ("1f7316ffeb528dd8ab4883da", 444)
+
+
+@pytest.mark.parametrize(
+    "writer_name,tol",
+    [("write_wav_int16", 2e-4), ("write_wav_float32", 1e-6)],
+    ids=["int16", "float32"],
+)
+def test_read_wav_roundtrip(writer_name, tol, tmp_path):
+    # AVFoundation AVAudioFile reads both PCM int16 and IEEE float32 WAV.
+    from LTX_2_MLX import video_encoder
+    from LTX_2_MLX.videotoolbox.audio import read_wav
+
+    aud = mx.arange(200, dtype=mx.float32).reshape(2, 100) / 199 * 2 - 1  # (channels, frames)
+    getattr(video_encoder, writer_name)(aud, tmp_path / "rt.wav", 48000)
+    sr, samples = read_wav(tmp_path / "rt.wav")
+    assert sr == 48000
+    assert tuple(int(x) for x in samples.shape) == (2, 100)
+    assert mx.max(mx.abs(samples - aud)).item() < tol
