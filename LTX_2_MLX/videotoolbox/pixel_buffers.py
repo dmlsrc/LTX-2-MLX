@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Any
 
 import mlx.core as mx
-import numpy as np
 
 from ._compat import CoreMedia, Foundation, Quartz, require_pyobjc
 
@@ -309,11 +308,11 @@ def upload_frame_to_buffer(frame: Any, pb: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CVPixelBuffer -> numpy
+# CVPixelBuffer -> mlx
 # ---------------------------------------------------------------------------
 
-def read_pixel_buffer_rgb(pb: Any) -> np.ndarray:
-    """Read any CVPixelBuffer into a (H, W, 3) uint8 RGB ndarray via CoreImage.
+def read_pixel_buffer_rgb(pb: Any) -> Any:
+    """Read any CVPixelBuffer into a (H, W, 3) uint8 RGB mlx array via CoreImage.
 
     Goes through CIImage(CVPixelBuffer) + CIContext.render_toBitmap, so any
     source format (NV12, RGBAHalf, BGRA, ...) is handled uniformly. Slower
@@ -328,5 +327,5 @@ def read_pixel_buffer_rgb(pb: Any) -> np.ndarray:
         ci_image, buf, w * 4, ((0, 0), (w, h)),
         Quartz.kCIFormatRGBA8, srgb_colorspace(),
     )
-    rgba = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)
-    return rgba[..., :3].copy()
+    rgba = mx.array(memoryview(buf)).reshape(h, w, 4)
+    return mx.contiguous(rgba[..., :3])

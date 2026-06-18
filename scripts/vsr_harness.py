@@ -660,7 +660,7 @@ def run(args: argparse.Namespace) -> None:
                             pre_dir / f"frame_{processed:05d}.png"
                         )
                     if args.save_post_frames:
-                        Image.fromarray(_pb.read_pixel_buffer_rgb(vsr_pb)).save(
+                        Image.fromarray(np.array(_pb.read_pixel_buffer_rgb(vsr_pb))).save(
                             post_dir / f"frame_{processed:05d}.png"
                         )
 

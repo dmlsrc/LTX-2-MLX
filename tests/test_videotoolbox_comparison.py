@@ -52,7 +52,7 @@ def _render_sha(pre):
     dest_pb = _make_buf(pb.PIX_BGRA, 2 * out_w, out_h)
     comparison.render_comparison(pre, post_pb, scale, dest_pb)
     rgb = pb.read_pixel_buffer_rgb(dest_pb)
-    return hashlib.sha256(rgb.tobytes()).hexdigest()[:24]
+    return hashlib.sha256(bytes(memoryview(mx.contiguous(rgb)))).hexdigest()[:24]
 
 
 _PRE_U8 = (np.arange(4 * 4 * 3, dtype=np.int32) % 256).astype(np.uint8).reshape(4, 4, 3)

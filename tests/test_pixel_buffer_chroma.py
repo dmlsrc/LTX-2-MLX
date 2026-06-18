@@ -70,4 +70,4 @@ def test_upload_chroma_roundtrip(container, case_id, kind, fmt_name, golden):
     buf = _make_buffer(getattr(pb, fmt_name))
     pb.upload_frame_to_buffer(frame, buf)
     rgb = pb.read_pixel_buffer_rgb(buf)
-    assert hashlib.sha256(rgb.tobytes()).hexdigest()[:24] == golden
+    assert hashlib.sha256(bytes(memoryview(mx.contiguous(rgb)))).hexdigest()[:24] == golden
