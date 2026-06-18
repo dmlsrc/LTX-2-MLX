@@ -31,7 +31,6 @@ from LTX_2_MLX.loader import (
     ensure_weight_family_caches,
     get_transformer_cache_restore_state,
     load_av_transformer_weights,
-    load_transformer_weights,
     load_transformer_weights_cached,
     load_transformer_weights_cached_streaming,
     lora_configs_have_stage_strengths,
@@ -48,7 +47,6 @@ from LTX_2_MLX.model.audio_vae import (
 from LTX_2_MLX.model.audio_vae.vocoder import MelSTFT
 from LTX_2_MLX.model.transformer import (
     LTXAVModel,
-    LTXModel,
     LTXModelType,
     LTXRopeType,
 )
@@ -980,9 +978,7 @@ class RunTimings:
 
 from LTX_2_MLX.model.text_encoder.encoder import (
     create_av_text_encoder_v2_from_checkpoint,
-    create_text_encoder,
     load_av_text_encoder_v2_weights,
-    load_text_encoder_weights,
 )
 from LTX_2_MLX.model.text_encoder.gemma3 import (
     Gemma3Config,
@@ -1307,139 +1303,6 @@ def enhance_prompt(
     return prompt
 
 
-def encode_with_gemma(
-    prompt: str,
-    gemma_path: str,
-    ltx_weights_path: str,
-    max_length: int = 1024,
-    use_early_layers_only: bool = False,
-) -> tuple:
-    """
-    Encode a text prompt using the full Gemma 3 + LTX-2 text encoder pipeline.
-
-    Args:
-        prompt: Text prompt to encode.
-        gemma_path: Path to Gemma 3 weights directory.
-        ltx_weights_path: Path to LTX-2 weights (for text encoder projection).
-        max_length: Maximum token length.
-        use_early_layers_only: If True, use only Layer 0 (input embeddings) to
-            preserve token differentiation. Gemma's self-attention homogenizes
-            representations by Layer 4, making different prompts indistinguishable.
-            Layer 0 preserves ~0.4 correlation at differing tokens vs ~0.999+ at Layer 4+.
-
-    Returns:
-        Tuple of (embedding, attention_mask) as MLX arrays.
-    """
-    print(f"  Loading tokenizer from {gemma_path}...")
-    tokenizer = load_tokenizer(gemma_path)
-    if tokenizer is None:
-        return None, None
-
-    print("  Loading Gemma 3 model...")
-    config = Gemma3Config()
-    gemma = Gemma3Model(config)
-
-    # Weights load in their native bfloat16 via mx.load() - no dtype conversion needed.
-    load_gemma3_weights(gemma, gemma_path)
-
-    print("  Loading text encoder projection...")
-    text_encoder = create_text_encoder()
-    load_text_encoder_weights(text_encoder, ltx_weights_path)
-
-    # Tokenize prompt directly (skip chat template - it dilutes the signal)
-    # Chat template adds ~28 shared tokens, diluting the actual content
-    # Without template: 0.71 correlation for blue vs red (good)
-    # With template: 0.98 correlation (bad - template tokens dominate)
-    print("  Tokenizing prompt...")
-    # Match stock LTX-2 LTXVGemmaTokenizer: strip whitespace, left-pad with <pad>,
-    # BOS-prefix, truncate to max_length (GemmaTokenizer handles all of this).
-    input_ids, attention_mask = tokenizer.encode(prompt, max_length=max_length)
-
-    num_tokens = int(attention_mask.sum())
-    print(f"  Token count: {num_tokens}/{max_length}")
-
-    # Run through Gemma to get hidden states
-    print("  Running Gemma 3 forward pass (48 layers)...")
-    last_hidden, all_hidden_states = gemma(
-        input_ids,
-        attention_mask=attention_mask,
-        output_hidden_states=True,
-    )
-    mx.eval(last_hidden)
-
-    if all_hidden_states is None:
-        print("  Error: Gemma model did not return hidden states")
-        return None, None
-
-    print(f"  Got {len(all_hidden_states)} hidden states")
-
-    # EXPERIMENTAL: Use only early layers to preserve differentiation
-    if use_early_layers_only:
-        print("  [EXPERIMENTAL] Using only Layer 0 (input embeddings)...")
-        # Layer 0 is the input embeddings before any self-attention
-        # This preserves ~0.4 correlation at differing tokens instead of ~0.999+
-        encoded = all_hidden_states[0]  # [B, T, 3840]
-
-        # Zero out padding positions
-        mask_expanded = attention_mask[:, :, None].astype(encoded.dtype)
-        encoded = encoded * mask_expanded
-
-        original_mask = attention_mask.astype(mx.int32)
-        mx.eval(encoded)
-        mx.eval(original_mask)
-
-        print(f"  Output embedding shape: {encoded.shape}")  # [B, T, 3840]
-
-    else:
-        # Run through text encoder pipeline
-        # Note: We skip caption_projection here because the transformer has its own
-        print("  Processing through text encoder pipeline...")
-
-        # Feature extraction (uses Layer 48 only for best differentiation)
-        encoded = text_encoder.feature_extractor.extract_from_hidden_states(
-            hidden_states=all_hidden_states,
-            attention_mask=attention_mask,
-            padding_side="left",
-        )
-
-        # Use connector (1D transformer with learnable registers)
-        # Earlier testing showed connector homogenizes embeddings, but the model
-        # may have been trained to expect connector output format
-        print("  Processing through connector...")
-
-        # Convert mask to additive format for connector attention
-        connector_mask = (attention_mask.astype(encoded.dtype) - 1) * 1e9
-        connector_mask = connector_mask.reshape(
-            attention_mask.shape[0], 1, 1, attention_mask.shape[-1]
-        )
-
-        encoded, output_mask = text_encoder.embeddings_connector(encoded, connector_mask)
-        mx.eval(encoded)
-
-        # Convert mask back to binary for cross-attention
-        original_mask = (output_mask.squeeze(1).squeeze(1) >= -0.5).astype(mx.int32)
-
-        # Zero out padding positions
-        encoded = encoded * original_mask[:, :, None]
-        mx.eval(encoded)
-        mx.eval(original_mask)
-
-        print(f"  Output embedding shape: {encoded.shape}")  # Should be [B, T+registers, 3840]
-
-    # === MEMORY OPTIMIZATION ===
-    # Clear Gemma and text encoder from memory after encoding
-    # These are large models (~12GB for Gemma FP16) that are no longer needed
-    print("  Clearing Gemma from memory...")
-    del gemma
-    del text_encoder
-    del all_hidden_states
-    del last_hidden
-    del tokenizer
-    gc.collect()
-    # Force MLX to release memory
-    mx.metal.clear_cache()
-
-    return encoded, original_mask
 
 
 def encode_av_gemma_batch(
@@ -1630,7 +1493,7 @@ def create_null_text_encoding(
     WARNING: This creates zero embeddings which is NOT semantically correct
     for CFG. For proper CFG, the unconditional embedding should be the
     encoding of an empty string through the text encoder. Use
-    encode_with_gemma("") when the encoder is available.
+    encode_av_gemma_batch([""]) when the encoder is available.
 
     Returns:
         Tuple of (null_encoding, null_mask).
@@ -1798,212 +1661,6 @@ def _cast_bf16_weights_to(model, target_dtype: mx.Dtype) -> int:
     return count
 
 
-def load_transformer(
-    weights_path: str,
-    num_layers: int = 48,
-    compute_dtype: mx.Dtype = mx.bfloat16,
-    low_memory: bool = False,
-    fast_mode: bool = False,
-    profile_transformer_once: bool = False,
-    video_ff_quantize_specs: tuple[tuple[str, str], ...] = (),
-    video_ff_quantize_group_size: int | None = None,
-    video_ff_quantize_bits: int | None = None,
-    video_ff_quantize_layers: tuple[int, ...] = (),
-    video_ff_layout_specs: tuple[tuple[str, str], ...] = (),
-    video_ff_layout_layers: tuple[int, ...] = (),
-    video_attn_layout_specs: tuple[tuple[str, str], ...] = (),
-    video_attn_layout_layers: tuple[int, ...] = (),
-    transformer_cache_quantize: str = TRANSFORMER_CACHE_QUANTIZE_OFF,
-    weights_cache_mode: str = "off",
-    weights_cache_dir: str | None = None,
-    transformer_block_resident_blocks: int = 0,
-    transformer_block_compile: bool = False,
-    transformer_block_compile_group_size: int = 0,
-    video_ff_dtype: mx.Dtype | None = None,
-) -> LTXModel:
-    """Load transformer with weights.
-
-    Args:
-        weights_path: Path to safetensors weights file.
-        num_layers: Number of transformer layers.
-        compute_dtype: Dtype for computation.
-        low_memory: If True, use more frequent eval checkpoints for lower peak memory.
-        fast_mode: If True, skip intermediate evaluations.
-        profile_transformer_once: If True, print one forced-eval transformer timing trace.
-    """
-    mem_str = " (low memory)" if low_memory else ""
-    fast_str = " (fast mode)" if fast_mode else ""
-    profile_str = " (profile first call)" if profile_transformer_once else ""
-    print(f"Loading transformer ({compute_dtype_name(compute_dtype)}{mem_str}{fast_str}{profile_str})...")
-
-    model = LTXModel(
-        model_type=LTXModelType.VideoOnly,
-        num_attention_heads=32,
-        attention_head_dim=128,
-        in_channels=128,
-        out_channels=128,
-        num_layers=num_layers,
-        cross_attention_dim=4096,
-        caption_channels=3840,
-        positional_embedding_theta=10000.0,
-        compute_dtype=compute_dtype,
-        low_memory=low_memory,
-        fast_mode=fast_mode,
-        profile_transformer_once=profile_transformer_once,
-    )
-
-    layouts_loaded_from_cache = False
-    # Non-BF16 transformer dtype is baked into the weights cache (hash-keyed
-    # like the FF dtypes), so cached loads need no load-time cast.
-    bake_dtype = compute_dtype if compute_dtype != mx.bfloat16 else None
-
-    # Load weights
-    if weights_path and os.path.exists(weights_path):
-        if transformer_block_resident_blocks:
-            load_transformer_weights_cached_streaming(
-                model,
-                weights_path,
-                cache_mode=weights_cache_mode,
-                cache_root=weights_cache_dir,
-                include_audio=False,
-                video_ff_layout_specs=video_ff_layout_specs,
-                video_ff_layout_layers=video_ff_layout_layers,
-                video_attn_layout_specs=video_attn_layout_specs,
-                video_attn_layout_layers=video_attn_layout_layers,
-                transformer_cache_quantize=transformer_cache_quantize,
-                video_ff_quantize_specs=video_ff_quantize_specs,
-                video_ff_quantize_layers=video_ff_quantize_layers,
-                video_ff_quantize_group_size=video_ff_quantize_group_size,
-                video_ff_quantize_bits=video_ff_quantize_bits,
-                resident_blocks=transformer_block_resident_blocks,
-                transformer_dtype=bake_dtype,
-                video_ff_dtype=video_ff_dtype,
-            )
-            model.transformer_block_compile = transformer_block_compile
-            model.transformer_block_compile_group_size = transformer_block_compile_group_size
-            if (
-                video_ff_quantize_specs
-                and video_ff_quantize_layers
-                and tuple(video_ff_quantize_layers) != DEFAULT_TRANSFORMER_LAYOUT_LAYERS
-            ):
-                if transformer_block_compile:
-                    print(
-                        "  Cached streaming FF quantization: disabling resident-group "
-                        "compile for partial-layer quantization"
-                    )
-                model.transformer_block_compile = False
-            layouts_loaded_from_cache = True
-        elif weights_cache_mode != "off":
-            load_transformer_weights_cached(
-                model,
-                weights_path,
-                cache_mode=weights_cache_mode,
-                cache_root=weights_cache_dir,
-                include_audio=False,
-                video_ff_layout_specs=video_ff_layout_specs,
-                video_ff_layout_layers=video_ff_layout_layers,
-                video_attn_layout_specs=video_attn_layout_specs,
-                video_attn_layout_layers=video_attn_layout_layers,
-                transformer_cache_quantize=transformer_cache_quantize,
-                video_ff_quantize_specs=video_ff_quantize_specs,
-                video_ff_quantize_layers=video_ff_quantize_layers,
-                video_ff_quantize_group_size=video_ff_quantize_group_size,
-                video_ff_quantize_bits=video_ff_quantize_bits,
-                transformer_dtype=bake_dtype,
-                video_ff_dtype=video_ff_dtype,
-            )
-            layouts_loaded_from_cache = True
-        else:
-            if checkpoint_has_fp8_tensors(weights_path):
-                raise SystemExit(
-                    "ERROR: FP8 checkpoints require the weights cache "
-                    "(--weights-cache auto), which dequantizes them at "
-                    "build time."
-                )
-            load_transformer_weights(model, weights_path)
-            if bake_dtype is not None:
-                cast_count = _cast_bf16_weights_to(model, bake_dtype)
-                print(
-                    f"  Cast {cast_count} BF16 weight tensors -> "
-                    f"{compute_dtype_name(bake_dtype)} (transformer compute dtype)"
-                )
-        if bake_dtype is not None and (
-            transformer_block_resident_blocks or weights_cache_mode != "off"
-        ):
-            print(
-                f"  Transformer dtype baked into cache: "
-                f"{compute_dtype_name(bake_dtype)}"
-            )
-    else:
-        print(f"  Warning: Weights not found at {weights_path}, using random init")
-    if transformer_cache_quantize != TRANSFORMER_CACHE_QUANTIZE_OFF:
-        print(
-            "  Transformer cache quantization: "
-            f"{transformer_cache_quantize} (MLX-native heavy block linears)"
-        )
-    if video_ff_quantize_specs:
-        if transformer_block_resident_blocks and model.transformer_block_streamer is not None:
-            quant_layers = video_ff_quantize_layers or tuple(range(num_layers))
-            count = len(quant_layers) * len(video_ff_quantize_specs)
-            quant_label = "Cached streaming video FF quantization"
-        else:
-            count = model.enable_video_ff_quantization(
-                quantization_specs=video_ff_quantize_specs,
-                group_size=video_ff_quantize_group_size,
-                bits=video_ff_quantize_bits,
-                layers=video_ff_quantize_layers,
-            )
-            quant_label = "Experimental video FF quantization"
-        layer_str = (
-            ",".join(str(layer) for layer in video_ff_quantize_layers)
-            if video_ff_quantize_layers
-            else "all"
-        )
-        spec_str = ",".join(f"{target}:{mode}" for target, mode in video_ff_quantize_specs)
-        print(
-            f"  {quant_label}: "
-            f"{count} projections, specs={spec_str}, "
-            f"group_size={video_ff_quantize_group_size or 'default'}, "
-            f"bits={video_ff_quantize_bits or 'default'}, "
-            f"layers={layer_str}"
-        )
-    if video_ff_layout_specs and not layouts_loaded_from_cache:
-        count = model.apply_video_ff_layout(
-            layout_specs=video_ff_layout_specs,
-            layers=video_ff_layout_layers,
-        )
-        layer_str = describe_transformer_layers(video_ff_layout_layers)
-        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
-        print(
-            "  Video FF layout: "
-            f"{count} projections, specs={spec_str}, layers={layer_str}"
-        )
-    elif video_ff_layout_specs:
-        layer_str = describe_transformer_layers(video_ff_layout_layers)
-        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_ff_layout_specs)
-        print(
-            "  Video FF layout: "
-            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
-        )
-    if video_attn_layout_specs and not layouts_loaded_from_cache:
-        count = model.apply_video_attn_layout(
-            layout_specs=video_attn_layout_specs,
-            layers=video_attn_layout_layers,
-        )
-        layer_str = describe_transformer_layers(video_attn_layout_layers)
-        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
-        print(
-            "  Video attention layout: "
-            f"{count} projections, specs={spec_str}, layers={layer_str}"
-        )
-    elif video_attn_layout_specs:
-        layer_str = describe_transformer_layers(video_attn_layout_layers)
-        spec_str = ",".join(f"{target}:{layout}" for target, layout in video_attn_layout_specs)
-        print(
-            "  Video attention layout: "
-            f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
-        )
-    return model
 
 
 def load_av_transformer(

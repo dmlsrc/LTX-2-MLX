@@ -5,41 +5,22 @@ from .encoder import (
     # Audio+Video encoder
     AudioVideoGemmaEncoderOutput,
     AudioVideoGemmaTextEncoderModel,
-    # Video-only encoder
-    VideoGemmaEncoderOutput,
-    VideoGemmaTextEncoderModel,
-    create_av_text_encoder,
     create_av_text_encoder_v2,
     create_av_text_encoder_v2_from_checkpoint,
-    create_text_encoder,
     load_av_text_encoder_v2_weights,
-    load_av_text_encoder_weights,
-    load_text_encoder_weights,
 )
 from .feature_extractor import (
-    GemmaFeaturesExtractorProjLinear,
     GemmaFeaturesExtractorV2,
-    norm_and_concat_padded_batch,
     norm_and_concat_per_token_rms,
 )
 
 __all__ = [
-    # Feature extractor
-    "GemmaFeaturesExtractorProjLinear",
-    "norm_and_concat_padded_batch",
     # Connector
     "BasicTransformerBlock1D",
     "Embeddings1DConnector",
-    # Video-only encoder
-    "VideoGemmaTextEncoderModel",
-    "VideoGemmaEncoderOutput",
-    "create_text_encoder",
-    "load_text_encoder_weights",
     # Audio+Video encoder
     "AudioVideoGemmaTextEncoderModel",
     "AudioVideoGemmaEncoderOutput",
-    "create_av_text_encoder",
-    "load_av_text_encoder_weights",
     # Audio+Video encoder V2 (LTX-2.3)
     "GemmaFeaturesExtractorV2",
     "norm_and_concat_per_token_rms",

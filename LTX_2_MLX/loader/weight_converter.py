@@ -26,7 +26,7 @@ def convert_pytorch_key_to_mlx(pytorch_key: str, include_audio: bool = False) ->
             return None
 
     # Skip embeddings connectors - these are text encoder weights loaded separately
-    # via load_text_encoder_weights(), not part of the transformer model
+    # via load_av_text_encoder_v2_weights(), not part of the transformer model
     if "video_embeddings_connector" in key or "audio_embeddings_connector" in key:
         return None
 
