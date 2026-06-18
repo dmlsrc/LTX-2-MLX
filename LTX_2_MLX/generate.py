@@ -245,7 +245,6 @@ DEFAULT_VIDEO_FF_LAYOUT_SPECS = (
 DEFAULT_VIDEO_ATTN_LAYOUT_SPECS: tuple[tuple[str, str], ...] = ()
 DEFAULT_TRANSFORMER_LAYOUT_LAYERS = tuple(range(48))
 DEFAULT_LTX_REPO_ID = "Lightricks/LTX-2.3"
-LEGACY_LTX_REPO_ID = "Lightricks/LTX-2"
 DEFAULT_LTX_WEIGHT_FILES = {
     "distilled": "ltx-2.3-22b-distilled-1.1.safetensors",
     "dev": "ltx-2.3-22b-dev.safetensors",
@@ -253,7 +252,6 @@ DEFAULT_LTX_WEIGHT_FILES = {
 DEFAULT_SPATIAL_UPSCALER_FILES = (
     "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
     "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
-    "ltx-2-spatial-upscaler-x2-1.0.safetensors",
 )
 DEFAULT_GEMMA_REPO_ID = "google/gemma-3-12b-it"
 FALLBACK_GEMMA_PATH = "weights/gemma-3-12b"
@@ -320,7 +318,7 @@ def resolve_default_ltx_weights(weights_path: str | None, model_variant: str) ->
     cached = _find_cached_hf_file(DEFAULT_LTX_REPO_ID, filename)
     if cached:
         return cached
-    return str(Path("weights") / "ltx-2" / filename)
+    return str(Path("weights") / "ltx-2.3" / filename)
 
 
 def resolve_default_spatial_upscaler_weights(
@@ -342,13 +340,6 @@ def resolve_default_spatial_upscaler_weights(
         cached = _find_cached_hf_file(DEFAULT_LTX_REPO_ID, filename)
         if cached:
             return cached
-
-    legacy_cached = _find_cached_hf_file(
-        LEGACY_LTX_REPO_ID,
-        "ltx-2-spatial-upscaler-x2-1.0.safetensors",
-    )
-    if legacy_cached:
-        return legacy_cached
 
     return None
 
@@ -2481,7 +2472,6 @@ def generate_video(
     vae_spatial_tile_pixels: int | None = None,
     vae_spatial_overlap_pixels: int = 64,
     pipeline_type: str = "text-to-video",
-    early_layers_only: bool = False,
     enhance_prompt_flag: bool = False,
     cross_attn_scale: float = 1.0,
     video_ff_dtype: str | None = None,
@@ -3216,7 +3206,6 @@ def generate_video(
                 prompt=prompt,
                 gemma_path=gemma_path,
                 ltx_weights_path=connector_load_path,
-                use_early_layers_only=early_layers_only,
             )
             if text_encoding is None:
                 print("  ERROR: Failed to encode prompt")
@@ -3229,7 +3218,6 @@ def generate_video(
                 gemma_path=gemma_path,
                 ltx_weights_path=connector_load_path,
                 max_length=text_encoding.shape[1],
-                use_early_layers_only=early_layers_only,
             )
             if null_encoding is None:
                 null_encoding, null_mask = create_null_text_encoding(
@@ -3740,7 +3728,7 @@ def generate_video(
         # Load spatial upscaler
         print("[3.6/5] Loading spatial upscaler...")
         spatial_upscaler = SpatialUpscaler()
-        upscaler_path = spatial_upscaler_weights or "weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors"
+        upscaler_path = spatial_upscaler_weights or "weights/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
         if os.path.exists(upscaler_path):
             load_spatial_upscaler_weights(spatial_upscaler, upscaler_path)
         else:
@@ -3871,7 +3859,7 @@ def generate_video(
         # Load spatial upscaler for two-stage
         print("[3.6/5] Loading spatial upscaler...")
         spatial_upscaler = SpatialUpscaler()
-        upscaler_path = spatial_upscaler_weights or "weights/ltx-2/ltx-2-spatial-upscaler-x2-1.0.safetensors"
+        upscaler_path = spatial_upscaler_weights or "weights/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
         if os.path.exists(upscaler_path):
             load_spatial_upscaler_weights(spatial_upscaler, upscaler_path)
         else:
@@ -5196,7 +5184,7 @@ def main():
         "--fast-mode",
         action="store_true",
         help="Experimental: Skip intermediate evaluations during denoising. "
-             "May increase memory usage. Not recommended for 19B models - "
+             "May increase memory usage. Not recommended for the 22B model - "
              "the GPU is already fully utilized, so this typically doesn't help."
     )
     parser.add_argument(
@@ -5619,12 +5607,6 @@ def main():
         help="Path to IC-LoRA weights for video-to-video generation"
     )
     parser.add_argument(
-        "--early-layers-only",
-        action="store_true",
-        help="[EXPERIMENTAL] Use only Layer 0 (input embeddings) from Gemma. "
-             "Preserves text differentiation (~0.4 corr vs ~0.999+ with full pipeline)."
-    )
-    parser.add_argument(
         "--enhance-prompt",
         action="store_true",
         help="Use Gemma to expand short prompts into detailed descriptions before encoding. "
@@ -5856,7 +5838,6 @@ def main():
         vae_spatial_tile_pixels=args.vae_spatial_tile_pixels,
         vae_spatial_overlap_pixels=args.vae_spatial_overlap_pixels,
         pipeline_type=args.pipeline,
-        early_layers_only=args.early_layers_only,
         enhance_prompt_flag=args.enhance_prompt,
         cross_attn_scale=args.cross_attn_scale,
         video_ff_dtype=args.video_ff_dtype,
