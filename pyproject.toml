@@ -26,7 +26,6 @@ classifiers = [
 
 dependencies = [
     "mlx>=0.31.2",
-    "numpy>=2.4.6",
     "pillow>=12.2.0",
     "safetensors>=0.8.0",
     "tqdm>=4.68.2",
@@ -35,14 +34,27 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# numpy is NOT a runtime dependency: the library and the happy path (safetensors
+# sidecars, ffmpeg / VideoToolbox encode) import and run without it. It is
+# lazy-imported only by the legacy npz sidecar format (npz extra) and the
+# cv2-based IC-LoRA control pipeline (ic-lora extra), and used by the tests.
 dev = [
     "pytest>=9.1.0",
     "torch>=2.12.0",
     "ruff>=0.15.17",
+    "numpy>=2.4.6",
 ]
 test = [
     "pytest>=9.1.0",
     "torch>=2.12.0",
+    "numpy>=2.4.6",
+]
+npz = [
+    "numpy>=2.4.6",
+]
+ic-lora = [
+    "opencv-python>=4.5",
+    "numpy>=2.4.6",
 ]
 vsr = [
     # Used only by scripts/vsr_harness.py (VideoToolbox Super Resolution).
