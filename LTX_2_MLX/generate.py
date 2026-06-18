@@ -1208,6 +1208,26 @@ def is_v2_model(checkpoint_path: str) -> bool:
     return version.startswith("2.3")
 
 
+def require_ltx23_checkpoint(config_weights_path: str | None) -> None:
+    """Hard-fail unless the checkpoint is an LTX-2.3 (v2) model.
+
+    This build supports only LTX-2.3. The original LTX-2 / 19B (v1) checkpoints
+    use a different transformer + text-encoder architecture that has been removed,
+    so loading one would silently mis-shape weights. Fail early with a clear
+    message instead. An empty path (placeholder / no-weights runs) is a no-op.
+    """
+    if not config_weights_path:
+        return
+    if not is_v2_model(config_weights_path):
+        detected = detect_model_version(config_weights_path) or "<missing>"
+        raise SystemExit(
+            "ERROR: this build supports only LTX-2.3 (v2) checkpoints. "
+            f"{config_weights_path!r} reports model_version={detected!r} "
+            "(need a version starting with '2.3'). The original LTX-2 / 19B (v1) "
+            "checkpoints are no longer supported."
+        )
+
+
 def get_vae_config(checkpoint_path: str) -> dict:
     """Read VAE config from checkpoint metadata."""
     try:
@@ -2536,6 +2556,8 @@ def generate_video(
     )
     gemma_path = resolve_default_gemma_path(gemma_path)
 
+    if not use_placeholder:
+        require_ltx23_checkpoint(config_weights_path)
     v2 = config_weights_path and is_v2_model(config_weights_path)
     distilled_two_stage_requested = pipeline_type == "distilled" and v2
     distilled_single_pass_requested = (
