@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import mlx.core as mx
-import numpy as np
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1697,20 +1696,23 @@ def load_text_embedding(embedding_path: str) -> tuple:
     Load pre-computed text embedding from file.
 
     Args:
-        embedding_path: Path to .npz file with embedding and attention_mask.
+        embedding_path: Path to a sidecar (.safetensors or legacy .npz) holding
+            the embedding and attention_mask.
 
     Returns:
         Tuple of (embedding, attention_mask).
     """
-    data = np.load(embedding_path)
-    embedding = mx.array(data["embedding"])
-    mask = mx.array(data["attention_mask"])
+    # load_sidecar handles both formats and keeps numpy lazy inside sidecars (the
+    # format owner): numeric entries come back as MLX arrays, strings as metadata.
+    arrays, metadata = sidecars.load_sidecar(embedding_path)
+    embedding = arrays["embedding"]
+    mask = arrays["attention_mask"]
 
     print(f"  Loaded embedding from {embedding_path}")
     print(f"  Shape: {embedding.shape}")
 
-    if "prompt" in data:
-        print(f"  Original prompt: {data['prompt']}")
+    if metadata.get("prompt"):
+        print(f"  Original prompt: {metadata['prompt']}")
 
     return embedding, mask
 
@@ -3654,10 +3656,8 @@ def generate_video(
             negative_audio_encoding=null_audio_encoding,
         )
 
-        # Convert decoded video to per-frame list for encode_video_ffmpeg
-        # decode_latent returns (T, H, W, C) in uint8, so just convert to numpy list
-        video_np = np.array(video)  # (T, H, W, C)
-        frames = [video_np[t] for t in range(video_np.shape[0])]
+        # Decoded video is an mx (T, H, W, C) uint8 array; slice per-frame (no numpy).
+        frames = [video[t] for t in range(video.shape[0])]
         print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
 
         if audio_waveform is not None:
@@ -3789,9 +3789,8 @@ def generate_video(
             video_conditioning=video_conditioning,
         )
 
-        # Convert to frames
-        video_np = np.array(video)
-        frames = [video_np[t] for t in range(video_np.shape[0])]
+        # Decoded video is an mx (T, H, W, C) array; slice per-frame (no numpy).
+        frames = [video[t] for t in range(video.shape[0])]
         print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
 
         # Save video
@@ -3889,9 +3888,8 @@ def generate_video(
             negative_text_mask=mx.ones((1, null_encoding.shape[1]), dtype=mx.int32),
         )
 
-        # Convert to frames
-        video_np = np.array(video)
-        frames = [video_np[t] for t in range(video_np.shape[0])]
+        # Decoded video is an mx (T, H, W, C) array; slice per-frame (no numpy).
+        frames = [video[t] for t in range(video.shape[0])]
         print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
 
         # Save video
@@ -4283,18 +4281,17 @@ def generate_video(
             timings.mark("output save")
         else:
             # Eager path: pipeline produced a fully decoded video tensor.
-            # Convert to per-frame uint8 list for the ffmpeg encoder.
-            video_np = np.array(video)
-            print(f"  Raw video shape: {video_np.shape}, dtype: {video_np.dtype}")
-            # Squeeze any singleton dimensions
-            video_np = np.squeeze(video_np)
-            # Handle (C, T, H, W) format - C=3 is always smallest dim
-            if video_np.ndim == 4 and video_np.shape[0] == 3:
-                video_np = np.transpose(video_np, (1, 2, 3, 0))  # (T, H, W, C)
-            # Convert float32 [-1,1] to uint8 [0,255] (VAE output range is [-1, 1])
-            if video_np.dtype != np.uint8:
-                video_np = np.clip((video_np + 1) / 2 * 255.0, 0, 255).astype(np.uint8)
-            frames = [video_np[t] for t in range(video_np.shape[0])]
+            # Convert to a per-frame uint8 list for the encoder (MLX-native, no numpy).
+            vid = video
+            print(f"  Raw video shape: {vid.shape}, dtype: {vid.dtype}")
+            vid = mx.squeeze(vid)  # drop singleton dimensions
+            # Handle (C, T, H, W) format - C=3 is always the smallest dim.
+            if vid.ndim == 4 and vid.shape[0] == 3:
+                vid = mx.transpose(vid, (1, 2, 3, 0))  # (T, H, W, C)
+            # VAE output range is [-1, 1] -> uint8 [0, 255].
+            if vid.dtype != mx.uint8:
+                vid = mx.clip((vid + 1) / 2 * 255.0, 0, 255).astype(mx.uint8)
+            frames = [vid[t] for t in range(vid.shape[0])]
             print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
 
             if audio_waveform is not None:
@@ -4666,53 +4663,35 @@ def generate_video(
         mx.eval(video)
         print(f"  Output video: {video.shape}")
 
-        # Convert decoded video to per-frame list for encode_video_ffmpeg
-        frames = [np.array(video[f]) for f in range(video.shape[0])]
+        # Decoded video is an mx array; slice per-frame (no numpy).
+        frames = [video[f] for f in range(video.shape[0])]
         print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
 
     else:
         print("\nCreating placeholder video (VAE not loaded)...")
 
-        # Placeholder output - create simple visualization based on latent statistics
+        # Placeholder output: no VAE to decode, so visualize the latent itself -
+        # per-frame channel mean/std, nearest-neighbor upscaled to the output
+        # resolution and mapped to RGB. MLX-native (no numpy) and vectorized, in
+        # place of the old per-pixel Python loop on a mutable numpy frame.
+        lat = latent[0]                     # (C, F, H, W)
+        latent_mean = mx.mean(lat, axis=0)  # (F, H, W)
+        latent_std = mx.std(lat, axis=0)    # (F, H, W)
+        ys = mx.minimum((mx.arange(height, dtype=mx.int32) * latent_height) // height,
+                        latent_height - 1)
+        xs = mx.minimum((mx.arange(width, dtype=mx.int32) * latent_width) // width,
+                        latent_width - 1)
+
         frames = []
-        latent_np = np.array(latent[0])  # (C, F, H, W)
-        latent_mean = latent_np.mean(axis=0)  # (F, H, W)
-        latent_std = latent_np.std(axis=0)
-
         frame_iterator = progress_bar(range(num_frames), desc="Creating frames", total=num_frames)
-
         for f in frame_iterator:
-            # Map latent frame to visualization
-            lat_f = f * latent_frames // num_frames
-            lat_f = min(lat_f, latent_frames - 1)
-
-            # Get latent statistics for this frame
-            lat_slice_mean = latent_mean[lat_f]  # (H, W)
-            lat_slice_std = latent_std[lat_f]
-
-            # Create frame based on latent (upscale from latent to output resolution)
-            frame = np.zeros((height, width, 3), dtype=np.uint8)
-
-            # Simple bilinear-ish upscale of latent visualization
-            for y in range(height):
-                for x in range(width):
-                    lat_y = y * latent_height // height
-                    lat_x = x * latent_width // width
-                    lat_y = min(lat_y, latent_height - 1)
-                    lat_x = min(lat_x, latent_width - 1)
-
-                    # Use latent values to create RGB
-                    val_mean = float(lat_slice_mean[lat_y, lat_x])
-                    val_std = float(lat_slice_std[lat_y, lat_x])
-
-                    # Normalize and convert to color
-                    r = int(np.clip((val_mean + 2) / 4 * 255, 0, 255))
-                    g = int(np.clip((val_std) / 2 * 255, 0, 255))
-                    b = int(np.clip((val_mean * val_std + 1) / 2 * 128, 0, 255))
-
-                    frame[y, x] = [r, g, b]
-
-            frames.append(frame)
+            lat_f = min(f * latent_frames // num_frames, latent_frames - 1)
+            mu = latent_mean[lat_f][ys][:, xs]   # (height, width) nearest-neighbor upscale
+            sd = latent_std[lat_f][ys][:, xs]
+            r = mx.clip((mu + 2) / 4 * 255, 0, 255)
+            g = mx.clip(sd / 2 * 255, 0, 255)
+            b = mx.clip((mu * sd + 1) / 2 * 128, 0, 255)
+            frames.append(mx.stack([r, g, b], axis=-1).astype(mx.uint8))  # (H, W, 3)
 
     # Save video
     # Note: Audio generation is handled by the AUDIO-VIDEO PIPELINE section above
