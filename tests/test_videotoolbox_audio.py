@@ -46,15 +46,19 @@ def test_audiotrack_interleaved_bytes(container):
 
 @pytest.mark.parametrize("container", ["numpy", "mlx"])
 def test_audiotrack_save_wav(container, tmp_path):
-    from LTX_2_MLX.videotoolbox.audio import AudioTrack
+    from LTX_2_MLX.videotoolbox.audio import AudioTrack, read_wav
     w = _waveform_np()
     if container == "mlx":
         w = mx.array(w)
     track = AudioTrack(w, 48000)
     p = tmp_path / "a.wav"
     track.save_wav(p)
-    data = p.read_bytes()
-    assert (_sha(data), len(data)) == ("1f7316ffeb528dd8ab4883da", 444)
+    # save_wav writes an IEEE float32 WAV via AVAudioFile; round-trip it back.
+    expected = mx.array(_waveform_np())  # (channels, frames) == (2, 50)
+    sr, samples = read_wav(p)
+    assert sr == 48000
+    assert tuple(int(x) for x in samples.shape) == (2, 50)
+    assert mx.max(mx.abs(samples - expected)).item() < 1e-4
 
 
 @pytest.mark.parametrize(
@@ -64,11 +68,18 @@ def test_audiotrack_save_wav(container, tmp_path):
 )
 def test_read_wav_roundtrip(writer_name, tol, tmp_path):
     # AVFoundation AVAudioFile reads both PCM int16 and IEEE float32 WAV.
-    from LTX_2_MLX import video_encoder
-    from LTX_2_MLX.videotoolbox.audio import read_wav
+    from LTX_2_MLX.videotoolbox.audio import (
+        read_wav,
+        write_wav_float32,
+        write_wav_int16,
+    )
 
+    writers = {
+        "write_wav_int16": write_wav_int16,
+        "write_wav_float32": write_wav_float32,
+    }
     aud = mx.arange(200, dtype=mx.float32).reshape(2, 100) / 199 * 2 - 1  # (channels, frames)
-    getattr(video_encoder, writer_name)(aud, tmp_path / "rt.wav", 48000)
+    writers[writer_name](aud, tmp_path / "rt.wav", 48000)
     sr, samples = read_wav(tmp_path / "rt.wav")
     assert sr == 48000
     assert tuple(int(x) for x in samples.shape) == (2, 100)

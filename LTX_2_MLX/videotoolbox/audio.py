@@ -65,8 +65,6 @@ class AudioTrack:
 
     def save_wav(self, path: Path) -> None:
         """Write the in-memory PCM out as a float32 WAV (for --save-audio-sidecar)."""
-        from LTX_2_MLX.video_encoder import write_wav_float32
-
         samples = mx.array(memoryview(self._bytes).cast("f")).reshape(
             self.n_samples, self.channels,
         )
@@ -138,6 +136,58 @@ def read_wav(path: Any) -> tuple[int, mx.array]:
     ]
     samples = chans[0][None, :] if channels == 1 else mx.stack(chans, axis=0)
     return int(fmt.sampleRate()), samples
+
+
+def _write_wav(samples: Any, path: Any, sample_rate: int, *, float32: bool) -> None:
+    """Write (B,C,T)/(C,T) mlx or numpy samples to a WAV via AVFoundation's
+    AVAudioFile - native macOS, no struct/wave hand-rolling.
+
+    float32=True writes an IEEE float32 WAV; otherwise int16 PCM. The samples are
+    written into a float32 AVAudioPCMBuffer and AVAudioFile converts to the file
+    format and writes the container/header.
+    """
+    require_pyobjc()
+    from ._compat import Foundation, av
+
+    w = mx.array(samples, dtype=mx.float32)
+    if w.ndim == 3:
+        w = w[0]
+    if w.ndim != 2:
+        raise ValueError(f"audio must be (B,C,T) or (C,T); got shape {w.shape}")
+    channels, frames = int(w.shape[0]), int(w.shape[1])
+    settings = {
+        av.AVFormatIDKey: AUDIO_FORMAT_LPCM,
+        av.AVSampleRateKey: float(sample_rate),
+        av.AVNumberOfChannelsKey: channels,
+        av.AVLinearPCMBitDepthKey: 32 if float32 else 16,
+        av.AVLinearPCMIsFloatKey: float32,
+        av.AVLinearPCMIsBigEndianKey: False,
+        av.AVLinearPCMIsNonInterleaved: False,
+    }
+    url = Foundation.NSURL.fileURLWithPath_(str(path))
+    out, err = av.AVAudioFile.alloc().initForWriting_settings_error_(url, settings, None)
+    if out is None:
+        raise RuntimeError(f"AVAudioFile could not open {path} for writing: {err}")
+    buf = av.AVAudioPCMBuffer.alloc().initWithPCMFormat_frameCapacity_(
+        out.processingFormat(), frames,
+    )
+    buf.setFrameLength_(frames)
+    fcd = buf.floatChannelData()  # deinterleaved float32, channels x frames
+    for c in range(channels):
+        memoryview(fcd[c].as_buffer(frames))[:] = bytes(memoryview(mx.contiguous(w[c])))
+    ok, err = out.writeFromBuffer_error_(buf, None)
+    if not ok:
+        raise RuntimeError(f"AVAudioFile could not write {path}: {err}")
+
+
+def write_wav_int16(audio_waveform: Any, path: Any, sample_rate: int) -> None:
+    """Write a stereo int16 PCM WAV (mlx/numpy (B,C,T) or (C,T))."""
+    _write_wav(audio_waveform, path, sample_rate, float32=False)
+
+
+def write_wav_float32(audio_waveform: Any, path: Any, sample_rate: int) -> None:
+    """Write an IEEE float32 WAV (mlx/numpy (B,C,T) or (C,T)); no int16 quantization."""
+    _write_wav(audio_waveform, path, sample_rate, float32=True)
 
 
 def audio_writer_settings(codec: str, sample_rate: int, channels: int) -> dict:

@@ -18,8 +18,6 @@ import pytest
 from LTX_2_MLX.video_encoder import (
     _frame_to_bytes,
     encode_video,
-    write_wav_float32,
-    write_wav_int16,
 )
 
 
@@ -28,10 +26,6 @@ def _frames():
         (mx.arange(60, dtype=mx.int32) + k * 37).astype(mx.uint8).reshape(4, 5, 3)
         for k in range(3)
     ]
-
-
-def _audio():
-    return mx.arange(200, dtype=mx.float32).reshape(2, 100) / 199 * 2 - 1
 
 
 def _sha(b: bytes) -> str:
@@ -46,20 +40,6 @@ def test_frame_byte_stream_8bit():
 def test_frame_byte_stream_16bit():
     stream = b"".join(_frame_to_bytes(f, 16) for f in _frames())
     assert (_sha(stream), len(stream)) == ("79b71bf74558573206c5156e", 360)
-
-
-def test_wav_int16_bytes(tmp_path):
-    p = tmp_path / "a.wav"
-    write_wav_int16(_audio(), p, 16000)
-    data = p.read_bytes()
-    assert (_sha(data), len(data)) == ("d7b5dbae0fc9d0b6fa815249", 444)
-
-
-def test_wav_float32_bytes(tmp_path):
-    p = tmp_path / "a.wav"
-    write_wav_float32(_audio(), p, 16000)
-    data = p.read_bytes()
-    assert (_sha(data), len(data)) == ("29eaffe29d65a3658a508119", 844)
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not in PATH")

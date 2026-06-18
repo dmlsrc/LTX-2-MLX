@@ -44,10 +44,8 @@ Encoder-choice details that aren't obvious from the flags alone:
 from __future__ import annotations
 
 import itertools
-import struct
 import subprocess
 import time
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -224,57 +222,6 @@ def build_ffmpeg_cmd(
     return cmd
 
 
-def write_wav_int16(audio_waveform: Any, path: Path, sample_rate: int) -> None:
-    """Write a stereo int16 WAV. Accepts MLX/NumPy shape (B,C,T) or (C,T)."""
-    audio = mx.array(audio_waveform, dtype=mx.float32)
-    if audio.ndim == 3:
-        audio = audio[0]
-    if audio.ndim != 2:
-        raise ValueError(
-            f"audio_waveform must be (B,C,T) or (C,T); got shape {audio.shape}"
-        )
-    channels = int(audio.shape[0])
-    pcm_mx = mx.clip(audio * 32767.0, -32768.0, 32767.0).astype(mx.int16)
-    # Interleave channels per sample: (C, T) -> (T, C) row-major == [t0c0, t0c1, ...].
-    interleaved = mx.contiguous(mx.transpose(pcm_mx))
-    mx.eval(interleaved)
-    with wave.open(str(path), "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(bytes(memoryview(interleaved)))
-
-
-def write_wav_float32(audio_waveform: Any, path: Path, sample_rate: int) -> None:
-    """WAVE_FORMAT_IEEE_FLOAT (float32 PCM). No int16 quantization."""
-    audio = mx.array(audio_waveform, dtype=mx.float32)
-    if audio.ndim == 3:
-        audio = audio[0]
-    if audio.ndim != 2:
-        raise ValueError(
-            f"audio_waveform must be (B,C,T) or (C,T); got shape {audio.shape}"
-        )
-    channels, samples = int(audio.shape[0]), int(audio.shape[1])
-    # (C, T) -> (T, C) row-major float32 == interleaved per-sample.
-    interleaved = mx.contiguous(mx.transpose(audio))
-    mx.eval(interleaved)
-    pcm = bytes(memoryview(interleaved))
-    bytes_per_sample = 4
-    byte_rate = sample_rate * channels * bytes_per_sample
-    block_align = channels * bytes_per_sample
-    data_size = samples * block_align
-    fmt = struct.pack(
-        "<HHIIHH",
-        3, channels, sample_rate, byte_rate, block_align, bytes_per_sample * 8,
-    )
-    body = (
-        b"RIFF" + struct.pack("<I", 36 + data_size) + b"WAVE"
-        + b"fmt " + struct.pack("<I", len(fmt)) + fmt
-        + b"data" + struct.pack("<I", data_size) + pcm
-    )
-    path.write_bytes(body)
-
-
 def _frame_to_bytes(frame: Any, bit_depth: int) -> bytes:
     """One (H, W, 3) frame -> raw little-endian bytes at the target bit depth.
 
@@ -404,6 +351,7 @@ def encode_video(
         else:
             # Hidden temp: removed once ffmpeg consumes it.
             audio_path = output_path.with_name(f".{output_path.stem}.audio.wav")
+        from .videotoolbox.audio import write_wav_float32, write_wav_int16
         if audio_bit_depth == "float32":
             write_wav_float32(audio_waveform, audio_path, audio_sample_rate)
         else:
