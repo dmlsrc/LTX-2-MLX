@@ -31,8 +31,10 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 
 def probe_dimensions(path: str) -> tuple[int, int, float, int]:
@@ -67,6 +69,7 @@ def stream_tsd(path: str, w: int, h: int, grid: int) -> tuple[np.ndarray, np.nda
 
     Memory: 3 frames * w * h bytes (e.g. 3 * 4096 * 2304 = ~28 MB at 4K).
     """
+    import numpy as np  # analysis backend: percentile/median/unravel_index (not in MLX)
     frame_bytes = w * h
     patch_h = h // grid
     patch_w = w // grid
@@ -130,6 +133,8 @@ def _patch_glyph(value: float) -> str:
 
 
 def main() -> None:
+    import numpy as np  # analysis backend: percentile/median/unravel_index (not in MLX)
+
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

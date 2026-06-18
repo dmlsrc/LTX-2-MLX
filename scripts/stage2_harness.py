@@ -22,7 +22,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import mlx.core as mx
-import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -85,16 +84,15 @@ def infer_dimensions_from_stage1(video_latent: mx.array) -> tuple[int, int, int]
     return height, width, frames
 
 
-def video_tensor_to_frames(video: mx.array) -> list[np.ndarray]:
-    video_np = np.array(video)
-    print(f"  Raw video shape: {video_np.shape}, dtype: {video_np.dtype}")
-    video_np = np.squeeze(video_np)
-    if video_np.ndim == 4 and video_np.shape[0] == 3:
-        video_np = np.transpose(video_np, (1, 2, 3, 0))
-    if video_np.dtype != np.uint8:
-        video_np = np.clip((video_np + 1) / 2 * 255.0, 0, 255).astype(np.uint8)
-    frames = [video_np[t] for t in range(video_np.shape[0])]
-    print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
+def video_tensor_to_frames(video: mx.array) -> list[mx.array]:
+    print(f"  Raw video shape: {tuple(video.shape)}, dtype: {video.dtype}")
+    video = mx.squeeze(video)
+    if video.ndim == 4 and video.shape[0] == 3:
+        video = mx.transpose(video, (1, 2, 3, 0))
+    if video.dtype != mx.uint8:
+        video = mx.clip((video + 1) / 2 * 255.0, 0, 255).astype(mx.uint8)
+    frames = [video[t] for t in range(video.shape[0])]
+    print(f"  Generated {len(frames)} frames at {tuple(frames[0].shape[:2])}")
     return frames
 
 
@@ -147,7 +145,7 @@ def print_kv_downsample_summary(attention_module, *, stream=None) -> None:
 
 
 def _mx_float(value: mx.array) -> float:
-    return float(np.array(value))
+    return float(value.item())
 
 
 def _delta_stats(a: mx.array, b: mx.array) -> dict:
@@ -165,7 +163,7 @@ def _delta_stats(a: mx.array, b: mx.array) -> dict:
     mx.eval(max_abs, mean_abs, rms_abs, dot, denom)
     denom_f = _mx_float(denom)
     cos = _mx_float(dot) / denom_f if denom_f else float("nan")
-    if not np.isnan(cos):
+    if cos == cos:  # False only for NaN
         cos = max(-1.0, min(1.0, cos))
     return {
         "official_shape": tuple(a.shape),
@@ -906,7 +904,7 @@ def main() -> None:
             audio_state,
             text_encoding,
             text_audio_encoding,
-            float(np.array(stage_2_sigmas[0])),
+            float(stage_2_sigmas[0].item()),
             stream=sys.stderr if bench_mode_active else sys.stdout,
         )
 

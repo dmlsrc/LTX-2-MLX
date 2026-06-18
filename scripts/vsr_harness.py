@@ -71,7 +71,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+import mlx.core as mx
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -143,14 +143,14 @@ def chunk_to_rgba_fp16(chunk: Any, mx_mod: Any):
     transposed = mx_mod.transpose(rgba, (0, 2, 3, 4, 1))  # (B, T, H, W, 4)
     mx_mod.eval(transposed)
     if _CHUNK_AS_ARRAY:
-        arr = np.array(transposed, copy=True)
+        arr = mx_mod.contiguous(transposed)
         result: Any = arr[0] if arr.ndim == 5 else arr
     else:
-        # List of per-frame ndarrays so each frame's memory can be freed
-        # independently by the main loop. np.array(..., copy=True) forces
-        # a Python-owned buffer (np.asarray returns a view sharing MLX
-        # memory - OWNDATA=False - which pins MLX state across the loop).
-        result = [np.array(transposed[0, t], copy=True) for t in range(T)]
+        # List of per-frame mx arrays so each frame's memory can be freed
+        # independently by the main loop. mx.contiguous gives each frame its own
+        # buffer, so dropping a frame lets MLX release it without pinning the
+        # whole chunk's Metal state across the loop.
+        result = [mx_mod.contiguous(transposed[0, t]) for t in range(T)]
     # Drop refs to all MLX intermediates AND force the cache to release.
     # Without clear_cache here, the rescaled/alpha/rgba/transposed Metal
     # buffers (which can be GiB-scale for single-shot decodes) sit in MLX's
@@ -226,7 +226,7 @@ def iter_latent_chunks(
     cfg: Any,
     mx_mod: Any,
     output_format: str = "uint8_rgb",
-) -> Iterator[np.ndarray]:
+) -> Iterator[mx.array]:
     """Yield decoded chunks. output_format selects the conversion:
        "uint8_rgb"  -> (T,H,W,3) uint8  (for LowLatency VSR / NV12 source)
        "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
@@ -301,7 +301,7 @@ def probe_video(mp4_path: Path) -> tuple[int, int, float, int]:
 
 def iter_video_chunks(
     mp4_path: Path, w: int, h: int, chunk_size: int = 32,
-) -> Iterator[np.ndarray]:
+) -> Iterator[mx.array]:
     """Stream rgb24 frames from ffmpeg stdout in fixed-size chunks."""
     proc = subprocess.Popen(
         [
@@ -320,8 +320,8 @@ def iter_video_chunks(
             n = len(buf) // frame_bytes
             if n == 0:
                 break
-            arr = np.frombuffer(buf[: n * frame_bytes], dtype=np.uint8).reshape(n, h, w, 3)
-            yield arr.copy()
+            arr = mx.array(memoryview(buf[: n * frame_bytes]), dtype=mx.uint8).reshape(n, h, w, 3)
+            yield arr
     finally:
         proc.stdout.close()
         proc.wait()
@@ -342,7 +342,7 @@ def _decode_audio_track(audio_latent: Any, weights: str, compute_dtype: Any) -> 
     print("Decoding audio latent (audio VAE + vocoder)...")
     audio_decoder, vocoder, sample_rate = make_audio_decoder_and_vocoder(weights, compute_dtype)
     waveform = decode_audio_latent(audio_latent, audio_decoder, vocoder, mx)
-    arr = np.asarray(waveform)
+    arr = waveform
     if arr.ndim == 3:
         arr = arr[0]
     track = AudioTrack(arr, sample_rate=int(sample_rate))
@@ -649,8 +649,8 @@ def run(args: argparse.Namespace) -> None:
                     # the writer-append loop so vsr_pb is still in scope; the
                     # readback uses CIContext.
                     if args.save_pre_frames:
-                        if src_frame.dtype != np.uint8:
-                            pre_rgb_u8 = np.clip(src_frame[..., :3] * 255.0, 0, 255).astype(np.uint8)
+                        if src_frame.dtype != mx.uint8:
+                            pre_rgb_u8 = mx.clip(src_frame[..., :3] * 255.0, 0, 255).astype(mx.uint8)
                         else:
                             pre_rgb_u8 = (
                                 src_frame if src_frame.shape[-1] == 3

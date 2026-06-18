@@ -13,7 +13,6 @@ from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -52,11 +51,11 @@ def _load_latent(path: Path, key: str, dtype: mx.Dtype) -> mx.array:
 
 
 def _as_float_list(values: mx.array) -> list[float]:
-    return [float(v) for v in np.array(values.astype(mx.float32))]
+    return [float(v) for v in values.astype(mx.float32)]
 
 
 def _scalar(value: mx.array) -> float:
-    return float(np.array(value.astype(mx.float32)).item())
+    return float(value.astype(mx.float32).item())
 
 
 def _reduce_tail_bfhwc(
@@ -104,10 +103,10 @@ def _reduce_tail_bfhwc(
         frame_uint8_mean = mx.mean(rgb_by_frame, axis=1) * 255.0
         frame_bright_frac = mx.mean((rgb_by_frame > (245.0 / 255.0)).astype(mx.float32), axis=1)
         mx.eval(frame_uint8_mean, frame_bright_frac)
-        bright = np.where(np.array(frame_bright_frac) > 0.95)[0]
+        cond = frame_bright_frac > 0.95
         first_bright_frame = None
-        if bright.size:
-            first_bright_frame = int(time_dim - tail_count + bright[0])
+        if bool(mx.any(cond).item()):
+            first_bright_frame = int(time_dim - tail_count + int(mx.argmax(cond).item()))
         stats["final_uint8"] = {
             "frame_mean": _as_float_list(frame_uint8_mean),
             "frame_bright_frac": _as_float_list(frame_bright_frac),

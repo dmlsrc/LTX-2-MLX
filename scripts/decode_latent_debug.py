@@ -16,16 +16,14 @@ import resource
 import subprocess
 import sys
 import time
-import wave
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 # Add repo root to import path when run as scripts/decode_latent_debug.py.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from LTX_2_MLX.sidecars import load_sidecar  # noqa: E402
+from LTX_2_MLX.videotoolbox.audio import write_wav_int16  # noqa: E402
 from LTX_2_MLX.videotoolbox.images import save_image  # noqa: E402
 
 
@@ -265,10 +263,10 @@ def compare_tensors(label: str, lhs: Any, rhs: Any, mx_mod: Any) -> tuple[float,
     cos = dot / denom
     mx_mod.eval(max_abs, mean_abs, rms, cos)
     result = (
-        float(np.array(max_abs)),
-        float(np.array(mean_abs)),
-        float(np.array(rms)),
-        float(np.array(cos)),
+        float(max_abs.item()),
+        float(mean_abs.item()),
+        float(rms.item()),
+        float(cos.item()),
     )
     print(
         f"  {label:<24} max_abs={result[0]:.8f} mean_abs={result[1]:.8f} "
@@ -404,18 +402,16 @@ def decode_audio_latent(audio_latent: Any, audio_decoder: Any, vocoder: Any, mx_
 
 def write_wav(audio_waveform: Any, output_path: Path, sample_rate: int) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    audio_np = np.array(audio_waveform[0])
-    audio_int16 = (audio_np * 32767).clip(-32768, 32767).astype(np.int16)
-    audio_flat = audio_int16.T.flatten()
+    # Native int16 PCM WAV via AVFoundation; accepts (B,C,T)/(C,T) float and
+    # quantizes to int16 internally.
+    write_wav_int16(audio_waveform, output_path, sample_rate)
 
-    with wave.open(str(output_path), "wb") as wav_file:
-        wav_file.setnchannels(audio_int16.shape[0])
-        wav_file.setsampwidth(2)
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(audio_flat.tobytes())
-
+    # Channel/sample counts for the log come straight off the waveform shape:
+    # (B,C,T) drops the batch axis, (C,T) is already channels-first.
+    shape = audio_waveform.shape
+    num_samples = int(shape[-1])
     print(f"Wrote WAV: {output_path}")
-    print(f"Audio: {audio_int16.shape[1]} samples, {audio_int16.shape[1] / sample_rate:.2f}s at {sample_rate}Hz")
+    print(f"Audio: {num_samples} samples, {num_samples / sample_rate:.2f}s at {sample_rate}Hz")
 
 
 def tiling_config_for_mode(mode: str, latent: Any | None = None):
@@ -489,27 +485,29 @@ def tiling_config_for_mode(mode: str, latent: Any | None = None):
     raise ValueError(f"Unknown mode: {mode}")
 
 
-def frames_from_video_tensor(video: Any, mx_mod: Any) -> np.ndarray:
+def frames_from_video_tensor(video: Any, mx_mod: Any) -> Any:
     mx_mod.eval(video)
-    arr = np.array(video)
+    arr = video
 
     if arr.ndim == 5:
-        arr = arr[0].transpose(1, 2, 3, 0)  # B,C,T,H,W -> T,H,W,C
+        arr = mx_mod.transpose(arr[0], (1, 2, 3, 0))  # B,C,T,H,W -> T,H,W,C
     elif arr.ndim == 4 and arr.shape[-1] == 3:
         pass
     else:
         raise ValueError(f"Unexpected decoded video shape: {arr.shape}")
 
+    arr_min = float(mx_mod.min(arr).item())
+    arr_max = float(mx_mod.max(arr).item())
     print(
-        f"Decoded chunk/array: shape={arr.shape}, dtype={arr.dtype}, "
-        f"min={arr.min():.4f}, max={arr.max():.4f}"
+        f"Decoded chunk/array: shape={tuple(arr.shape)}, dtype={arr.dtype}, "
+        f"min={arr_min:.4f}, max={arr_max:.4f}"
     )
 
-    if arr.dtype == np.uint8:
+    if arr.dtype == mx_mod.uint8:
         return arr
-    if arr.min() >= -2.0 and arr.max() <= 2.0:
+    if arr_min >= -2.0 and arr_max <= 2.0:
         arr = (arr + 1.0) * 127.5
-    return np.clip(arr, 0, 255).astype(np.uint8)
+    return mx_mod.clip(arr, 0, 255).astype(mx_mod.uint8)
 
 
 def encode_frames_dir(frames_dir: Path, output: Path, fps: float, audio_path: Path | None = None, audio_sample_rate: int | None = None) -> None:
@@ -538,7 +536,7 @@ def encode_frames_dir(frames_dir: Path, output: Path, fps: float, audio_path: Pa
     subprocess.run(cmd, check=True)
 
 
-def write_frames(frames: np.ndarray, frames_dir: Path, start: int = 0) -> int:
+def write_frames(frames: Any, frames_dir: Path, start: int = 0) -> int:
     for idx, frame in enumerate(frames):
         save_image(frame, frames_dir / f"frame_{start + idx:05d}.png")
     return start + len(frames)

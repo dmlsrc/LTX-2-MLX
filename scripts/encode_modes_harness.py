@@ -40,8 +40,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from LTX_2_MLX.ffmpeg_encoder import (
     COLOR_TAGS_BT709,
@@ -52,9 +50,8 @@ from LTX_2_MLX.ffmpeg_encoder import (
     build_ffmpeg_cmd,
     h264_baseline_video,
     scale_filter,
-    write_wav_float32,
-    write_wav_int16,
 )
+from LTX_2_MLX.videotoolbox.audio import write_wav_float32, write_wav_int16
 from scripts.decode_latent_debug import (
     RunTimings,
     Timer,
@@ -244,27 +241,25 @@ def list_presets() -> None:
         print(f"  {name:<{width}}  {ext:<5}  {depth:<10}  {preset.notes}")
 
 
-def chunk_to_uint8(chunk: Any, mx_mod: Any) -> np.ndarray:
-    """Cast one (B,C,T,H,W) decoded chunk to (T,H,W,3) uint8 numpy.
+def chunk_to_uint8(chunk: Any, mx_mod: Any) -> Any:
+    """Cast one (B,C,T,H,W) decoded chunk to (T,H,W,3) uint8 mx array.
 
     The rescale + clip + cast happens in MLX so we never materialize a
-    chunk-sized float32 numpy intermediate. That's what made the naive
+    chunk-sized float32 intermediate. That's what made the naive
     "decode then convert" path peak at ~60 GiB.
     """
     rescaled = mx_mod.clip((chunk + 1.0) * 127.5, 0, 255).astype(mx_mod.uint8)
     transposed = mx_mod.transpose(rescaled, (0, 2, 3, 4, 1))  # B,T,H,W,C
     mx_mod.eval(transposed)
-    arr = np.array(transposed)
-    return arr[0] if arr.ndim == 5 else arr
+    return transposed[0] if transposed.ndim == 5 else transposed
 
 
-def chunk_to_uint16(chunk: Any, mx_mod: Any) -> np.ndarray:
+def chunk_to_uint16(chunk: Any, mx_mod: Any) -> Any:
     """Same as chunk_to_uint8 but emits uint16 (for rgb48le source feed)."""
     rescaled = mx_mod.clip((chunk + 1.0) * 32767.5, 0, 65535).astype(mx_mod.uint16)
     transposed = mx_mod.transpose(rescaled, (0, 2, 3, 4, 1))
     mx_mod.eval(transposed)
-    arr = np.array(transposed)
-    return arr[0] if arr.ndim == 5 else arr
+    return transposed[0] if transposed.ndim == 5 else transposed
 
 
 def open_encoder(
@@ -472,7 +467,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             if item is None:
                 break
             try:
-                proc.stdin.write(item.tobytes())
+                proc.stdin.write(bytes(item))
             except BrokenPipeError:
                 # ffmpeg already exited; drain remaining queue so the producer
                 # doesn't deadlock on a full queue.
