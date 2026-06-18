@@ -2,9 +2,7 @@
 
 from .attention import (
     Attention,
-    CrossAttention,
     RMSNorm,
-    SelfAttention,
     rms_norm,
     scaled_dot_product_attention,
 )
@@ -34,17 +32,13 @@ from .timestep_embedding import (
 )
 from .transformer import (
     BasicAVTransformerBlock,
-    BasicTransformerBlock,
     TransformerArgs,
-    TransformerBlocks,
     TransformerConfig,
 )
 
 __all__ = [
     # Attention
     "Attention",
-    "CrossAttention",
-    "SelfAttention",
     "RMSNorm",
     "rms_norm",
     "scaled_dot_product_attention",
@@ -66,15 +60,12 @@ __all__ = [
     # Transformer blocks
     "TransformerConfig",
     "TransformerArgs",
-    "BasicTransformerBlock",
     "BasicAVTransformerBlock",
-    "TransformerBlocks",
-    # Video-only model
+    # AudioVideo model
     "LTXModelType",
     "LTXModel",
     "X0Model",
     "TransformerArgsPreprocessor",
-    # AudioVideo model
     "LTXAVModel",
     "X0AVModel",
     "MultiModalTransformerArgsPreprocessor",
