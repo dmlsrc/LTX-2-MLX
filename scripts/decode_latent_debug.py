@@ -21,12 +21,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 # Add repo root to import path when run as scripts/decode_latent_debug.py.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from LTX_2_MLX.sidecars import load_sidecar  # noqa: E402
+from LTX_2_MLX.videotoolbox.images import save_image  # noqa: E402
 
 
 def format_duration(seconds: float) -> str:
@@ -540,7 +540,7 @@ def encode_frames_dir(frames_dir: Path, output: Path, fps: float, audio_path: Pa
 
 def write_frames(frames: np.ndarray, frames_dir: Path, start: int = 0) -> int:
     for idx, frame in enumerate(frames):
-        Image.fromarray(frame).save(frames_dir / f"frame_{start + idx:05d}.png")
+        save_image(frame, frames_dir / f"frame_{start + idx:05d}.png")
     return start + len(frames)
 
 

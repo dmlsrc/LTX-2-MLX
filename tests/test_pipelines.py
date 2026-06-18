@@ -5,7 +5,6 @@ import tempfile
 
 import mlx.core as mx
 import pytest
-from PIL import Image
 
 from LTX_2_MLX.conditioning.keyframe import VideoConditionByKeyframeIndex
 from LTX_2_MLX.conditioning.latent import VideoConditionByLatentIndex
@@ -19,6 +18,38 @@ from LTX_2_MLX.pipelines.common import (
     timesteps_from_mask,
 )
 from LTX_2_MLX.types import NATIVE_FPS, VideoLatentShape
+
+
+def _solid_png(path, mode, w, h, color):
+    """Write a flat-color PNG in a PIL-style mode natively (no Pillow).
+
+    Exercises load_image_tensor's decode path on genuine grayscale ("L"),
+    alpha ("RGBA"), and "RGB" sources without depending on Pillow.
+    """
+    from LTX_2_MLX.videotoolbox._compat import Foundation, Quartz
+
+    if mode == "L":
+        buf = bytearray([int(color)] * (w * h))
+        cs = Quartz.CGColorSpaceCreateDeviceGray()
+        ctx = Quartz.CGBitmapContextCreate(buf, w, h, 8, w, cs, Quartz.kCGImageAlphaNone)
+    else:
+        if isinstance(color, int):
+            color = (color, color, color)
+        if mode == "RGBA":
+            r, g, b, a = color
+            info = Quartz.kCGImageAlphaPremultipliedLast | Quartz.kCGBitmapByteOrderDefault
+        else:  # "RGB"
+            r, g, b, a = color[0], color[1], color[2], 255
+            info = Quartz.kCGImageAlphaNoneSkipLast | Quartz.kCGBitmapByteOrderDefault
+        buf = bytearray(bytes([r, g, b, a]) * (w * h))
+        cs = Quartz.CGColorSpaceCreateDeviceRGB()
+        ctx = Quartz.CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, info)
+    cg = Quartz.CGBitmapContextCreateImage(ctx)
+    url = Foundation.NSURL.fileURLWithPath_(str(path))
+    dest = Quartz.CGImageDestinationCreateWithURL(url, "public.png", 1, None)
+    Quartz.CGImageDestinationAddImage(dest, cg, None)
+    Quartz.CGImageDestinationFinalize(dest)
+
 
 # ============================================================================
 # ImageCondition Tests
@@ -62,7 +93,7 @@ class TestCreateImageConditionings:
     def test_first_frame_uses_latent_replacement(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             img_path = os.path.join(tmpdir, "test.png")
-            Image.new("RGB", (64, 64), color=(128, 64, 32)).save(img_path)
+            _solid_png(img_path, "RGB", 64, 64, (128, 64, 32))
 
             conditionings = create_image_conditionings(
                 [ImageCondition(img_path, frame_index=0, strength=0.9)],
@@ -77,7 +108,7 @@ class TestCreateImageConditionings:
     def test_nonzero_frame_uses_keyframe_conditioning(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             img_path = os.path.join(tmpdir, "test.png")
-            Image.new("RGB", (64, 64), color=(128, 64, 32)).save(img_path)
+            _solid_png(img_path, "RGB", 64, 64, (128, 64, 32))
 
             conditionings = create_image_conditionings(
                 [ImageCondition(img_path, frame_index=9, strength=0.8)],
@@ -102,8 +133,7 @@ class TestLoadImageTensor:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a test image
             img_path = os.path.join(tmpdir, "test.png")
-            img = Image.new("RGB", (256, 256), color=(128, 64, 32))
-            img.save(img_path)
+            _solid_png(img_path, "RGB", 256, 256, (128, 64, 32))
 
             # Load and validate
             tensor = load_image_tensor(img_path, height=128, width=128)
@@ -118,8 +148,7 @@ class TestLoadImageTensor:
         """Test loading an RGBA image (converted to RGB)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             img_path = os.path.join(tmpdir, "test.png")
-            img = Image.new("RGBA", (256, 256), color=(128, 64, 32, 255))
-            img.save(img_path)
+            _solid_png(img_path, "RGBA", 256, 256, (128, 64, 32, 255))
 
             tensor = load_image_tensor(img_path, height=64, width=64)
             assert tensor.shape == (1, 3, 1, 64, 64)
@@ -128,8 +157,7 @@ class TestLoadImageTensor:
         """Test loading a grayscale image (converted to RGB)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             img_path = os.path.join(tmpdir, "test.png")
-            img = Image.new("L", (256, 256), color=128)
-            img.save(img_path)
+            _solid_png(img_path, "L", 256, 256, 128)
 
             tensor = load_image_tensor(img_path, height=64, width=64)
             assert tensor.shape == (1, 3, 1, 64, 64)
@@ -143,8 +171,7 @@ class TestLoadImageTensor:
         """Test loading with custom dtype."""
         with tempfile.TemporaryDirectory() as tmpdir:
             img_path = os.path.join(tmpdir, "test.png")
-            img = Image.new("RGB", (64, 64))
-            img.save(img_path)
+            _solid_png(img_path, "RGB", 64, 64, (0, 0, 0))
 
             tensor = load_image_tensor(img_path, 32, 32, dtype=mx.float16)
             assert tensor.dtype == mx.float16

@@ -72,7 +72,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -88,6 +87,7 @@ from LTX_2_MLX.videotoolbox import (
 )
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
 from LTX_2_MLX.videotoolbox.comparison import render_comparison
+from LTX_2_MLX.videotoolbox.images import save_image
 from LTX_2_MLX.videotoolbox.writer import (
     HEVC_PROFILE_MAIN10,
     HEVC_PROFILE_MAIN422_10,
@@ -656,12 +656,11 @@ def run(args: argparse.Namespace) -> None:
                                 src_frame if src_frame.shape[-1] == 3
                                 else src_frame[..., :3]
                             )
-                        Image.fromarray(pre_rgb_u8).save(
-                            pre_dir / f"frame_{processed:05d}.png"
-                        )
+                        save_image(pre_rgb_u8, pre_dir / f"frame_{processed:05d}.png")
                     if args.save_post_frames:
-                        Image.fromarray(np.array(_pb.read_pixel_buffer_rgb(vsr_pb))).save(
-                            post_dir / f"frame_{processed:05d}.png"
+                        save_image(
+                            _pb.read_pixel_buffer_rgb(vsr_pb),
+                            post_dir / f"frame_{processed:05d}.png",
                         )
 
                     # Iterate VSR/temporal output buffers directly - don't

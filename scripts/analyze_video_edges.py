@@ -17,26 +17,19 @@ import subprocess
 from fractions import Fraction
 from pathlib import Path
 
+from LTX_2_MLX.videotoolbox.images import draw_labels, load_image_rgb, resize_lanczos, save_image
+
 np = None
-Image = None
-ImageDraw = None
-ImageFont = None
 
 
 def load_image_deps() -> None:
-    global np, Image, ImageDraw, ImageFont
+    global np
     if np is not None:
         return
 
     import numpy as _np
-    from PIL import Image as _Image
-    from PIL import ImageDraw as _ImageDraw
-    from PIL import ImageFont as _ImageFont
 
     np = _np
-    Image = _Image
-    ImageDraw = _ImageDraw
-    ImageFont = _ImageFont
 
 
 def run_command(cmd: list[str]) -> str:
@@ -128,64 +121,62 @@ def extract_frame(video: Path, frame_index: int, output_path: Path) -> None:
     )
 
 
-def load_image(path: Path) -> Image.Image:
-    return Image.open(path).convert("RGB")
+def load_image(path: Path) -> np.ndarray:
+    return np.asarray(load_image_rgb(path))
 
 
-def resize_to_width(image: Image.Image, width: int) -> Image.Image:
-    if image.width == width:
+def resize_to_width(image: np.ndarray, width: int) -> np.ndarray:
+    if image.shape[1] == width:
         return image
-    height = max(1, int(round(image.height * width / image.width)))
-    resampling = getattr(Image, "Resampling", Image).LANCZOS
-    return image.resize((width, height), resampling)
+    new_h = max(1, round(image.shape[0] * width / image.shape[1]))
+    return np.asarray(resize_lanczos(image, width, new_h))
 
 
-def draw_sheet(cells: list[tuple[str, Image.Image]], output_path: Path, columns: int, cell_width: int) -> None:
+def draw_sheet(cells: list[tuple[str, np.ndarray]], output_path: Path, columns: int, cell_width: int) -> None:
     if not cells:
         return
 
-    font = ImageFont.load_default()
     label_h = 18
     padding = 8
     images = [(label, resize_to_width(image, cell_width)) for label, image in cells]
-    cell_h = max(image.height for _, image in images) + label_h
+    cell_h = max(image.shape[0] for _, image in images) + label_h
     rows = math.ceil(len(images) / columns)
-    sheet = Image.new(
-        "RGB",
-        (columns * cell_width + (columns + 1) * padding, rows * cell_h + (rows + 1) * padding),
-        (24, 24, 24),
-    )
-    draw = ImageDraw.Draw(sheet)
+    sheet_w = columns * cell_width + (columns + 1) * padding
+    sheet_h = rows * cell_h + (rows + 1) * padding
+    sheet = np.full((sheet_h, sheet_w, 3), (24, 24, 24), dtype=np.uint8)
 
+    labels: list[tuple[int, int, str]] = []
     for idx, (label, image) in enumerate(images):
         row = idx // columns
         col = idx % columns
         x = padding + col * (cell_width + padding)
         y = padding + row * (cell_h + padding)
-        draw.text((x, y), label, fill=(235, 235, 235), font=font)
-        sheet.paste(image, (x, y + label_h))
+        labels.append((x, y, label))
+        h, w = image.shape[0], image.shape[1]
+        sheet[y + label_h:y + label_h + h, x:x + w] = image
 
+    sheet = np.asarray(draw_labels(sheet, labels, color=(235, 235, 235)))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(output_path)
+    save_image(sheet, output_path)
 
 
-def edge_strip(image: Image.Image, edge_pct: float, side_pct: float) -> tuple[Image.Image, Image.Image]:
-    width, height = image.size
+def edge_strip(image: np.ndarray, edge_pct: float, side_pct: float) -> tuple[np.ndarray, np.ndarray]:
+    height, width = image.shape[0], image.shape[1]
     top_bottom_px = max(1, int(round(height * edge_pct / 100.0)))
     side_px = max(1, int(round(width * side_pct / 100.0)))
 
-    top = image.crop((0, 0, width, top_bottom_px))
-    bottom = image.crop((0, height - top_bottom_px, width, height))
-    left = image.crop((0, 0, side_px, height))
-    right = image.crop((width - side_px, 0, width, height))
+    top = image[0:top_bottom_px, 0:width]
+    bottom = image[height - top_bottom_px:height, 0:width]
+    left = image[0:height, 0:side_px]
+    right = image[0:height, width - side_px:width]
 
-    horizontal = Image.new("RGB", (width, top.height + bottom.height + 2), (255, 0, 255))
-    horizontal.paste(top, (0, 0))
-    horizontal.paste(bottom, (0, top.height + 2))
+    horizontal = np.full((top.shape[0] + bottom.shape[0] + 2, width, 3), (255, 0, 255), dtype=np.uint8)
+    horizontal[0:top.shape[0], 0:width] = top
+    horizontal[top.shape[0] + 2:top.shape[0] + 2 + bottom.shape[0], 0:width] = bottom
 
-    vertical = Image.new("RGB", (left.width + right.width + 2, height), (255, 0, 255))
-    vertical.paste(left, (0, 0))
-    vertical.paste(right, (left.width + 2, 0))
+    vertical = np.full((height, left.shape[1] + right.shape[1] + 2, 3), (255, 0, 255), dtype=np.uint8)
+    vertical[0:height, 0:left.shape[1]] = left
+    vertical[0:height, left.shape[1] + 2:left.shape[1] + 2 + right.shape[1]] = right
     return horizontal, vertical
 
 

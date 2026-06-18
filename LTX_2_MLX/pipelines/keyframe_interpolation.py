@@ -10,7 +10,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
-from PIL import Image
 
 from ..components import (
     STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -30,6 +29,7 @@ from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_tiled
 from ..types import NATIVE_FPS, LatentState, VideoLatentShape, VideoPixelShape
+from ..videotoolbox.images import load_image_rgb, resize_lanczos
 from .common import (
     apply_conditionings,
     maybe_post_process_latent,
@@ -104,17 +104,12 @@ def load_image_as_tensor(
     Returns:
         Image tensor of shape (1, 3, 1, H, W) for VAE encoding.
     """
-    # Load image with PIL
-    img = Image.open(image_path).convert("RGB")
+    # Load + resize natively (ImageIO + CoreImage Lanczos), no PIL/numpy.
+    img = load_image_rgb(image_path)          # (H, W, 3) uint8 sRGB
+    img = resize_lanczos(img, width, height)  # anamorphic to (height, width, 3)
 
-    # Resize to target dimensions
-    img = img.resize((width, height), Image.Resampling.LANCZOS)
-
-    # Decode pixels straight into MLX (PIL -> bytes -> mx, no numpy) and
-    # normalize to [-1, 1]. (H, W, C) -> (1, C, 1, H, W)
-    w, h = img.size
-    c = len(img.getbands())
-    img_mx = mx.array(img.tobytes()).reshape(h, w, c).astype(mx.float32) / 127.5 - 1.0
+    # Normalize to [-1, 1] and reshape (H, W, C) -> (1, C, 1, H, W).
+    img_mx = img.astype(mx.float32) / 127.5 - 1.0
     img_mx = mx.transpose(img_mx, (2, 0, 1))  # (C, H, W)
     img_mx = img_mx[None, :, None, :, :]  # (1, C, 1, H, W)
 

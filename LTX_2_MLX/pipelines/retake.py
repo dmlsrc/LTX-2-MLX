@@ -12,7 +12,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
-from PIL import Image
 
 from ..components import (
     DISTILLED_SIGMA_VALUES,
@@ -33,6 +32,7 @@ from ..types import (
     VideoLatentShape,
     VideoPixelShape,
 )
+from ..videotoolbox.images import load_image_rgb
 from .common import (
     audio_modality_from_state,
     maybe_post_process_latent,
@@ -117,10 +117,8 @@ def load_video_frames(
         for i in range(num_frames):
             frame_path = f"{tmpdir}/frame_{i:06d}.png"
             try:
-                img = Image.open(frame_path).convert("RGB")
-                w, h = img.size
-                c = len(img.getbands())
-                frame = mx.array(img.tobytes()).reshape(h, w, c).astype(mx.float32) / 127.5 - 1.0
+                frame = load_image_rgb(frame_path)  # (H, W, 3) uint8 sRGB
+                frame = frame.astype(mx.float32) / 127.5 - 1.0
                 frames.append(frame)
             except FileNotFoundError:
                 break

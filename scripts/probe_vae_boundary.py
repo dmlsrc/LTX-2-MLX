@@ -20,10 +20,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from LTX_2_MLX.videotoolbox.images import draw_labels, load_image_rgb, resize_lanczos, save_image
+
 np = None
-Image = None
-ImageDraw = None
-ImageFont = None
 RunTimings = None
 Timer = None
 encode_frames_dir = None
@@ -40,21 +39,15 @@ write_wav = None
 
 
 def load_runtime_deps() -> None:
-    global np, Image, ImageDraw, ImageFont
+    global np
     global RunTimings, Timer, encode_frames_dir, frames_from_video_tensor
     global load_latents, make_decoder, make_audio_decoder_and_vocoder, mlx_mem_summary
     global parse_dtype, tiling_config_for_mode, write_frames, decode_audio_latent, write_wav
 
     if np is None:
         import numpy as _np
-        from PIL import Image as _Image
-        from PIL import ImageDraw as _ImageDraw
-        from PIL import ImageFont as _ImageFont
 
         np = _np
-        Image = _Image
-        ImageDraw = _ImageDraw
-        ImageFont = _ImageFont
 
     if RunTimings is None:
         from scripts.decode_latent_debug import (
@@ -333,42 +326,44 @@ def parse_comparison_frames(value: str | None, frame_count: int) -> list[int]:
 
 
 def load_frame(frames_dir: Path, index: int) -> np.ndarray:
-    return np.array(Image.open(frames_dir / f"frame_{index:05d}.png").convert("RGB"))
+    return np.asarray(load_image_rgb(frames_dir / f"frame_{index:05d}.png"))
 
 
-def resize_to_width(image: Image.Image, width: int) -> Image.Image:
-    if image.width == width:
+def resize_to_width(image: np.ndarray, width: int) -> np.ndarray:
+    if image.shape[1] == width:
         return image
-    height = max(1, int(round(image.height * width / image.width)))
-    resampling = getattr(Image, "Resampling", Image).LANCZOS
-    return image.resize((width, height), resampling)
+    new_h = max(1, round(image.shape[0] * width / image.shape[1]))
+    return np.asarray(resize_lanczos(image, width, new_h))
 
 
-def draw_sheet(cells: list[tuple[str, Image.Image]], output_path: Path, columns: int, cell_width: int) -> None:
+def draw_sheet(cells: list[tuple[str, np.ndarray]], output_path: Path, columns: int, cell_width: int) -> None:
     if not cells:
         return
 
-    font = ImageFont.load_default()
     label_h = 18
     pad = 8
     images = [(label, resize_to_width(image, cell_width)) for label, image in cells]
-    cell_h = max(image.height for _, image in images) + label_h
+    cell_h = max(image.shape[0] for _, image in images) + label_h
     rows = (len(images) + columns - 1) // columns
-    sheet = Image.new("RGB", (columns * cell_width + (columns + 1) * pad, rows * cell_h + (rows + 1) * pad), (24, 24, 24))
-    draw = ImageDraw.Draw(sheet)
+    sheet_w = columns * cell_width + (columns + 1) * pad
+    sheet_h = rows * cell_h + (rows + 1) * pad
+    sheet = np.full((sheet_h, sheet_w, 3), (24, 24, 24), dtype=np.uint8)
 
+    labels: list[tuple[int, int, str]] = []
     for idx, (label, image) in enumerate(images):
         row = idx // columns
         col = idx % columns
         x = pad + col * (cell_width + pad)
         y = pad + row * (cell_h + pad)
-        draw.text((x, y), label, fill=(235, 235, 235), font=font)
-        sheet.paste(image, (x, y + label_h))
+        labels.append((x, y, label))
+        h, w = image.shape[0], image.shape[1]
+        sheet[y + label_h:y + label_h + h, x:x + w] = image
 
-    sheet.save(output_path)
+    sheet = np.asarray(draw_labels(sheet, labels, color=(235, 235, 235)))
+    save_image(sheet, output_path)
 
 
-def band_crop(frame: np.ndarray, band_px: int, side: str) -> Image.Image:
+def band_crop(frame: np.ndarray, band_px: int, side: str) -> np.ndarray:
     if side == "top":
         arr = frame[:band_px]
     elif side == "bottom":
@@ -379,7 +374,7 @@ def band_crop(frame: np.ndarray, band_px: int, side: str) -> Image.Image:
         arr = frame[:, -band_px:]
     else:
         raise ValueError(side)
-    return Image.fromarray(arr)
+    return arr
 
 
 def write_comparisons(
@@ -391,17 +386,17 @@ def write_comparisons(
     sheet_width: int,
 ) -> None:
     names = [variant.name for variant in variants]
-    cells_full: list[tuple[str, Image.Image]] = []
-    cells_top: list[tuple[str, Image.Image]] = []
-    cells_bottom: list[tuple[str, Image.Image]] = []
-    cells_left: list[tuple[str, Image.Image]] = []
-    cells_right: list[tuple[str, Image.Image]] = []
+    cells_full: list[tuple[str, np.ndarray]] = []
+    cells_top: list[tuple[str, np.ndarray]] = []
+    cells_bottom: list[tuple[str, np.ndarray]] = []
+    cells_left: list[tuple[str, np.ndarray]] = []
+    cells_right: list[tuple[str, np.ndarray]] = []
 
     for frame_index in comparison_frames:
         for name in names:
             frame = load_frame(output_dir / f"frames_{name}", frame_index)
             label = f"{name} f{frame_index}"
-            cells_full.append((label, Image.fromarray(frame)))
+            cells_full.append((label, frame))
             cells_top.append((label, band_crop(frame, band_px, "top")))
             cells_bottom.append((label, band_crop(frame, band_px, "bottom")))
             cells_left.append((label, band_crop(frame, band_px, "left")))

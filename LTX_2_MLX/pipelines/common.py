@@ -8,7 +8,6 @@ import os
 from dataclasses import dataclass
 
 import mlx.core as mx
-from PIL import Image
 
 from ..conditioning.item import ConditioningItem
 from ..conditioning.keyframe import VideoConditionByKeyframeIndex
@@ -17,6 +16,7 @@ from ..conditioning.tools import VideoLatentTools
 from ..model.transformer import Modality
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..types import LatentState
+from ..videotoolbox.images import load_image_rgb, resize_lanczos
 
 
 @dataclass
@@ -54,47 +54,39 @@ def load_image_tensor(
         raise FileNotFoundError(f"Image not found: {image_path}")
 
     try:
-        img = Image.open(image_path)
+        img = load_image_rgb(image_path)  # (H, W, 3) uint8 sRGB, alpha dropped
+    except FileNotFoundError:
+        raise
     except Exception as e:
         raise ValueError(f"Failed to open image {image_path}: {e}") from e
 
-    # Validate format
-    if img.mode not in ['RGB', 'RGBA', 'L']:
-        raise ValueError(
-            f"Unsupported image format: {img.mode}. "
-            f"Supported formats: RGB, RGBA, L"
-        )
-
-    # Convert to RGB, then aspect-ratio-preserving resize + center crop
-    img = img.convert("RGB")
-    src_w, src_h = img.size
+    # Aspect-ratio-preserving resize + center crop, all in MLX.
+    src_h, src_w = int(img.shape[0]), int(img.shape[1])
     target_aspect = width / height
     src_aspect = src_w / src_h
 
     if abs(src_aspect - target_aspect) < 0.01:
-        # Aspect ratios match - direct resize
-        img = img.resize((width, height), Image.Resampling.LANCZOS)
+        # Aspect ratios match - direct (anamorphic) resize.
+        img = resize_lanczos(img, width, height)
     else:
-        # Scale so the image covers the target area, then center crop
+        # Scale so the image covers the target area, then center crop.
         if src_aspect > target_aspect:
-            # Source is wider - fit by height, crop width
+            # Source is wider - fit by height, crop width.
             new_h = height
             new_w = int(src_w * (height / src_h))
         else:
-            # Source is taller - fit by width, crop height
+            # Source is taller - fit by width, crop height.
             new_w = width
             new_h = int(src_h * (width / src_w))
-        img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        # Center crop to exact target
+        img = resize_lanczos(img, new_w, new_h)
+        # Center crop to exact target.
         left = (new_w - width) // 2
         top = (new_h - height) // 2
-        img = img.crop((left, top, left + width, top + height))
+        img = img[top:top + height, left:left + width, :]
 
-    # Decode pixels straight into MLX (PIL -> bytes -> mx, no numpy) and
-    # normalize to [-1, 1].
-    w, h = img.size
-    c = len(img.getbands())
-    img_mx = mx.array(img.tobytes()).reshape(h, w, c).astype(mx.float32) / 127.5 - 1.0
+    # Normalize to [-1, 1] and reshape (H, W, C) -> (1, C, 1, H, W). Pixels are
+    # already an MLX array straight from the CoreGraphics buffer (no numpy).
+    img_mx = img.astype(mx.float32) / 127.5 - 1.0
     img_mx = mx.transpose(img_mx, (2, 0, 1))  # (H, W, C) -> (C, H, W)
     img_mx = img_mx[None, :, None, :, :]  # (1, C, 1, H, W)
 
