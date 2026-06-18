@@ -52,7 +52,7 @@ def decode_latent(
                higher-bit-depth tiers in scripts/encode_modes_harness.py
                (h265_10bit_*, h265_rgb_lossless, prores_*) and the pipelines
                under LTX_2_MLX/pipelines/ that hand their decoded video into
-               video_encoder.encode_video with tier=hq / export / reference -
+               ffmpeg_encoder.encode_video_ffmpeg with tier=hq / export / reference -
                those all currently take uint8 here and then promote back to
                10/16-bit downstream, wasting precision the decoder produced.
                Web/default tiers (8-bit YUV 4:2:0) should keep the uint8

@@ -28,6 +28,7 @@ from LTX_2_MLX.components.guiders import LegacyStatefulAPGGuider, LtxAPGGuider, 
 from LTX_2_MLX.components.patchifiers import get_pixel_coords
 from LTX_2_MLX.components.perturbations import create_batched_stg_config
 from LTX_2_MLX.core_utils import to_velocity
+from LTX_2_MLX.ffmpeg_encoder import TIERS, encode_video_ffmpeg
 from LTX_2_MLX.loader import (
     TRANSFORMER_CACHE_QUANTIZE_MODES,
     TRANSFORMER_CACHE_QUANTIZE_OFF,
@@ -71,7 +72,6 @@ from LTX_2_MLX.model.video_vae.tiling import (
 )
 from LTX_2_MLX.progress import PhaseBar, StackedPhaseBars
 from LTX_2_MLX.types import NATIVE_FPS, SpatioTemporalScaleFactors, VideoLatentShape
-from LTX_2_MLX.video_encoder import TIERS, encode_video
 
 # Tiers that map cleanly onto AVAssetWriter's HEVC outputs.  Auto-mode
 # routes these through the VideoToolbox backend; everything else stays
@@ -149,7 +149,7 @@ def encode_video_dispatch(
 ):
     """Route an encode call to ffmpeg or AVAssetWriter.
 
-    The signature mirrors the ffmpeg `encode_video(...)` plus the VT-only
+    The signature mirrors the ffmpeg `encode_video_ffmpeg(...)` plus the VT-only
     knobs; resolve_output_backend() picks the backend. Returns the
     encoded output path (extension may be normalized).
 
@@ -191,7 +191,7 @@ def encode_video_dispatch(
             n_source_frames=n_source_frames,
             progress_stack=progress_stack,
         )
-    return encode_video(
+    return encode_video_ffmpeg(
         frames, output_path,
         tier=tier, fps=fps,
         audio_waveform=audio_waveform,
@@ -3694,7 +3694,7 @@ def generate_video(
             negative_audio_encoding=null_audio_encoding,
         )
 
-        # Convert decoded video to per-frame list for encode_video
+        # Convert decoded video to per-frame list for encode_video_ffmpeg
         # decode_latent returns (T, H, W, C) in uint8, so just convert to numpy list
         video_np = np.array(video)  # (T, H, W, C)
         frames = [video_np[t] for t in range(video_np.shape[0])]
@@ -4706,7 +4706,7 @@ def generate_video(
         mx.eval(video)
         print(f"  Output video: {video.shape}")
 
-        # Convert decoded video to per-frame list for encode_video
+        # Convert decoded video to per-frame list for encode_video_ffmpeg
         frames = [np.array(video[f]) for f in range(video.shape[0])]
         print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
 
@@ -4796,8 +4796,8 @@ def generate_video(
         print("\nNote: VAE decoder was not loaded - output is placeholder visualization.")
 
 
-# save_video / save_video_with_audio moved to LTX_2_MLX.video_encoder
-# (encode_video, called above from each pipeline). The legacy bodies took
+# save_video / save_video_with_audio moved to LTX_2_MLX.ffmpeg_encoder
+# (encode_video_ffmpeg, called above from each pipeline). The legacy bodies took
 # a `speed` multiplier and re-encoded via PNG round-tripping; both have
 # been dropped - speed adjustment belongs in an editor, and the new
 # encoder pipes raw frames directly into ffmpeg.

@@ -28,7 +28,7 @@ Output formats
 --------------
 - "uint8_rgb"   -> list[(H, W, 3) uint8]  per chunk.  Matches the
                    per-frame list shape generate.py used to build by
-                   hand before passing to `encode_video()` (ffmpeg path).
+                   hand before passing to `encode_video_ffmpeg()` (ffmpeg path).
 - "fp16_rgba"   -> list[(H, W, 4) float16] per chunk.  Matches VSR's
                    RGBAHalf source format - the encoder pushes these
                    straight into the VSR session's source pool without

@@ -1,7 +1,7 @@
 """High-level VideoToolbox encode helper for generate.py.
 
 `encode_video_videotoolbox()` is the AVAssetWriter-backed sister of
-`LTX_2_MLX.video_encoder.encode_video()`.  It accepts the same frame
+`LTX_2_MLX.ffmpeg_encoder.encode_video_ffmpeg()`.  It accepts the same frame
 list / audio waveform shape generate.py already builds and emits an
 HEVC mp4 - no ffmpeg, no on-disk WAV unless `save_audio_sidecar=True`.
 
@@ -164,7 +164,7 @@ def encode_video_videotoolbox(
     """Encode frames into an HEVC mp4 via AVAssetWriter (no ffmpeg).
 
     Returns the actual output path; rewrites the extension to .mp4 if the
-    caller supplied something else (matches encode_video() behavior for
+    caller supplied something else (matches encode_video_ffmpeg() behavior for
     the ffmpeg `default` tier - both produce .mp4).
 
     `audio_waveform` is anything castable to (B,C,T) or (C,T) MLX/NumPy
@@ -180,7 +180,7 @@ def encode_video_videotoolbox(
       None or equal to fps   no temporal interpolation.
       otherwise              route through VTFrameRateConversion.
 
-    `audio_bit_depth` is accepted for API parity with encode_video();
+    `audio_bit_depth` is accepted for API parity with encode_video_ffmpeg();
     AVAssetWriter always consumes float32 PCM internally regardless.
 
     `audio_onset_trim_mode` / `audio_onset_trim_ms` route through to

@@ -1,4 +1,4 @@
-"""Regression net for the ffmpeg encode backend (video_encoder.py).
+"""Regression net for the ffmpeg encode backend (ffmpeg_encoder.py).
 
 Pins the raw byte stream fed to ffmpeg (per frame, both bit depths) and the WAV
 writers' output on deterministic synthetic input. The hashes were captured from
@@ -15,9 +15,9 @@ import subprocess
 import mlx.core as mx
 import pytest
 
-from LTX_2_MLX.video_encoder import (
+from LTX_2_MLX.ffmpeg_encoder import (
     _frame_to_bytes,
-    encode_video,
+    encode_video_ffmpeg,
 )
 
 
@@ -49,7 +49,7 @@ def test_encode_video_smoke(tmp_path):
         (mx.arange(8 * 6 * 3, dtype=mx.int32) + k).astype(mx.uint8).reshape(8, 6, 3)
         for k in range(5)
     ]
-    out = encode_video(frames, tmp_path / "clip.mp4", tier="web", fps=24.0, verbose=False)
+    out = encode_video_ffmpeg(frames, tmp_path / "clip.mp4", tier="web", fps=24.0, verbose=False)
     assert out.exists() and out.stat().st_size > 0
     if shutil.which("ffprobe"):
         dims = subprocess.check_output(

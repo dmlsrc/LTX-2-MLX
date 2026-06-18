@@ -43,7 +43,7 @@ from typing import Any
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from LTX_2_MLX.video_encoder import (
+from LTX_2_MLX.ffmpeg_encoder import (
     COLOR_TAGS_BT709,
     COLOR_TAGS_RGB,
     NATIVE_FPS,

@@ -1,4 +1,12 @@
-"""Video encoding for LTX-2 outputs.
+"""ffmpeg (software-codec) encode backend for LTX-2 outputs.
+
+This is one of two encode backends. The other is the VideoToolbox /
+AVAssetWriter backend in `videotoolbox/encode.py`
+(`encode_video_videotoolbox`), which hardware-encodes the `default` tier.
+The `default` tier auto-routes to VideoToolbox; this ffmpeg backend handles
+the tiers VideoToolbox does not: `web` (libx264 - software x264 produces
+higher-quality H.264 than the hardware h264_videotoolbox encoder), `hq`
+(libx265 4:4:4), and the ProRes `export` / `reference` tiers.
 
 Five tiers cover the practical use cases. Pick by *destination*, not by
 encoder flags - the flags are an implementation detail.
@@ -25,7 +33,7 @@ encoder flags - the flags are an implementation detail.
              later. Has alpha for compositing/VFX work. Large files.
              ProRes 4444 + PCM 24-bit + alpha (.mov), 10-bit 4:4:4.
 
-Call `encode_video(frames, output_path, tier=...)` from generate.py / pipelines.
+Call `encode_video_ffmpeg(frames, output_path, tier=...)` from generate.py / pipelines.
 Importers may read `TIERS` and extend with additional `EncodePreset` entries;
 the encode_modes_harness.py benchmarking script does exactly this, so keep
 tier names and the `EncodePreset` shape stable.
@@ -252,7 +260,7 @@ def _frame_to_bytes(frame: Any, bit_depth: int) -> bytes:
     return bytes(memoryview(out))
 
 
-def encode_video(
+def encode_video_ffmpeg(
     frames: Any,
     output_path: str | Path,
     *,
@@ -306,7 +314,7 @@ def encode_video(
     try:
         first_frame = next(frame_iter)
     except StopIteration:
-        raise ValueError("encode_video: no frames to encode") from None
+        raise ValueError("encode_video_ffmpeg: no frames to encode") from None
     f0 = first_frame if isinstance(first_frame, mx.array) else mx.array(first_frame)
     if f0.ndim != 3 or f0.shape[-1] != 3:
         raise ValueError(f"frames must be (H,W,3); got shape {f0.shape}")
