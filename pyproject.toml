@@ -27,7 +27,6 @@ classifiers = [
 dependencies = [
     "mlx>=0.31.2",
     "tqdm>=4.68.2",
-    "einops>=0.8.2",
     "sentencepiece>=0.2.1",
     # Native macOS audio/video I/O (AVFoundation AVAudioFile, VideoToolbox,
     # CVPixelBuffer, CoreMedia). Mandatory: this is an Apple-Silicon-only project
@@ -47,14 +46,18 @@ dependencies = [
 # sidecars, ffmpeg / VideoToolbox encode) import and run without it. It is
 # lazy-imported only by the legacy npz sidecar format (npz extra) and the
 # cv2-based IC-LoRA control pipeline (ic-lora extra), and used by the tests.
+# einops is likewise test-only: it is the independent rearrange oracle in
+# test_spatial_upscaler; the runtime's space-to-depth ops are MLX-native.
 dev = [
     "pytest>=9.1.0",
     "ruff>=0.15.17",
     "numpy>=2.4.6",
+    "einops>=0.8.2",
 ]
 test = [
     "pytest>=9.1.0",
     "numpy>=2.4.6",
+    "einops>=0.8.2",
 ]
 npz = [
     "numpy>=2.4.6",
