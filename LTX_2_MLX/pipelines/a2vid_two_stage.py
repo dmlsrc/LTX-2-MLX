@@ -13,7 +13,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import mlx.core as mx
-import numpy as np
 
 from ..components import (
     STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -132,7 +131,7 @@ def load_audio_file(
             with wave.open(tmp.name, "r") as wf:
                 sr = wf.getframerate()
                 n_frames = wf.getnframes()
-                data = np.frombuffer(wf.readframes(n_frames), dtype=np.int16).astype(np.float32) / 32768.0
+                data = mx.array(memoryview(wf.readframes(n_frames)).cast("h")).astype(mx.float32) / 32768.0
                 if wf.getnchannels() == 2:
                     data = data.reshape(-1, 2)
                 else:
