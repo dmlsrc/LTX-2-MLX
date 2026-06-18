@@ -20,12 +20,7 @@ from LTX_2_MLX import sidecars
 from LTX_2_MLX.components import (
     DISTILLED_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
-    VideoLatentPatchifier,
-    get_sigma_schedule,
 )
-from LTX_2_MLX.components.guiders import LegacyStatefulAPGGuider, LtxAPGGuider, STGGuider
-from LTX_2_MLX.components.patchifiers import get_pixel_coords
-from LTX_2_MLX.components.perturbations import create_batched_stg_config
 from LTX_2_MLX.core_utils import to_velocity
 from LTX_2_MLX.ffmpeg_encoder import TIERS, encode_video_ffmpeg
 from LTX_2_MLX.loader import (
@@ -56,10 +51,7 @@ from LTX_2_MLX.model.transformer import (
     LTXModel,
     LTXModelType,
     LTXRopeType,
-    Modality,
-    X0Model,
 )
-from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
 from LTX_2_MLX.model.video_vae.native_decoder import (
     NativeConv3dVideoDecoder,
     load_native_vae_decoder_weights,
@@ -70,7 +62,7 @@ from LTX_2_MLX.model.video_vae.tiling import (
     TilingConfig,
 )
 from LTX_2_MLX.progress import PhaseBar, StackedPhaseBars
-from LTX_2_MLX.types import NATIVE_FPS, SpatioTemporalScaleFactors, VideoLatentShape
+from LTX_2_MLX.types import NATIVE_FPS
 
 # Tiers that map cleanly onto AVAssetWriter's HEVC outputs.  Auto-mode
 # routes these through the VideoToolbox backend; everything else stays
@@ -987,11 +979,9 @@ class RunTimings:
 
 
 from LTX_2_MLX.model.text_encoder.encoder import (
-    create_av_text_encoder,
     create_av_text_encoder_v2_from_checkpoint,
     create_text_encoder,
     load_av_text_encoder_v2_weights,
-    load_av_text_encoder_weights,
     load_text_encoder_weights,
 )
 from LTX_2_MLX.model.text_encoder.gemma3 import (
@@ -1001,9 +991,7 @@ from LTX_2_MLX.model.text_encoder.gemma3 import (
 )
 from LTX_2_MLX.model.upscaler import (
     SpatialUpscaler,
-    TemporalUpscaler,
     load_spatial_upscaler_weights,
-    load_temporal_upscaler_weights,
 )
 from LTX_2_MLX.model.video_vae.native_encoder import (
     NativeConv3dVideoEncoder,
@@ -1571,13 +1559,8 @@ def encode_av_gemma_batch(
 
     print("  Loading AV text encoder projection...")
     config_path = ltx_config_path or ltx_weights_path
-    if is_v2_model(config_path):
-        print("  Detected LTX-2.3 (V2) model - using V2 text encoder")
-        text_encoder = create_av_text_encoder_v2_from_checkpoint(config_path)
-        load_av_text_encoder_v2_weights(text_encoder, ltx_weights_path)
-    else:
-        text_encoder = create_av_text_encoder()
-        load_av_text_encoder_weights(text_encoder, ltx_weights_path)
+    text_encoder = create_av_text_encoder_v2_from_checkpoint(config_path)
+    load_av_text_encoder_v2_weights(text_encoder, ltx_weights_path)
 
     results = []
     for gemma_output in gemma_outputs:
@@ -3200,29 +3183,6 @@ def generate_video(
                     )
                     null_audio_encoding = null_encoding
                 print("  Encoded both prompts with Gemma 3 (AudioVideo, single load)")
-        else:
-            # Use video-only Gemma encoding (V1/V2.0 only)
-            text_encoding, text_mask = encode_with_gemma(
-                prompt=prompt,
-                gemma_path=gemma_path,
-                ltx_weights_path=connector_load_path,
-            )
-            if text_encoding is None:
-                print("  ERROR: Failed to encode prompt")
-                return
-            print("  Encoded with Gemma 3")
-            # Null encoding for non-AV path
-            neg_prompt = negative_prompt if negative_prompt else ""
-            null_encoding, null_mask = encode_with_gemma(
-                prompt=neg_prompt,
-                gemma_path=gemma_path,
-                ltx_weights_path=connector_load_path,
-                max_length=text_encoding.shape[1],
-            )
-            if null_encoding is None:
-                null_encoding, null_mask = create_null_text_encoding(
-                    batch_size=1, max_tokens=text_encoding.shape[1], embed_dim=text_encoding.shape[2],
-                )
     else:
         text_encoding, text_mask = create_dummy_text_encoding(prompt)
         if generate_audio:
@@ -3326,47 +3286,6 @@ def generate_video(
         else:
             model = None
             print("  Skipping model load (placeholder mode)")
-    else:
-        print("\n[2/5] Loading transformer...")
-        if not use_placeholder and transformer_weights_path:
-            velocity_model = load_transformer(
-                transformer_weights_path,
-                num_layers=48,
-                compute_dtype=transformer_compute_dtype,
-                low_memory=low_memory,
-                fast_mode=fast_mode,
-                profile_transformer_once=1 in active_profile_steps,
-                video_ff_quantize_specs=video_ff_quantize_specs,
-                video_ff_quantize_group_size=video_ff_quantize_group_size,
-                video_ff_quantize_bits=video_ff_quantize_bits,
-                video_ff_quantize_layers=video_ff_quantize_layers,
-                video_ff_layout_specs=video_ff_layout_specs,
-                video_ff_layout_layers=video_ff_layout_layers,
-                video_attn_layout_specs=video_attn_layout_specs,
-                video_attn_layout_layers=video_attn_layout_layers,
-                transformer_cache_quantize=transformer_cache_quantize,
-                weights_cache_mode=weights_cache_mode,
-                weights_cache_dir=weights_cache_dir,
-                transformer_block_resident_blocks=transformer_block_resident_blocks,
-                transformer_block_compile=transformer_block_compile,
-                transformer_block_compile_group_size=transformer_block_compile_group_size,
-                video_ff_dtype=(mx.float16 if video_ff_dtype == "float16" else None),
-            )
-            if video_ff_dtype is not None:
-                print(f"  Video FF dtype baked into cache: {video_ff_dtype}")
-
-            # Apply cross-attention scaling if specified (improves text conditioning)
-            if cross_attn_scale != 1.0:
-                velocity_model.set_cross_attn_scale(cross_attn_scale, start_layer=40)
-                print(f"  Applied cross-attention scale {cross_attn_scale}x for layers 40-47")
-
-            # Wrap in X0Model to convert velocity predictions to denoised (X0)
-            # The raw LTXModel outputs velocity, but denoising expects X0 predictions
-            model = X0Model(velocity_model)
-            print("  Wrapped model with X0Model for denoised predictions")
-        else:
-            model = None
-            print("  Skipping model load (placeholder mode)")
     timings.mark("transformer load")
 
     stage_scoped_loras_requested = lora_configs_have_stage_strengths(lora_configs)
@@ -3445,29 +3364,6 @@ def generate_video(
     else:
         print(f"  CFG disabled (scale {cfg_scale}) - Running optimized single-pass inference")
 
-    # Create APG guider if enabled (replaces CFG when active)
-    apg_guider = None
-    if apg_scale != 1.0:
-        if apg_momentum > 0:
-            apg_guider = LegacyStatefulAPGGuider(
-                scale=apg_scale,
-                eta=apg_eta,
-                norm_threshold=apg_norm_threshold,
-                momentum=apg_momentum,
-            )
-        else:
-            apg_guider = LtxAPGGuider(
-                scale=apg_scale,
-                eta=apg_eta,
-                norm_threshold=apg_norm_threshold,
-            )
-        print("  APG guidance enabled (replaces standard CFG)")
-
-    # Create STG guider if enabled
-    stg_guider = None
-    if stg_scale > 0:
-        stg_guider = STGGuider(scale=stg_scale)
-        print(f"  STG guidance enabled (scale={stg_scale})")
     timings.mark("guidance setup")
 
     # Load VAE decoder.
@@ -4344,405 +4240,6 @@ def generate_video(
             timings.mark("run log save")
         timings.print_summary()
         return
-
-    # === STANDARD PIPELINE (non-AV fallback, video-only) ===
-    # Note: LTX-2.3 distilled one-stage and two-stage modes use the AV path above.
-    if save_latents:
-        print("  WARNING: --save-latents is currently supported only on the Audio-Video pipeline path")
-
-    # Initialize noise
-    print("\n[4/5] Initializing latent noise...")
-    latent = mx.random.normal(shape=(1, 128, latent_frames, latent_height, latent_width))
-
-    # Get sigma schedule based on model variant
-    # The distilled model was trained with specific sigma values
-    use_linear_schedule = False  # Use distilled values for distilled model
-    if use_linear_schedule:
-        # Linear schedule: evenly spaced from 1.0 to 0.0
-        # Better for spatial coherence preservation
-        sigmas = mx.linspace(1.0, 0.0, num_steps + 1)
-        print(f"  Sigma schedule (linear): {[f'{float(s):.3f}' for s in sigmas]}")
-    elif model_variant == "distilled":
-        sigmas = mx.array(DISTILLED_SIGMA_VALUES[:num_steps + 1])
-        print(f"  Sigma schedule (distilled): {[f'{float(s):.3f}' for s in sigmas]}")
-    else:
-        # Dev model uses LTX2Scheduler for dynamic schedule
-        sigmas = get_sigma_schedule(num_steps=num_steps, distilled=False, latent=latent)
-        print(f"  Sigma schedule (dev): {[f'{float(s):.3f}' for s in sigmas]}")
-
-    # Create patchifier
-    patchifier = VideoLatentPatchifier(patch_size=1)
-
-    print(f"\n[5/5] Denoising ({num_steps} steps)...")
-
-    # Denoising loop with progress bar
-    step_iterator = progress_bar(range(len(sigmas) - 1), desc="Denoising", total=num_steps)
-
-    # GE (Gradient Estimation) velocity tracking
-    prev_velocity = None
-
-    for i in step_iterator:
-        sigma = float(sigmas[i])
-        sigma_next = float(sigmas[i + 1])
-
-        if model is not None and not use_placeholder:
-            # === Actual model inference ===
-            # Patchify video latent: [B, C, F, H, W] -> [B, T, C]
-            latent_patchified = patchifier.patchify(latent)
-
-            # Create video position grid with proper pixel-space coordinates
-            # (matching the distilled pipeline format)
-            output_shape = VideoLatentShape(
-                batch=1,
-                channels=128,
-                frames=latent_frames,
-                height=latent_height,
-                width=latent_width,
-            )
-            latent_coords = patchifier.get_patch_grid_bounds(output_shape=output_shape)
-            scale_factors = SpatioTemporalScaleFactors.default()  # time=8, height=32, width=32
-            positions = get_pixel_coords(
-                latent_coords=latent_coords,
-                scale_factors=scale_factors,
-                causal_fix=True,
-            ).astype(mx.float32)
-            # Convert temporal positions from frames to seconds
-            fps = output_fps
-            temporal_positions = positions[:, 0:1, ...] / fps
-            other_positions = positions[:, 1:, ...]
-            positions = mx.concatenate([temporal_positions, other_positions], axis=1)
-
-            # === Video-only mode with X0 prediction ===
-            # Note: Audio mode is handled by the AUDIO-VIDEO PIPELINE section above
-            # The distilled LTX-2 model directly outputs X0 (denoised samples),
-            # NOT velocity. So we:
-            # 1. Get X0 directly from model
-            # 2. Apply CFG on X0 samples
-            # 3. Euler step with X0
-            # (output_shape already defined above for position creation)
-
-            # Apply CFG if enabled
-            if use_cfg:
-                if low_memory:
-                    # MEMORY OPTIMIZATION: Sequential CFG passes
-                    # Run unconditional first, eval, then conditional
-
-                    # Unconditional (null text) pass first
-                    # NOTE: context_mask=None matches PyTorch behavior
-                    modality_uncond = Modality(
-                        latent=latent_patchified,
-                        context=null_encoding,
-                        context_mask=None,
-                        timesteps=mx.array([sigma]),
-                        positions=positions,
-                        enabled=True,
-                    )
-                    x0_uncond_patchified = model(modality_uncond)
-                    denoised_uncond = patchifier.unpatchify(x0_uncond_patchified, output_shape=output_shape)
-                    mx.eval(denoised_uncond)
-                    del x0_uncond_patchified
-
-                    # Conditional (text-guided) pass
-                    # NOTE: context_mask=None matches PyTorch behavior
-                    modality_cond = Modality(
-                        latent=latent_patchified,
-                        context=text_encoding,
-                        context_mask=None,
-                        timesteps=mx.array([sigma]),
-                        positions=positions,
-                        enabled=True,
-                    )
-                    x0_cond_patchified = model(modality_cond)
-                    denoised_cond = patchifier.unpatchify(x0_cond_patchified, output_shape=output_shape)
-                    mx.eval(denoised_cond)
-                    del x0_cond_patchified
-
-                    # Apply guidance: APG if enabled, otherwise standard CFG
-                    if apg_guider is not None and apg_guider.enabled():
-                        denoised = apg_guider.guide(denoised_cond, denoised_uncond)
-                    else:
-                        # CFG formula on X0: x0 = x0_uncond + scale * (x0_cond - x0_uncond)
-                        denoised = denoised_uncond + cfg_scale * (denoised_cond - denoised_uncond)
-
-                    # Apply guidance rescale to prevent variance explosion
-                    if guidance_rescale > 0:
-                        denoised = rescale_noise_cfg(denoised, denoised_cond, guidance_rescale)
-
-                    # Apply STG (Spatio-Temporal Guidance) if enabled
-                    if stg_guider is not None and stg_guider.enabled():
-                        # Run perturbed forward pass (skip video self-attention)
-                        x0_perturbed_patchified = model(modality_cond, perturbations=create_batched_stg_config(batch_size=1))
-                        denoised_perturbed = patchifier.unpatchify(x0_perturbed_patchified, output_shape=output_shape)
-                        denoised = stg_guider.guide(denoised, denoised_perturbed)
-                        del denoised_perturbed, x0_perturbed_patchified
-
-                    del denoised_uncond, denoised_cond
-                else:
-                    # Standard CFG: Sequential forward passes
-                    # NOTE: Batched CFG (stacking cond+uncond) was tested but found SLOWER
-                    # for 19B models because GPU is already fully utilized with batch=1.
-                    # Doubling batch just doubles compute time with no throughput gain.
-                    # NOTE: context_mask=None matches PyTorch behavior
-                    modality_cond = Modality(
-                        latent=latent_patchified,
-                        context=text_encoding,
-                        context_mask=None,
-                        timesteps=mx.array([sigma]),
-                        positions=positions,
-                        enabled=True,
-                    )
-                    x0_cond_patchified = model(modality_cond)
-                    denoised_cond = patchifier.unpatchify(x0_cond_patchified, output_shape=output_shape)
-
-                    # NOTE: context_mask=None matches PyTorch behavior
-                    modality_uncond = Modality(
-                        latent=latent_patchified,
-                        context=null_encoding,
-                        context_mask=None,
-                        timesteps=mx.array([sigma]),
-                        positions=positions,
-                        enabled=True,
-                    )
-                    x0_uncond_patchified = model(modality_uncond)
-                    denoised_uncond = patchifier.unpatchify(x0_uncond_patchified, output_shape=output_shape)
-
-                    # Apply guidance: APG if enabled, otherwise standard CFG
-                    if apg_guider is not None and apg_guider.enabled():
-                        denoised = apg_guider.guide(denoised_cond, denoised_uncond)
-                    else:
-                        # CFG formula on X0: x0 = x0_uncond + scale * (x0_cond - x0_uncond)
-                        denoised = denoised_uncond + cfg_scale * (denoised_cond - denoised_uncond)
-
-                    # Apply guidance rescale to prevent variance explosion
-                    if guidance_rescale > 0:
-                        denoised = rescale_noise_cfg(denoised, denoised_cond, guidance_rescale)
-
-                    # Apply STG (Spatio-Temporal Guidance) if enabled
-                    if stg_guider is not None and stg_guider.enabled():
-                        # Run perturbed forward pass (skip video self-attention)
-                        x0_perturbed_patchified = model(modality_cond, perturbations=create_batched_stg_config(batch_size=1))
-                        denoised_perturbed = patchifier.unpatchify(x0_perturbed_patchified, output_shape=output_shape)
-                        denoised = stg_guider.guide(denoised, denoised_perturbed)
-            else:
-                # No CFG - just conditional pass
-                # NOTE: context_mask=None matches PyTorch behavior
-                modality_cond = Modality(
-                    latent=latent_patchified,
-                    context=text_encoding,
-                    context_mask=None,
-                    timesteps=mx.array([sigma]),
-                    positions=positions,
-                    enabled=True,
-                )
-                x0_cond_patchified = model(modality_cond)
-                denoised = patchifier.unpatchify(x0_cond_patchified, output_shape=output_shape)
-
-                # Apply STG (Spatio-Temporal Guidance) if enabled (works without CFG)
-                if stg_guider is not None and stg_guider.enabled():
-                    # Run perturbed forward pass (skip video self-attention)
-                    x0_perturbed_patchified = model(modality_cond, perturbations=create_batched_stg_config(batch_size=1))
-                    denoised_perturbed = patchifier.unpatchify(x0_perturbed_patchified, output_shape=output_shape)
-                    denoised = stg_guider.guide(denoised, denoised_perturbed)
-
-            # Apply GE (Gradient Estimation) velocity correction if enabled
-            if ge_gamma > 0:
-                # Compute current velocity: v = (x - x0) / sigma
-                current_velocity = (latent - denoised) / sigma
-
-                if prev_velocity is not None:
-                    # Apply velocity correction using momentum-like update
-                    delta_v = current_velocity - prev_velocity
-                    total_velocity = ge_gamma * delta_v + prev_velocity
-                    # Reconstruct corrected denoised: x0 = x - v * sigma
-                    denoised = latent - total_velocity * sigma
-
-                # Update velocity for next iteration
-                prev_velocity = current_velocity
-
-            # Euler step using X0 (denoised) prediction
-            latent = euler_step_x0(latent, denoised, sigma, sigma_next)
-
-            # Force evaluation for memory efficiency
-            mx.eval(latent)
-        else:
-            # Placeholder: random velocity
-            velocity = mx.random.normal(shape=latent.shape) * 0.1
-            latent = euler_step(latent, velocity, sigma, sigma_next)
-            mx.eval(latent)
-
-    # === MEMORY OPTIMIZATION ===
-    # Clear transformer from memory - no longer needed after denoising
-    print("\n  Clearing transformer from memory...")
-    del model
-    gc.collect()
-    mx.metal.clear_cache()
-
-    # Save denoised latent
-    latent_path = output_path.replace('.mp4', '_latent.npz')
-    print(f"\nSaving denoised latent to {latent_path}...")
-    sidecars.save_sidecar(latent_path, {"latent": latent})
-    print(f"  Latent shape: {latent.shape}")
-
-    # Apply spatial upscaling if requested
-    if upscale_spatial and spatial_upscaler_weights:
-        print("\nApplying 2x spatial upscaling...")
-        print(f"  Input latent: {latent.shape}")
-
-        # Load upscaler
-        spatial_upscaler = SpatialUpscaler()
-        load_spatial_upscaler_weights(spatial_upscaler, spatial_upscaler_weights)
-
-        # CRITICAL: Un-normalize before upsampling, re-normalize after
-        # The upsampler model is trained on raw (un-normalized) latents
-        # Reference: PyTorch upsample_video() in ltx_core/model/upsampler/model.py
-        if vae_decoder is not None:
-            # Un-normalize: latent_raw = latent * std + mean
-            std = vae_decoder.std_of_means.reshape(1, -1, 1, 1, 1)
-            mean = vae_decoder.mean_of_means.reshape(1, -1, 1, 1, 1)
-            latent_unnorm = latent * std + mean
-            print(f"  Un-normalized: std={float(mx.std(latent_unnorm)):.3f}")
-
-            # Upscale the un-normalized latent
-            latent_upscaled = spatial_upscaler(latent_unnorm)
-            mx.eval(latent_upscaled)
-
-            # Re-normalize: latent = (latent_raw - mean) / std
-            latent = (latent_upscaled - mean) / std
-            mx.eval(latent)
-            print(f"  Re-normalized: std={float(mx.std(latent)):.3f}")
-        else:
-            # Fallback: upscale directly (may have incorrect dynamic range)
-            print("  WARNING: No VAE decoder for normalization - output may have wrong range")
-            latent = spatial_upscaler(latent)
-            mx.eval(latent)
-
-        print(f"  Upscaled latent: {latent.shape}")
-
-        # Clear upscaler from memory
-        del spatial_upscaler
-        gc.collect()
-        mx.metal.clear_cache()
-
-    # Apply temporal upscaling if requested
-    if upscale_temporal and temporal_upscaler_weights:
-        print("\nApplying 2x temporal upscaling...")
-        print(f"  Input latent: {latent.shape}")
-
-        # Load upscaler
-        temporal_upscaler = TemporalUpscaler()
-        load_temporal_upscaler_weights(temporal_upscaler, temporal_upscaler_weights)
-
-        # CRITICAL: Un-normalize before upsampling, re-normalize after
-        # The upsampler model is trained on raw (un-normalized) latents
-        # Reference: PyTorch upsample_video() in ltx_core/model/upsampler/model.py
-        if vae_decoder is not None:
-            # Un-normalize: latent_raw = latent * std + mean
-            std = vae_decoder.std_of_means.reshape(1, -1, 1, 1, 1)
-            mean = vae_decoder.mean_of_means.reshape(1, -1, 1, 1, 1)
-            latent_unnorm = latent * std + mean
-            print(f"  Un-normalized: std={float(mx.std(latent_unnorm)):.3f}")
-
-            # Upscale the un-normalized latent
-            latent_upscaled = temporal_upscaler(latent_unnorm)
-            mx.eval(latent_upscaled)
-
-            # Re-normalize: latent = (latent_raw - mean) / std
-            latent = (latent_upscaled - mean) / std
-            mx.eval(latent)
-            print(f"  Re-normalized: std={float(mx.std(latent)):.3f}")
-        else:
-            # Fallback: upscale directly (may have incorrect dynamic range)
-            print("  WARNING: No VAE decoder for normalization - output may have wrong range")
-            latent = temporal_upscaler(latent)
-            mx.eval(latent)
-
-        print(f"  Upscaled latent: {latent.shape}")
-
-        # Clear upscaler from memory
-        del temporal_upscaler
-        gc.collect()
-        mx.metal.clear_cache()
-
-    # Decode with VAE or create placeholder
-    if vae_decoder is not None:
-        print("\nDecoding with VAE...")
-        print(f"  Input latent: {latent.shape}")
-
-        # VAE decode
-        video = decode_latent(latent, vae_decoder)
-        mx.eval(video)
-        print(f"  Output video: {video.shape}")
-
-        # Decoded video is an mx array; slice per-frame (no numpy).
-        frames = [video[f] for f in range(video.shape[0])]
-        print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
-
-    else:
-        print("\nCreating placeholder video (VAE not loaded)...")
-
-        # Placeholder output: no VAE to decode, so visualize the latent itself -
-        # per-frame channel mean/std, nearest-neighbor upscaled to the output
-        # resolution and mapped to RGB. MLX-native (no numpy) and vectorized, in
-        # place of the old per-pixel Python loop on a mutable numpy frame.
-        lat = latent[0]                     # (C, F, H, W)
-        latent_mean = mx.mean(lat, axis=0)  # (F, H, W)
-        latent_std = mx.std(lat, axis=0)    # (F, H, W)
-        ys = mx.minimum((mx.arange(height, dtype=mx.int32) * latent_height) // height,
-                        latent_height - 1)
-        xs = mx.minimum((mx.arange(width, dtype=mx.int32) * latent_width) // width,
-                        latent_width - 1)
-
-        frames = []
-        frame_iterator = progress_bar(range(num_frames), desc="Creating frames", total=num_frames)
-        for f in frame_iterator:
-            lat_f = min(f * latent_frames // num_frames, latent_frames - 1)
-            mu = latent_mean[lat_f][ys][:, xs]   # (height, width) nearest-neighbor upscale
-            sd = latent_std[lat_f][ys][:, xs]
-            r = mx.clip((mu + 2) / 4 * 255, 0, 255)
-            g = mx.clip(sd / 2 * 255, 0, 255)
-            b = mx.clip((mu * sd + 1) / 2 * 128, 0, 255)
-            frames.append(mx.stack([r, g, b], axis=-1).astype(mx.uint8))  # (H, W, 3)
-
-    # Save video
-    # Note: Audio generation is handled by the AUDIO-VIDEO PIPELINE section above
-    print(f"\nSaving video to {output_path}...")
-    encode_video_dispatch(
-        frames, output_path,
-        tier=output_tier, fps=output_fps,
-        output_backend=output_backend,
-        vsr_spatial_mode=vsr_spatial_mode,
-        vsr_target_fps=vsr_target_fps,
-        vsr_temporal_mode=vsr_temporal_mode,
-        vsr_save_original=vsr_save_original,
-        vsr_encode_quality=vsr_encode_quality,
-        vsr_audio_codec=vsr_audio_codec,
-    )
-    timings.mark("output save")
-
-    print(f"\nDone! Video saved to {output_path}")
-    if save_run_log and run_metadata is not None:
-        save_run_log_sidecar(
-            run_log_sidecar_path(output_path),
-            run_metadata,
-            timings,
-            status="completed",
-            outputs={
-                "video": output_path,
-                "audio_wav": None,
-                "latents": None,
-                "text_conditioning": text_sidecar_path(output_path) if save_text_embeddings else None,
-            },
-        )
-        timings.mark("run log save")
-    timings.print_summary()
-
-    if use_placeholder:
-        print("\nNote: This is a placeholder output. Full inference requires:")
-        print("  1. Proper weight loading (use --weights flag)")
-        print("  2. Gemma text encoder integration")
-
-    if vae_decoder is None and not skip_vae:
-        print("\nNote: VAE decoder was not loaded - output is placeholder visualization.")
 
 
 # save_video / save_video_with_audio moved to LTX_2_MLX.ffmpeg_encoder
