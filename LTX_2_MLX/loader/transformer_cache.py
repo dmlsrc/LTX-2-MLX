@@ -583,14 +583,9 @@ def _safetensors_header_dtypes(weights_path: str) -> dict[str, str]:
     tensor data, so it is cheap even on a 40 GB checkpoint and works for
     dtypes MLX cannot represent.
     """
-    with open(weights_path, "rb") as f:
-        header_len = int.from_bytes(f.read(8), "little")
-        header = json.loads(f.read(header_len))
-    return {
-        key: entry["dtype"]
-        for key, entry in header.items()
-        if key != "__metadata__" and isinstance(entry, dict) and "dtype" in entry
-    }
+    from ..safetensors_header import read_safetensors_dtypes
+
+    return read_safetensors_dtypes(weights_path)
 
 
 def checkpoint_has_fp8_tensors(weights_path: str) -> bool:

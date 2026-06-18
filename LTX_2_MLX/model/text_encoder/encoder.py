@@ -642,11 +642,10 @@ def load_av_text_encoder_weights(
 
 def _read_transformer_config_from_checkpoint(weights_path: str) -> dict:
     """Read transformer config from checkpoint metadata."""
-    from safetensors import safe_open
+    from ...safetensors_header import read_safetensors_metadata
 
     try:
-        with safe_open(weights_path, framework="numpy") as f:
-            metadata = f.metadata() or {}
+        metadata = read_safetensors_metadata(weights_path)
         config = json.loads(metadata.get("config", "{}"))
     except Exception:
         return {}

@@ -656,8 +656,8 @@ class TestLoaderIntegration:
         if not weight_files:
             pytest.skip("No weight files found")
 
-        # Just verify we can read the file metadata without loading all weights
-        from safetensors import safe_open
-        with safe_open(str(weight_files[0]), framework="pt") as f:
-            keys = list(f.keys())
+        # Just verify we can read the file header without loading all weights
+        from LTX_2_MLX.safetensors_header import read_safetensors_header
+        header = read_safetensors_header(str(weight_files[0]))
+        keys = [k for k in header if k != "__metadata__"]
         assert len(keys) > 0

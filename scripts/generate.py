@@ -1046,11 +1046,9 @@ from LTX_2_MLX.pipelines.two_stage import (
 def _read_checkpoint_config(checkpoint_path: str) -> dict:
     """Read the JSON config from checkpoint metadata."""
     try:
-        from safetensors import safe_open
-        with safe_open(checkpoint_path, framework="numpy") as f:
-            metadata = f.metadata() or {}
-        config_str = metadata.get("config", "{}")
-        return json.loads(config_str)
+        from LTX_2_MLX.safetensors_header import read_safetensors_metadata
+        metadata = read_safetensors_metadata(checkpoint_path)
+        return json.loads(metadata.get("config", "{}"))
     except Exception:
         return {}
 
@@ -1199,10 +1197,8 @@ def detect_model_version(checkpoint_path: str) -> str:
     Returns version string (e.g. "2.3.0") or empty string if unknown.
     """
     try:
-        from safetensors import safe_open
-        with safe_open(checkpoint_path, framework="numpy") as f:
-            metadata = f.metadata() or {}
-        return metadata.get("model_version", "")
+        from LTX_2_MLX.safetensors_header import read_safetensors_metadata
+        return read_safetensors_metadata(checkpoint_path).get("model_version", "")
     except Exception:
         return ""
 
@@ -1216,11 +1212,8 @@ def is_v2_model(checkpoint_path: str) -> bool:
 def get_vae_config(checkpoint_path: str) -> dict:
     """Read VAE config from checkpoint metadata."""
     try:
-        import json
-
-        from safetensors import safe_open
-        with safe_open(checkpoint_path, framework="numpy") as f:
-            metadata = f.metadata() or {}
+        from LTX_2_MLX.safetensors_header import read_safetensors_metadata
+        metadata = read_safetensors_metadata(checkpoint_path)
         config = json.loads(metadata.get("config", "{}"))
         return config.get("vae", {})
     except Exception:
