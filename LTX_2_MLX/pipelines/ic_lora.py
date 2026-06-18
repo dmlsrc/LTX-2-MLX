@@ -7,14 +7,18 @@ Uses a two-stage approach:
   Stage 2: Upsample 2x and refine WITHOUT IC-LoRA (clean model)
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mlx.core as mx
-import numpy as np
+
+if TYPE_CHECKING:
+    import numpy as np  # type-only: runtime imports are lazy, inside functions
 
 from ..components import (
     DISTILLED_SIGMA_VALUES,
@@ -73,6 +77,8 @@ def preprocess_canny(
     Returns:
         Edge video as numpy array (F, H, W, 3) in [0, 255].
     """
+    import numpy as np
+
     try:
         import cv2
     except ImportError as exc:
@@ -124,6 +130,8 @@ def _save_control_video(
     fps: float = NATIVE_FPS,
 ) -> None:
     """Save a control video to disk for debugging/visualization."""
+    import numpy as np
+
     try:
         import cv2
     except ImportError:
@@ -166,6 +174,8 @@ def preprocess_control_signal(
     Returns:
         Control signal video (F, H, W, 3) in [0, 255].
     """
+    import numpy as np
+
     if control_type == ControlType.CANNY:
         return preprocess_canny(
             video_path=video_path,
@@ -223,6 +233,8 @@ def load_control_signal_tensor(
     Returns:
         Tensor (1, 3, F, H, W) normalized to [-1, 1].
     """
+    import numpy as np
+
     # Normalize to [-1, 1]
     video_np = control_signal.astype(np.float32) / 127.5 - 1.0
 
@@ -303,6 +315,8 @@ def load_video_tensor(
     Returns:
         Video tensor of shape (1, 3, F, H, W).
     """
+    import numpy as np
+
     try:
         import cv2
     except ImportError as exc:
