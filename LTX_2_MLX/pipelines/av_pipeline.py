@@ -372,6 +372,18 @@ class AVPipeline:
         if self.audio_decoder is None or self.vocoder is None:
             raise ValueError("Audio decoder and vocoder required for audio decode.")
 
+        # Sequence-start onset mitigation (latent-domain).  The causal audio VAE
+        # zero-pads the first frame, leaving a concentrated single-channel spike
+        # that decodes to a t=0 click; flatten it on a COPY before decode.  This
+        # is decode-only: stage 2 produced this latent upstream and the sidecars
+        # captured it already, so both stay exactly as they came out of the
+        # transformer.  See docs/AUDIO_ISSUES.md.
+        from ..audio import mitigate_onset_latent
+
+        audio_latent = mitigate_onset_latent(
+            audio_latent, mode=getattr(self, "audio_onset_latent_mode", "auto")
+        )
+
         # Decode latent to mel spectrogram (output is log-mel, which vocoder expects)
         mel_spectrogram = self.audio_decoder(audio_latent)
         mx.eval(mel_spectrogram)

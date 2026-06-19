@@ -17,8 +17,11 @@ from .onset import (
     DEFAULT_SILENCE_START_MS,
     DEFAULT_TRIM_MS,
     OnsetTrimResult,
+    detect_onset_latent_spike,
     detect_onset_spike,
+    flatten_onset_latent,
     mitigate_onset,
+    mitigate_onset_latent,
     parse_trim_mode,
     trim_onset,
 )
@@ -31,8 +34,11 @@ __all__ = [
     "DEFAULT_SILENCE_START_MS",
     "DEFAULT_TRIM_MS",
     "OnsetTrimResult",
+    "detect_onset_latent_spike",
     "detect_onset_spike",
+    "flatten_onset_latent",
     "mitigate_onset",
+    "mitigate_onset_latent",
     "parse_trim_mode",
     "trim_onset",
 ]

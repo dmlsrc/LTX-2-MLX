@@ -316,14 +316,56 @@ clips whose intended t=0 is loud.  This is **not** caused by:
   exhibited the spike, also off in the ambient-onset test that
   didn't).
 
-**What would actually predict a click?**  An open question.  Probably
-the latent's *spectral / dynamic-range* content at t=0, not just its
-RMS.  A useful follow-up would be to extract per-channel-of-8
-statistics for lat_t=0 across clips that click vs. clips that don't,
-and look for the discriminating feature.  The analyzer script's
-verdict is therefore a *necessary but not sufficient* indicator —
-the current 50 ms-RMS threshold catches the audible cases but says
-nothing about why some quiet-onset clips have elevated latents too.
+**What predicts a click? RESOLVED (2026-06-18): a per-channel spectral spike at
+the FIRST latent frame, caused by causal-VAE zero-padding.**
+
+ROOT CAUSE: the audio VAE is causal in time.  Every encoder conv (CausalConv2d in
+`reference/Lightricks-LTX-2/.../audio_vae/causal_conv_2d.py` plus the downsample
+blocks) zero-pads the START of the time axis (`F.pad mode="constant" value=0`).
+The first time-frame is convolved against an all-zero "past" -- a cold-start
+boundary no interior frame sees -- which deterministically produces an anomalous
+first latent frame.  In the 8-channel audio latent it concentrates into ONE channel
+(empirically ch4: frame0 ~2.3x its median, frame1 ~1.6x, gone by frame2 ~= 80 ms);
+the 128-channel VIDEO latent diffuses the same boundary effect into a mild broad
+~1.27x bump (which is why the video branch looks clean -- SAME mechanism,
+channel-count-diluted, not a separate cause).  Frame-0 TOTAL energy is normal
+(~1.1x); the anomaly is SPECTRAL concentration, not loudness -- exactly why a
+50 ms-RMS detector is blind to it (the audible event is a moderate PEAK, ~0.47x
+global peak, in the first ~25 ms; the 50 ms RMS only reads ~1.1x).
+
+The artifact is in EVERY training latent (a structural consequence of causal
+padding), so the denoiser learns it and reproduces it.  Confirmed near-universal:
+163/163 long-clip latent sidecars carry a concentrated first-frame channel spike
+(ch4 in 79%; ch5/ch0 in older configs; frame0 is the global-hottest frame in 71%).
+
+CAUSATION proven by decode test: decoding `final_audio_latent` with the first 3
+frames flattened to the per-channel median collapses the onset (first-25 ms peak
+0.47x -> 0.13x of global; first-25 ms RMS 1.22x -> 0.27x).  ch4-only fix = ~25% of
+the reduction; all-channel flatten = ~75%.  NOT a pure decoder edge effect --
+flattening the latent fixes it.
+
+UPSTREAM SHIPS IT UNMITIGATED: the reference encoder zero-pads (the source); the
+decoder upsample "drop first element" is causal length-alignment, not a declick; no
+onset/fade/declick exists in ltx-core or ltx-pipelines.  Telling inconsistency: the
+reference VOCODER uses `mode="replicate"` padding (vocoder.py:123, to avoid a cold
+start) while the VAE encoder uses zeros.  Replicate-padding the encoder like its own
+vocoder would likely remove the artifact, but that is a TRAINING-time change (it
+alters the latent distribution), not retrofittable at inference.  So an
+inference-side mitigation is genuinely required, not a missing port.
+
+FIX (proven safe): detect the first-frame channel concentration in the LATENT
+(max-channel-ratio > ~2x at frame 0) and flatten the first ~3 audio latent frames to
+the per-channel median before decode -- removes the click at the source, natural
+quiet onset.  Audio-domain fallback: zero-fill the leading ~120 ms (content starts
+~175 ms, so safe -- verified 120 ms->end is sample-identical to the original, video
+byte-identical).  The existing `auto` RMS mode (loud-click + 100-250 ms silence) still
+handles the dialog-heavy case; this peak/spectral transient needs the new
+latent-domain path.
+
+Exact encoder mel front-end (reference `audio_vae/ops.py`, for a real encoder probe):
+torchaudio MelSpectrogram, sr=24000, hop_length=160, n_mels=64, hann window,
+center=True, pad_mode="reflect", power=1.0, mel_scale/norm="slaney".  Decode-flatten
+experiment: `$SHARED_TEMP_DIR/trace_analysis/audio_onset_causation.py`.
 
 **Reproduction inputs:**
 - Output: any `.{mp4,wav,npz}` sidecar bundle from a generate.py run
