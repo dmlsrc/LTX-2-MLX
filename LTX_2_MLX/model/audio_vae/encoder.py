@@ -53,7 +53,7 @@ class AudioEncoder(nn.Module):
         ch: int = 128,
         in_ch: int = 2,  # Stereo audio
         ch_mult: tuple[int, ...] = (1, 2, 4),  # 3 levels
-        num_res_blocks: int = 3,
+        num_res_blocks: int = 2,  # LTX-2.3 audio VAE checkpoint: 2 res-blocks per level
         z_channels: int = 8,
         mel_bins: int = 16,  # Latent mel bins (64/4 = 16)
         double_z: bool = True,
@@ -224,8 +224,8 @@ def load_audio_encoder_weights(encoder: AudioEncoder, weights_path: str) -> None
         print("  Warning: No audio encoder keys found in weights file")
         return
 
-    # Load conv_in
-    _load_conv_weights(encoder.conv_in, weights, "audio_vae.encoder.conv_in")
+    # Load conv_in (CausalConv2d weights nest under an inner `.conv`)
+    _load_conv_weights(encoder.conv_in, weights, "audio_vae.encoder.conv_in.conv")
 
     # Load down blocks
     for i_level, level in enumerate(encoder.down_blocks):
@@ -242,12 +242,12 @@ def load_audio_encoder_weights(encoder: AudioEncoder, weights_path: str) -> None
     _load_resblock_weights(encoder.mid_block_2, weights, "audio_vae.encoder.mid.block_2")
 
     # Load conv_out
-    _load_conv_weights(encoder.conv_out, weights, "audio_vae.encoder.conv_out")
+    _load_conv_weights(encoder.conv_out, weights, "audio_vae.encoder.conv_out.conv")
 
     # Load per-channel statistics
     # PyTorch uses hyphenated names: mean-of-means, std-of-means
-    mean_key = "audio_vae.encoder.per_channel_statistics.mean-of-means"
-    std_key = "audio_vae.encoder.per_channel_statistics.std-of-means"
+    mean_key = "audio_vae.per_channel_statistics.mean-of-means"
+    std_key = "audio_vae.per_channel_statistics.std-of-means"
 
     if mean_key in weights:
         mean = weights[mean_key]
@@ -276,12 +276,16 @@ def _load_conv_weights(conv: CausalConv2d, weights: dict, prefix: str) -> None:
     weight_key = f"{prefix}.weight"
     bias_key = f"{prefix}.bias"
 
-    if weight_key in weights:
-        w = weights[weight_key]
-        if tuple(w.shape) != tuple(conv.weight.shape):
-            # PyTorch (out_C, in_C, kH, kW) -> MLX (out_C, kH, kW, in_C)
-            w = w.transpose(0, 2, 3, 1)
-        conv.weight = w
+    if weight_key not in weights:
+        raise KeyError(
+            f"audio encoder: checkpoint missing {weight_key!r} -- loader/checkpoint "
+            "key mismatch would silently leave this conv uninitialized"
+        )
+    w = weights[weight_key]
+    if tuple(w.shape) != tuple(conv.weight.shape):
+        # PyTorch (out_C, in_C, kH, kW) -> MLX (out_C, kH, kW, in_C)
+        w = w.transpose(0, 2, 3, 1)
+    conv.weight = w
 
     if bias_key in weights:
         conv.bias = weights[bias_key]
@@ -289,10 +293,10 @@ def _load_conv_weights(conv: CausalConv2d, weights: dict, prefix: str) -> None:
 
 def _load_resblock_weights(block: SimpleResBlock2d, weights: dict, prefix: str) -> None:
     """Load ResBlock weights."""
-    _load_conv_weights(block.conv1, weights, f"{prefix}.conv1")
-    _load_conv_weights(block.conv2, weights, f"{prefix}.conv2")
+    _load_conv_weights(block.conv1, weights, f"{prefix}.conv1.conv")
+    _load_conv_weights(block.conv2, weights, f"{prefix}.conv2.conv")
     if block.skip is not None:
-        _load_conv_weights(block.skip, weights, f"{prefix}.nin_shortcut")
+        _load_conv_weights(block.skip, weights, f"{prefix}.nin_shortcut.conv")
 
 
 def encode_audio(
