@@ -90,18 +90,27 @@ Available weights from [`Lightricks/LTX-2.3`](https://huggingface.co/Lightricks/
 
 ### Resolution
 
-Height and width must be divisible by 32:
+Resolution is `WIDTHxHEIGHT` (the form the CLI prints). Both dimensions must be
+divisible by **32** for the single-stage pipelines (`text-to-video`, `one-stage`)
+and by **64** for `distilled` and `two-stage` -- the spatial upscaler runs stage 1
+at half size then doubles it, so the final canvas must be a multiple of 64. For
+the usual `--pipeline distilled` workflow, pick a /64 row.
 
-| Resolution | Aspect Ratio | Use Case |
-|------------|--------------|----------|
-| 256x384 | 2:3 | Fast testing |
-| 288x512 | 16:9 | Default fast preview |
-| 480x704 | ~2:3 | Taller balanced quality/speed |
-| 512x768 | 2:3 | High quality |
-| 768x1024 | 3:4 | Maximum quality |
+| Resolution (WxH) | Aspect | /64 (distilled / two-stage) | Use case |
+|------------------|--------|-----------------------------|----------|
+| 352x192  | 11:6 | no (single-stage only) | Tiny / quick test |
+| 512x288  | 16:9 | no (single-stage only) | Default; fast preview |
+| 576x320  | 9:5  | yes | Fast distilled |
+| 768x448  | 12:7 | yes | Balanced distilled |
+| 1024x576 | 16:9 | yes | High-quality distilled |
+
+These are the sizes that actually recur in this project's runs (512x288 is the CLI
+default). 352x192 and 512x288 are not multiples of 64, so they only work with the
+single-stage pipelines, not `distilled` / `two-stage`.
 
 ```bash
-ltx2mlx "Your prompt" --height 512 --width 768
+# distilled requires /64 dimensions:
+ltx2mlx "Your prompt" --pipeline distilled --height 448 --width 768
 ```
 
 ### Frame Count
@@ -110,14 +119,17 @@ Frames must satisfy `frames % 8 == 1`:
 
 | Frames | Duration (24fps) | Latent Frames |
 |--------|------------------|---------------|
-| 17 | 0.7s | 3 |
-| 33 | 1.4s | 5 |
-| 65 | 2.7s | 9 |
-| 97 | 4.0s | 13 |
+| 49 | 2.0s | 7 |
 | 121 | 5.0s | 16 |
+| 241 | 10.0s | 31 |
+| 361 | 15.0s | 46 |
+| 481 | 20.0s | 61 |
+| 721 | 30.0s | 91 |
+
+20s (481) and 30s (721) clips are the most common in practice.
 
 ```bash
-ltx2mlx "Your prompt" --frames 65
+ltx2mlx "Your prompt" --frames 481        # 20s; or use --duration 20
 ```
 
 ### Steps
