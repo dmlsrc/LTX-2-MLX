@@ -4635,6 +4635,15 @@ def main():
         help="Save generation parameters, argv, output paths, and timings as an _run.json sidecar",
     )
     parser.add_argument(
+        "--save-console-log",
+        action="store_true",
+        help=(
+            "Tee the full console output, with the exact command, to a "
+            "_console.txt sidecar next to the output video. Implied by "
+            "--save-all-sidecars."
+        ),
+    )
+    parser.add_argument(
         "--save-audio-sidecar",
         action="store_true",
         help=(
@@ -4736,11 +4745,30 @@ def main():
         args.save_text_embeddings = True
         args.save_run_log = True
         args.save_audio_sidecar = True
+        args.save_console_log = True
         # The pre-VSR original mp4 is a sidecar in spirit - it lives next
         # to the requested output and helps reproduce / compare runs.
         # Implicit no-op when no VT post-processing is engaged (the
         # companion writer only fires when vsr or vtfrc is alive).
         args.vsr_save_original = True
+
+    # Resolve the output path up front so the console-log sidecar and
+    # generate_video share one timestamped stem, then -- when requested -- tee
+    # the whole console (and the exact command) to it. atexit teardown keeps the
+    # generate_video() call site untouched.
+    resolved_output_path = args.output or build_default_output_path(
+        args.output_dir, args.output_prefix
+    )
+    if args.save_console_log:
+        import atexit
+        import shlex
+
+        from LTX_2_MLX.console_log import start_console_capture
+
+        _argv = [os.path.basename(sys.argv[0]), *sys.argv[1:]]
+        _command = " \\\n  ".join(shlex.quote(a) for a in _argv)
+        _console_path = os.path.splitext(resolved_output_path)[0] + "_console.txt"
+        atexit.register(start_console_capture(_console_path, _command))
 
     # Resolve --audio-onset-trim {auto, off, <ms>} into (mode, trim_ms).
     from LTX_2_MLX.audio import parse_trim_mode as _parse_onset_trim_mode
@@ -4881,7 +4909,7 @@ def main():
         audio_vae_weights_path=args.audio_vae_weights,
         vocoder_weights_path=args.vocoder_weights,
         config_weights_path=args.config_weights,
-        output_path=args.output,
+        output_path=resolved_output_path,
         output_dir=args.output_dir,
         output_prefix=args.output_prefix,
         use_placeholder=args.placeholder,
