@@ -3013,7 +3013,6 @@ def generate_video(
 
     if not skip_vae:
         if defer_av_decoder_load:
-            print("\n[3/5] VAE decoder load deferred until video decode")
             vae_decoder_loader = load_video_vae_decoder
         else:
             print("\n[3/5] Loading VAE decoder...")
@@ -3487,7 +3486,6 @@ def generate_video(
                 raise ValueError("Distilled two-stage requires --model-variant distilled")
             if not spatial_upscaler_weights:
                 raise ValueError("Distilled two-stage requires --spatial-upscaler-weights")
-            print("[3.6/5] Spatial upscaler load deferred until inter-stage upscale")
 
             def spatial_upscaler_loader():
                 upscaler = SpatialUpscaler()
@@ -3525,7 +3523,6 @@ def generate_video(
 
         if generate_audio:
             if distilled_two_stage:
-                print("  Audio decoder/vocoder load deferred until audio decode")
                 audio_decoder_loader = load_audio_decode_stack
             else:
                 audio_decoder, vocoder, audio_sample_rate = load_audio_decode_stack()
