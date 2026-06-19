@@ -597,15 +597,8 @@ components directly.
 
 ## Performance Benchmarks
 
-Measured on the development machine (Apple Silicon):
-
-| Resolution | Frames | Steps | Time |
-|------------|--------|-------|------|
-| 512x768 | 65 | 8 | ~2 min |
-| 768x1024 | 65 | 8 | ~4 min |
-| 512x768 | 97 | 8 | ~3 min |
-
-VAE decoding adds ~10-15 seconds regardless of resolution.
+See [docs/PERFORMANCE.md](PERFORMANCE.md) for current benchmarks and the
+denoise-speed analysis (M1 Max, 64 GB).
 
 ## Text Encoding
 

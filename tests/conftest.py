@@ -102,14 +102,11 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Modify test collection to add markers based on test location."""
+    """Default every test to the `unit` marker unless it explicitly opts into
+    `requires_weights` (the loader tests do, via their own decorators). This keeps
+    `-m unit` meaning the full fast, weight-free suite as test files are added,
+    instead of a hardcoded handful."""
     for item in items:
-        # Auto-mark unit tests
-        if "test_scheduler" in item.nodeid or "test_conditioning" in item.nodeid or "test_upscalers" in item.nodeid:
-            item.add_marker(pytest.mark.unit)
-
-        # Auto-mark integration tests
-        if "test_video_generation" in item.nodeid:
-            item.add_marker(pytest.mark.integration)
-            item.add_marker(pytest.mark.requires_weights)
-            item.add_marker(pytest.mark.slow)
+        if any(marker.name == "requires_weights" for marker in item.iter_markers()):
+            continue
+        item.add_marker(pytest.mark.unit)

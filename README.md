@@ -2,7 +2,6 @@
 
 [![Model](https://img.shields.io/badge/HuggingFace-Model-orange?logo=huggingface)](https://huggingface.co/Lightricks/LTX-2.3)
 [![Original Repo](https://img.shields.io/badge/GitHub-LTX--2-181717?logo=github)](https://github.com/Lightricks/LTX-2)
-[![Paper](https://img.shields.io/badge/Paper-PDF-EC1C24?logo=adobeacrobatreader&logoColor=white)](https://arxiv.org/abs/2601.03233)
 
 Runs Lightricks LTX-2.3 (22B distilled two-stage, synchronized audio+video) natively on Apple Silicon via MLX.
 
@@ -166,8 +165,7 @@ See [Lightricks prompting guide](https://ltx.video/blog/how-to-prompt-for-ltx-2)
 - [Pipelines](docs/PIPELINES.md) - All 6 pipelines explained
 - [Architecture](docs/ARCHITECTURE.md) - Model architecture details
 - [Performance Optimization Notes](docs/PERFORMANCE.md) - Denoise-speed benchmark ideas and implementation candidates
-- [Parity Testing](docs/PARITY.md) - PyTorch/MLX verification (97%+ correlation)
-- [Technical Report](https://arxiv.org/abs/2601.03233) - Official Lightricks paper
+- [Parity Testing](docs/PARITY.md) - PyTorch/MLX parity verification
 
 ## License
 

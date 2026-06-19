@@ -198,6 +198,5 @@ The implementation loads models sequentially to fit within unified memory:
 
 ## References
 
-- [LTX-2 Technical Report](LTX_2_Technical_Report_compressed.pdf) - Official Lightricks paper
 - [LTX-2 PyTorch](https://github.com/Lightricks/LTX-2) - Reference implementation
 - [MLX Documentation](https://ml-explore.github.io/mlx/) - Apple MLX framework

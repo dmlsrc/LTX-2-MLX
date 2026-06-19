@@ -4,37 +4,56 @@ This directory contains the test suite for the LTX-2-MLX project, organized into
 
 ## Test Structure
 
-### Unit Tests (Fast, No Weights Required)
+### Test Inventory
 
-These tests validate individual components without requiring model weights:
+230 tests across 26 files, grouped by area. All run fast and weight-free except
+the loader tests (`test_loaders.py`), which are marked `requires_weights`.
 
-- **test_scheduler.py** (22 tests) - Sigma schedulers and Euler diffusion step
-  - LTX2Scheduler sigma schedule generation
-  - Distilled sigma value validation
-  - EulerDiffusionStep numerical stability and correctness
+**Schedulers & precision (30)**
+- **test_scheduler.py** (22) - sigma schedulers, distilled sigma values, Euler diffusion step
+- **test_precision_plumbing.py** (8) - compute/storage dtype plumbing
 
-- **test_conditioning.py** (17 tests) - Conditioning logic for video generation
-  - VideoConditionByLatentIndex (token replacement)
-  - VideoConditionByKeyframeIndex (keyframe appending)
-  - VideoLatentTools utilities
+**Conditioning & noise (21)**
+- **test_conditioning.py** (17) - keyframe and latent-index conditioning, VideoLatentTools
+- **test_noiser_parity.py** (4) - GaussianNoiser clean_latent blend (upstream parity)
 
-- **test_upscalers.py** (15 tests) + **test_spatial_upscaler.py** (2 tests) - Spatial and temporal upscaling components
-  - GroupNorm, Conv3d, ResBlock3d building blocks
-  - SpatialPixelShuffle and TemporalPixelShuffle
-  - Full SpatialUpscaler and TemporalUpscaler pipelines
-  - Numerical stability verification (prevents res-block explosion)
+**Transformer & fused ops (23)**
+- **test_v2_architecture.py** (7) - LTX-2.3 transformer structure pins
+- **test_fused_ops.py** (11) - fused-op correctness
+- **test_transformer_cache.py** (5) - transformer cache (quantize / FF layout)
 
-**Total unit tests: 56**
-**Execution time: ~2 seconds**
+**Upscalers (17)**
+- **test_upscalers.py** (15) - spatial/temporal upscaler blocks and pipelines
+- **test_spatial_upscaler.py** (2) - spatial upscaler
 
-### Integration Tests (Slow, Requires Weights)
+**Audio (22)**
+- **test_audio_onset.py** (10) - waveform onset-spike detection and trim
+- **test_audio_onset_latent.py** (3) - latent-domain onset detector
+- **test_audio_vae_encoder_load.py** (3) - audio VAE encoder weight load
+- **test_vocoder_filters.py** (4) - vocoder filter ops
+- **test_audio_noise_parity.py** (2) - audio noise-normalization removal lock-in
 
-These tests validate end-to-end video generation pipelines:
+**Text encoder (6)**
+- **test_gemma_tokenizer.py** (6) - Gemma 3 tokenizer
 
-- **test_pipelines.py** - Full pipeline tests with model weights
-  - Text-to-video generation
-  - Image-to-video generation
-  - Two-stage pipeline with spatial upscaling
+**Native I/O & encoding (20)**
+- **test_image_io.py** (9) - ImageIO/CoreImage load, resize, save
+- **test_ffmpeg_encoder.py** (3) - ffmpeg fallback encoder
+- **test_videotoolbox_audio.py** (3) - AVFoundation audio read/write
+- **test_cut_detect.py** (3) - cut detection
+- **test_pixel_buffer_chroma.py** (1) - CVPixelBuffer chroma handling
+- **test_videotoolbox_comparison.py** (1) - VideoToolbox frame comparison
+
+**Loaders & streaming (47)**
+- **test_loaders.py** (43, requires weights) - weight loaders and key mapping
+- **test_safetensors_header.py** (2) - safetensors header parsing
+- **test_streaming_converters.py** (2) - streaming-transformer converters
+
+**Progress UI (21)**
+- **test_progress.py** (21) - stacked phase-bar progress rendering
+
+**End-to-end pipelines (23)**
+- **test_pipelines.py** (23) - pipeline wiring (text-to-video, image-to-video, two-stage); runs in placeholder mode, no real weights
 
 ### Manual Verification (Placeholder Mode)
 
@@ -57,7 +76,7 @@ ltx2mlx "test" \
 `uv` automatically creates an isolated environment and runs tests:
 
 ```bash
-# Run all unit tests (fast, ~2 seconds)
+# Run the fast, weight-free suite
 uv run pytest tests/ -m unit -v
 
 # Run specific test file
@@ -96,9 +115,9 @@ pytest tests/test_conditioning.py -v
 pytest tests/test_upscalers.py -v
 ```
 
-### Run Integration Tests (Requires Weights)
+### Run Weight-Loading Tests
 ```bash
-pytest tests/ -m integration -v
+pytest tests/ -m requires_weights -v
 ```
 
 ### Run All Tests
@@ -145,15 +164,19 @@ Shared fixtures available to all tests:
 
 Current test coverage by component:
 
-| Component | Tests | Status |
-|-----------|-------|--------|
-| Schedulers & Diffusion | 22 | Done |
-| Conditioning Logic | 17 | Done |
-| Upscalers (Spatial/Temporal) | 17 | Done |
-| VAE Encoder/Decoder | 0 | Pending |
-| Transformer Blocks | 5 | Done (Parity Checked) |
-| Text Encoder | 0 | Pending |
-| Full Pipelines | 23 | Done |
+| Area | Tests |
+|------|-------|
+| Schedulers & precision | 30 |
+| Conditioning & noise | 21 |
+| Transformer & fused ops | 23 |
+| Upscalers | 17 |
+| Audio | 22 |
+| Text encoder | 6 |
+| Native I/O & encoding | 20 |
+| Loaders & streaming | 47 |
+| Progress UI | 21 |
+| End-to-end pipelines | 23 |
+| **Total** | **230** |
 
 ## Writing New Tests
 
@@ -236,18 +259,18 @@ If pytest fails to collect tests:
 
 ### Slow Test Execution
 
-Unit tests should complete in ~2 seconds. If slower:
+The fast suite should complete in a few seconds. If slower:
 
-1. Check you're not running integration tests by accident
-2. Use `-m unit` to run only unit tests
-3. Verify test isn't loading model weights
+1. Check you're not running the weight-loading tests by accident
+2. Use `-m unit` to run only the fast, weight-free tests
+3. Verify the test isn't loading model weights
 
 ## Future Work
 
-Planned additions to test suite:
+Coverage still missing (the areas above are otherwise covered):
 
-1. **VAE Tests** - Encoder/decoder roundtrip validation
-2. **Transformer Tests** - Attention block correctness
-3. **Text Encoder Tests** - Gemma embedding generation
-4. **Pipeline Tests** - End-to-end pipeline integration tests
-5. **Performance Benchmarks** - Speed and memory usage tracking
+1. **Video VAE roundtrip** - encoder/decoder numerical roundtrip (the audio VAE
+   encoder load is covered; the video VAE has no dedicated roundtrip test)
+2. **Gemma embedding parity** - end-to-end text-embedding parity vs the PyTorch reference
+3. **Weight-loaded integration** - a full generate run against real weights (the
+   pipeline tests currently run in placeholder mode)
