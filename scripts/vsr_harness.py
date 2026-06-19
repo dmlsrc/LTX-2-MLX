@@ -341,7 +341,7 @@ def _decode_audio_track(audio_latent: Any, weights: str, compute_dtype: Any) -> 
 
     print("Decoding audio latent (audio VAE + vocoder)...")
     audio_decoder, vocoder, sample_rate = make_audio_decoder_and_vocoder(weights, compute_dtype)
-    waveform = decode_audio_latent(audio_latent, audio_decoder, vocoder, mx)
+    waveform = decode_audio_latent(audio_latent, audio_decoder, vocoder, mx, onset_mode="auto")
     arr = waveform
     if arr.ndim == 3:
         arr = arr[0]

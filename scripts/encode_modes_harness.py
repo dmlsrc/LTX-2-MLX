@@ -385,7 +385,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 args.weights, compute_dtype,
             )
         with Timer(timings, "audio decode"):
-            audio_waveform = decode_audio_latent(audio_latent, audio_decoder, vocoder, mx)
+            audio_waveform = decode_audio_latent(
+                audio_latent, audio_decoder, vocoder, mx, onset_mode="auto"
+            )
         audio_path = output_dir / (
             "decoded_audio_float32.wav" if args.audio_bit_depth == "float32"
             else "decoded_audio_int16.wav"

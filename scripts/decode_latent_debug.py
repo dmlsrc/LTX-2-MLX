@@ -391,7 +391,17 @@ def make_audio_decoder_and_vocoder(weights_path: str, compute_dtype: Any):
     return audio_decoder, vocoder, sample_rate
 
 
-def decode_audio_latent(audio_latent: Any, audio_decoder: Any, vocoder: Any, mx_mod: Any):
+def decode_audio_latent(
+    audio_latent: Any, audio_decoder: Any, vocoder: Any, mx_mod: Any, onset_mode: str = "off"
+):
+    # Optional sequence-start onset mitigation. Default "off" = faithful/raw
+    # decode (for debug/analysis of a saved latent). Output-producing harnesses
+    # pass onset_mode="auto" to match AVPipeline._decode_audio. See
+    # docs/AUDIO_ISSUES.md.
+    if onset_mode != "off":
+        from LTX_2_MLX.audio import mitigate_onset_latent
+
+        audio_latent = mitigate_onset_latent(audio_latent, mode=onset_mode)
     mel_spectrogram = audio_decoder(audio_latent)
     mx_mod.eval(mel_spectrogram)
     waveform = vocoder(mel_spectrogram)
