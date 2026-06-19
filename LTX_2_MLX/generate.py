@@ -3583,6 +3583,9 @@ def generate_video(
             audio_decoder_loader=audio_decoder_loader,
             audio_sample_rate=audio_sample_rate,
         )
+        # Latent-domain onset mitigation shares the --audio-onset-trim mode, so
+        # `off` disables both the latent flatten and the waveform trim.
+        av_pipeline.audio_onset_latent_mode = audio_onset_trim_mode
 
         del model  # pipeline now holds the only reference; del self.transformer in av_pipeline.py can actually free it
         model = None

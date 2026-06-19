@@ -401,7 +401,7 @@ def decode_audio_latent(
     if onset_mode != "off":
         from LTX_2_MLX.audio import mitigate_onset_latent
 
-        audio_latent = mitigate_onset_latent(audio_latent, mode=onset_mode)
+        audio_latent = mitigate_onset_latent(audio_latent, mode=onset_mode, verbose=True)
     mel_spectrogram = audio_decoder(audio_latent)
     mx_mod.eval(mel_spectrogram)
     waveform = vocoder(mel_spectrogram)

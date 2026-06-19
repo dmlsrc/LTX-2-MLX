@@ -359,6 +359,7 @@ def mitigate_onset_latent(
     *,
     mode: str = "auto",
     n_frames: int = DEFAULT_LATENT_FLATTEN_FRAMES,
+    verbose: bool = False,
 ) -> mx.array:
     """Apply the latent-domain onset flatten per `mode` (auto / off / force).
 
@@ -373,6 +374,9 @@ def mitigate_onset_latent(
     if m == "off":
         return latent
     if m == "force" or (m == "auto" and detect_onset_latent_spike(latent)):
+        if verbose:
+            why = "forced" if m == "force" else "sequence-start spike detected"
+            print(f"  audio onset (latent): flattened leading {n_frames} frames ({why})")
         return flatten_onset_latent(latent, n_frames=n_frames)
     return latent
 

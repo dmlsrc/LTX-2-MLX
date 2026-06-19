@@ -381,7 +381,9 @@ class AVPipeline:
         from ..audio import mitigate_onset_latent
 
         audio_latent = mitigate_onset_latent(
-            audio_latent, mode=getattr(self, "audio_onset_latent_mode", "auto")
+            audio_latent,
+            mode=getattr(self, "audio_onset_latent_mode", "auto"),
+            verbose=True,
         )
 
         # Decode latent to mel spectrogram (output is log-mel, which vocoder expects)
