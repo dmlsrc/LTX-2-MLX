@@ -115,7 +115,13 @@ ltx2mlx "Your prompt" --pipeline distilled --height 448 --width 768
 
 ### Frame Count
 
-Frames must satisfy `frames % 8 == 1`:
+Easiest: pass `--duration SECONDS` and the frame count is computed for you -- it
+takes `ceil(seconds * fps)` and rounds up to the next valid `8*k + 1`, so the clip
+covers at least the requested time (the run log prints the resolved value, e.g.
+`Resolved duration 30.0s at 24.0fps to 721 frames`).
+
+To set the count directly, `--frames` must be a valid `8*k + 1` value (otherwise
+generation errors):
 
 | Frames | Duration (24fps) | Latent Frames |
 |--------|------------------|---------------|
@@ -129,7 +135,7 @@ Frames must satisfy `frames % 8 == 1`:
 20s (481) and 30s (721) clips are the most common in practice.
 
 ```bash
-ltx2mlx "Your prompt" --frames 481        # 20s; or use --duration 20
+ltx2mlx "Your prompt" --duration 20          # computes 481 frames; or --frames 481
 ```
 
 ### Steps
@@ -404,9 +410,10 @@ Both are off by default; engaging either forces the VT backend.
   `VTSuperResolutionScaler` (4x, downloadable model on first use;
   `balanced` uses prev-frame feedback for crisper motion; `image` is
   per-frame deterministic).
-- `--vsr-target-fps FLOAT` — `VTFrameRateConversion` to the requested
-  output rate (e.g. 24->48 for 2x slow-motion, 24->60 for high-refresh
-  playback).  Source rate is `--fps`.
+- `--vsr-target-fps FLOAT` - `VTFrameRateConversion` that interpolates to a
+  higher output rate (e.g. 24->48 or 24->60) for smoother, high-refresh
+  playback at the same clip duration.  It raises the frame rate; it does not
+  slow the video down.  Source rate is `--fps`.
 - `--vsr-temporal-mode {normal,high}` — VTFRC quality
   (`QualityPrioritizationQuality` when `high`).
 - `--vsr-encode-quality FLOAT` — `AVVideoQualityKey` for the
@@ -437,7 +444,7 @@ ltx2mlx "Your prompt" \
     --width 384 --height 216 \
     --vsr-spatial-mode image
 
-# 2x slow-mo: render at 24fps, interpolate to 48fps via VTFRC.
+# Higher frame rate (smoother motion, same duration): interpolate 24->48fps via VTFRC.
 ltx2mlx "Your prompt" \
     --vsr-target-fps 48 --vsr-temporal-mode high
 
