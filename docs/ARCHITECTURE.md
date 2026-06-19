@@ -4,7 +4,7 @@ This document describes the architecture of the LTX-2 model and its MLX implemen
 
 ## Overview
 
-LTX-2 is a **19-billion parameter Diffusion Transformer (DiT)** that generates synchronized video and audio from text prompts. This MLX port enables native Apple Silicon inference.
+LTX-2 is a **22-billion parameter Diffusion Transformer (DiT)** that generates synchronized video and audio from text prompts. This MLX port enables native Apple Silicon inference.
 
 ```
 Text Prompt
@@ -23,17 +23,17 @@ Text Prompt
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  48-Layer Transformer (19B parameters)                      │
+│  48-Layer Transformer (22B parameters)                      │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  Video Stream (14B)                                 │    │
+│  │  Video Stream                                       │    │
 │  │  • 32 attention heads x 128 dim = 4096 hidden       │    │
 │  │  • 3D RoPE positional encoding (x, y, t)            │    │
 │  │  • Cross-attention to text embeddings               │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                          ↕                                  │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  Audio Stream (5B) - optional                       │    │
-│  │  • 16 attention heads x 128 dim = 2048 hidden       │    │
+│  │  Audio Stream                                       │    │
+│  │  • 32 attention heads x 64 head_dim = 2048 hidden   │    │
 │  │  • 1D RoPE positional encoding (temporal)           │    │
 │  │  • Bidirectional cross-attention with video         │    │
 │  └─────────────────────────────────────────────────────┘    │
@@ -71,7 +71,7 @@ LTX_2_MLX/
 │   │
 │   ├── audio_vae/
 │   │   ├── decoder.py        # Audio latent → mel spectrogram
-│   │   └── encoder.py        # Audio encoding (experimental)
+│   │   └── encoder.py        # Audio encoding
 │   │
 │   ├── text_encoder/
 │   │   ├── gemma3.py         # Native Gemma 3 12B implementation
@@ -90,7 +90,7 @@ LTX_2_MLX/
 ├── conditioning/
 │   └── tools.py              # Latent conditioning utilities
 │
-├── pipelines/
+├── pipelines/                # (selected)
 │   ├── av_pipeline.py        # Joint audio+video denoise (CFG single-pass + distilled)
 │   ├── two_stage.py          # Two-stage with upscaling
 │   ├── ic_lora.py            # Image conditioning LoRA
@@ -104,7 +104,7 @@ LTX_2_MLX/
 
 ## Key Components
 
-### Transformer (19B parameters)
+### Transformer (22B parameters)
 
 The transformer uses a **velocity prediction** formulation:
 - Raw model output is velocity `v`
@@ -181,7 +181,7 @@ audio = audio_decoder.decode(audio_latent)
 | Configuration | RAM Usage |
 |---------------|-----------|
 | Gemma 3 text encoder | ~12 GB |
-| Transformer (FP16) | ~20 GB |
+| Transformer (BF16) | ~20 GB |
 | VAE decoder | ~2 GB |
 | **Total (sequential)** | **~25 GB** |
 
@@ -193,7 +193,7 @@ The implementation loads models sequentially to fit within unified memory:
 ## Precision
 
 - **Weights**: BFloat16 (loaded from safetensors)
-- **Computation**: BFloat16 for transformer, Float32 for VAE
+- **Computation**: BFloat16 for transformer and VAE; FP32 retained for scheduler/position math, tiled-VAE blending, and the Vocoder+BWE island.
 - **Activations**: BFloat16 to reduce memory
 
 ## References

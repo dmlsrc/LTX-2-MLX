@@ -73,13 +73,12 @@ This is a numerical precision divergence across 48 transformer layers. Audio spe
 ### 6. Gemma Model Swap (QAT → Standard)
 - **Tried:** Replaced `gemma-3-12b-it-qat-q4_0-unquantized` with standard `gemma-3-12b-it` (bf16)
 - **Result:** Audio slightly better, video slightly worse. Neither model matches ComfyUI exactly.
-- **Note:** Standard model downloaded to `/Users/steveross/Documents/Development/Source Models/gemma-3-12b-it`
+- **Note:** A standard `gemma-3-12b-it` (bf16) was used for this comparison.
 - ComfyUI uses `gemma_3_12B_it_fp4_mixed.safetensors` (standard model in fp4 quantization)
 
 ### 7. ComfyUI Embedding Injection (Definitive Test)
 - **Tried:** Exported text embeddings from ComfyUI's `preprocess_text_embeds`, loaded into MLX pipeline
 - **Result:** Ambient audio present, NO speech. Proves issue is in MLX diffusion transformer, not text encoder.
-- **Tools:** `save_embeddings_hook.py`, `_load_comfyui_embeddings()` in app.py
 
 ### 8. PyTorch Vocoder on MLX Mel (Definitive Test)
 - **Tried:** Saved mel spectrogram from MLX VAE decoder, ran through ComfyUI's PyTorch vocoder
@@ -418,7 +417,7 @@ was rejected in favor of a content-aware gate.
   click's ~95 ms decay tail with margin while still sitting inside
   the intentional silence the model places before the first spoken
   word (95-250 ms on the diagnosed clip).
-- **Where it runs:** `LTX_2_MLX.video_encoder.encode_video` (ffmpeg
+- **Where it runs:** `LTX_2_MLX.ffmpeg_encoder.encode_video` (ffmpeg
   path) and `LTX_2_MLX.videotoolbox.encode.encode_video_videotoolbox`
   (VT path) both call `mitigate_onset` before writing the audio
   track / WAV sidecar.  The same cleaned waveform feeds the muxed
@@ -433,7 +432,7 @@ was rejected in favor of a content-aware gate.
 - **Latent save still raw:** the trim is applied AFTER any latent
   save, so `--save-latents` + `scripts/analyze_audio_onset.py` can
   still reproduce the original spike measurement.
-- **Tests:** `scripts/test_audio_onset.py` exercises the click
+- **Tests:** `tests/test_audio_onset.py` exercises the click
   signature, ambient onset, loud-from-t=0, all-silent, and too-short
   clip classes; verifies sample-count preservation, mode handling,
   shape-variant support, and CLI parsing.
@@ -538,20 +537,10 @@ Transformer output (B, T, 128) patchified
 - Gemma text encoder: `LTX_2_MLX/model/text_encoder/gemma3.py`
 - Connector: `LTX_2_MLX/model/text_encoder/connector.py`
 
-### ComfyUI Reference Files
-- AV model: `/Applications/ComfyUI.app/Contents/Resources/ComfyUI/comfy/ldm/lightricks/av_model.py`
-- Text encoder: `/Applications/ComfyUI.app/Contents/Resources/ComfyUI/comfy/text_encoders/lt.py`
-- Connector: `/Applications/ComfyUI.app/Contents/Resources/ComfyUI/comfy/ldm/lightricks/embeddings_connector.py`
-- Audio VAE: `/Applications/ComfyUI.app/Contents/Resources/ComfyUI/comfy/ldm/lightricks/vae/audio_vae.py`
-- Vocoder: `/Applications/ComfyUI.app/Contents/Resources/ComfyUI/comfy/ldm/lightricks/vocoders/vocoder.py`
-
-### Test Tools Created
-- `save_embeddings_hook.py` — Patches ComfyUI to export text embeddings
-- `test_vocoder_from_mel.py` — Feeds MLX mel through PyTorch vocoder
+### Test Tools
 - `scripts/analyze_audio_onset.py` — Detects + characterizes start-of-clip
   audio artifacts (e.g. the sequence-start spike).  Takes any run sidecar
   path (`.mp4` / `.wav` / `.npz`), prints WAV head RMS profiles at both
   coarse (50 ms) and fine (5 ms) resolutions, per-frame latent stats for
   every audio-latent key in the NPZ, and a VERDICT line.  `--strict`
   returns non-zero on spike detection (sweep / CI usable).
-- Exported embeddings: `/Users/steveross/Documents/ComfyUI/exported_embeddings/`

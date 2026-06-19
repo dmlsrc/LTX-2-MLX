@@ -13,28 +13,27 @@ These tests validate individual components without requiring model weights:
   - Distilled sigma value validation
   - EulerDiffusionStep numerical stability and correctness
 
-- **test_conditioning.py** (15 tests) - Conditioning logic for video generation
+- **test_conditioning.py** (17 tests) - Conditioning logic for video generation
   - VideoConditionByLatentIndex (token replacement)
   - VideoConditionByKeyframeIndex (keyframe appending)
   - VideoLatentTools utilities
 
-- **test_upscalers.py** (23 tests) - Spatial and temporal upscaling components
+- **test_upscalers.py** (15 tests) + **test_spatial_upscaler.py** (2 tests) - Spatial and temporal upscaling components
   - GroupNorm, Conv3d, ResBlock3d building blocks
   - SpatialPixelShuffle and TemporalPixelShuffle
   - Full SpatialUpscaler and TemporalUpscaler pipelines
   - Numerical stability verification (prevents res-block explosion)
 
-**Total unit tests: 55**
+**Total unit tests: 56**
 **Execution time: ~2 seconds**
 
 ### Integration Tests (Slow, Requires Weights)
 
 These tests validate end-to-end video generation pipelines:
 
-- **test_video_generation.py** - Full pipeline tests with model weights
+- **test_pipelines.py** - Full pipeline tests with model weights
   - Text-to-video generation
   - Image-to-video generation
-  - Two-stage pipeline with spatial upscaling
   - Two-stage pipeline with spatial upscaling
 
 ### Manual Verification (Placeholder Mode)
@@ -148,14 +147,13 @@ Current test coverage by component:
 
 | Component | Tests | Status |
 |-----------|-------|--------|
-| Schedulers & Diffusion | 22 | ✅ Complete |
-| Conditioning Logic | 15 | ✅ Complete |
-| Upscalers (Spatial/Temporal) | 23 | ✅ Complete |
-| VAE Encoder/Decoder | 0 | ⏳ Pending |
-| VAE Encoder/Decoder | 0 | ⏳ Pending |
-| Transformer Blocks | 5 | ✅ Complete (Parity Checked) |
-| Text Encoder | 0 | ⏳ Pending |
-| Full Pipelines | 0 | ⏳ Pending |
+| Schedulers & Diffusion | 22 | Done |
+| Conditioning Logic | 17 | Done |
+| Upscalers (Spatial/Temporal) | 17 | Done |
+| VAE Encoder/Decoder | 0 | Pending |
+| Transformer Blocks | 5 | Done (Parity Checked) |
+| Text Encoder | 0 | Pending |
+| Full Pipelines | 23 | Done |
 
 ## Writing New Tests
 

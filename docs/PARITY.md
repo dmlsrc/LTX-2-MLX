@@ -4,7 +4,6 @@ This document describes the parity testing methodology and results for verifying
 
 ## Summary
 
-**V1 (19B) Overall Parity: 97%+** (historical, see [Stage-by-Stage Results](#stage-by-stage-results))
 **V2.3 (22B) Text Encoder Parity: 0.9996 video / 0.9931 audio** (May 21, 2026 audit)
 **V2.3 (22B) Transformer Step-0 Parity: 0.9991** (May 21, 2026, 512x512x33)
 
@@ -136,7 +135,7 @@ Single forward pass through the full 22B V2.3 AudioVideo transformer, feeding id
 | Input latent (patchified) | (1, 1280, 128) | **1.0000000** | 0 | 0 |
 | **x0_video (transformer step-0 output)** | (1, 1280, 128) | **0.9991481** | 1.30e-2 | 1.17e-1 |
 
-Reading: input alignment is bit-identical (positions and patchified latent cos sim = 1.0), so the 0.9991 cos sim on the output is **purely the transformer's contribution** — 48 transformer layers + AdaLN + cross-attention + per-head gated attention + the X0Model `latent - sigma*velocity` step add up to about 0.0009 of cross-impl drift.  Roughly **8x tighter** than the V1 PARITY.md historical baseline of 0.982 at step 0.
+Reading: input alignment is bit-identical (positions and patchified latent cos sim = 1.0), so the 0.9991 cos sim on the output is **purely the transformer's contribution** — 48 transformer layers + AdaLN + cross-attention + per-head gated attention + the X0Model `latent - sigma*velocity` step add up to about 0.0009 of cross-impl drift.
 
 ### bf16 Noise Floor
 
@@ -341,7 +340,5 @@ If correlation drops significantly at a specific step:
 4. Verify RoPE and position encoding
 
 ## Conclusion
-
-**V1 (19B)**: MLX achieves **97%+ correlation** with PyTorch across all pipeline stages, confirming functional parity.  The small differences (~3%) are within expected numerical precision tolerances and do not affect visual output quality.
 
 **V2.3 (22B)**: MLX achieves **0.9996 video / 0.9931 audio** text-encoder cross-impl cos sim and **0.9991** transformer step-0 cos sim against canonical Lightricks PyTorch.  These numbers are at the bf16 cross-kernel noise floor — MPS-PyTorch and Metal-MLX cannot agree more tightly without both being upgraded to fp32 (3.5x slower per forward, 2x memory).  All four substantive divergences from the May 2026 audit are resolved in `c431b7b`; remaining gaps are net-new upstream features (HDR IC-LoRA, color conversion), not parity bugs.

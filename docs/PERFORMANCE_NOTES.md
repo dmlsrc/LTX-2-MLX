@@ -837,8 +837,8 @@ the understanding evolved):
 
 **Artifacts** (kept on local /tmp -- delete at session end if not
 needed):
-- `/tmp/pmetal_dig/pmetal/` -- pmetal repo checkout
-- `/tmp/mlx_sdpa_tile_experiment/` -- phase-2 naive kernel artifacts
+- `/tmp/pmetal_dig/pmetal/` -- pmetal repo checkout (removed)
+- `/tmp/mlx_sdpa_tile_experiment/` -- phase-2 naive kernel artifacts (removed)
 
 **Bench code preserved:** `scripts/bench_ff_microbench.py
 sdpa_d_sweep` -- the bench that closed this hypothesis is in the

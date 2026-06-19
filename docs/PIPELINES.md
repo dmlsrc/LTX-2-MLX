@@ -74,7 +74,7 @@ ltx2mlx "A cat walking" \
 
 ## Additional Pipelines (Code-Only)
 
-### 5. Image Conditioning LoRA (`ic_lora`)
+### 5. Image Conditioning LoRA (CLI: `--pipeline ic-lora`)
 
 Video-to-video generation with control signals (depth, pose, edges).
 
@@ -92,7 +92,7 @@ pipeline = create_ic_lora_pipeline(
 - Control signals: depth maps, human pose, edge detection
 - **Best for**: Controlled video-to-video generation
 
-### 6. Keyframe Interpolation (`keyframe_interpolation`)
+### 6. Keyframe Interpolation (CLI: `--pipeline keyframe-interpolation`)
 
 Generate videos by interpolating between keyframe images.
 
@@ -119,8 +119,8 @@ video = pipeline(keyframes=keyframes, ...)
 | `distilled` | **Fast** (8+3 steps) | Good | 512p+ | No | Quick iteration |
 | `one-stage` | Slow (20+ steps) | **High** | Any | Yes | Quality priority |
 | `two-stage` | Medium (18 steps) | **High** | **512p+** | Yes | High-resolution |
-| `ic_lora` | Medium | High | 512p+ | Yes | Controlled gen |
-| `keyframe_interpolation` | Medium | High | 512p+ | Yes | Image animation |
+| `ic-lora` | Medium | High | 512p+ | Yes | Controlled gen |
+| `keyframe-interpolation` | Medium | High | 512p+ | Yes | Image animation |
 
 `--pipeline distilled` now uses the AudioVideo two-stage distilled path for
 LTX-2.3 checkpoints. Use `--pipeline one-stage --model-variant distilled` for
@@ -155,7 +155,7 @@ ltx2mlx "Your prompt" \
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--pipeline` | Pipeline: `text-to-video`, `distilled`, `one-stage`, `two-stage` | text-to-video |
+| `--pipeline` | Pipeline: `text-to-video`, `distilled`, `one-stage`, `two-stage`, `ic-lora`, `keyframe-interpolation` | text-to-video |
 | `--height` | Video height (divisible by 32; distilled/two-stage modes round to 64) | 288 |
 | `--width` | Video width (divisible by 32; distilled/two-stage modes round to 64) | 512 |
 | `--frames` | Number of frames (N*8+1) | 97 |

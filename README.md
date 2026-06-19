@@ -1,10 +1,10 @@
 # LTX-2-MLX
 
-[![Model](https://img.shields.io/badge/HuggingFace-Model-orange?logo=huggingface)](https://huggingface.co/Lightricks/LTX-2)
+[![Model](https://img.shields.io/badge/HuggingFace-Model-orange?logo=huggingface)](https://huggingface.co/Lightricks/LTX-2.3)
 [![Original Repo](https://img.shields.io/badge/GitHub-LTX--2-181717?logo=github)](https://github.com/Lightricks/LTX-2)
 [![Paper](https://img.shields.io/badge/Paper-PDF-EC1C24?logo=adobeacrobatreader&logoColor=white)](https://arxiv.org/abs/2601.03233)
 
-Native Apple Silicon implementation of [Lightricks LTX-2](https://github.com/Lightricks/LTX-2) video generation models using [MLX](https://github.com/ml-explore/mlx). Supports both **LTX-2.0** (19B) and **LTX-2.3** (22B) with automatic version detection.
+Runs Lightricks LTX-2.3 (22B distilled two-stage, synchronized audio+video) natively on Apple Silicon via MLX.
 
 <table>
 <tr>
@@ -88,9 +88,6 @@ hf download Lightricks/LTX-2.3 ltx-2.3-22b-distilled-lora-384-1.1.safetensors
 **Text Encoder**: [`google/gemma-3-12b-it`](https://huggingface.co/google/gemma-3-12b-it)
 (~25GB, gated) - accept the license, then `hf download google/gemma-3-12b-it`.
 
-The older LTX-2 19B checkpoints in [`Lightricks/LTX-2`](https://huggingface.co/Lightricks/LTX-2)
-also work via the same `hf download` / `--weights` pattern.
-
 ## Available Pipelines
 
 | Pipeline | Speed | Quality | Best For |
@@ -159,9 +156,9 @@ See [Lightricks prompting guide](https://ltx.video/blog/how-to-prompt-for-ltx-2)
 
 ## Requirements
 
-- macOS with Apple Silicon (M1/M2/M3/M4)
-- ~25GB RAM (128GB recommended for high resolution)
-- ffmpeg: `brew install ffmpeg`
+- macOS with Apple Silicon (developed and tested on M1 Max, 64 GB)
+- ~25GB RAM (64GB recommended for high resolution)
+- ffmpeg (optional; only for non-default/software encode tiers): `brew install ffmpeg`
 
 ## Documentation
 

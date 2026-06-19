@@ -19,10 +19,10 @@ ltx2mlx "A rocket launching into space" \
 
 ### Prerequisites
 
-- macOS with Apple Silicon (M1/M2/M3/M4)
+- macOS with Apple Silicon (developed and tested on M1 Max, 64 GB)
 - Python 3.14+
-- ~25GB available RAM (128GB recommended for high resolution)
-- ffmpeg for video encoding
+- ~25GB available RAM (64GB recommended for high resolution)
+- ffmpeg (optional, only needed for non-default/software encode tiers; the default uses native VideoToolbox/AVAssetWriter)
 
 ### Setup
 
@@ -38,7 +38,8 @@ uv pip install -e .
 # Or using pip
 pip install -e .
 
-# Install ffmpeg
+# Optional: install ffmpeg (only needed for non-default/software encode tiers;
+# the default encode path uses native VideoToolbox/AVAssetWriter)
 brew install ffmpeg
 ```
 
@@ -332,7 +333,7 @@ ltx2mlx "Epic wide shot of a medieval castle at dawn"
 Videos are written at 24fps via one of two backends, controlled by
 `--output-backend` (default `auto`):
 
-- `ffmpeg` — `LTX_2_MLX.video_encoder.encode_video()`.  Handles every
+- `ffmpeg` — `LTX_2_MLX.ffmpeg_encoder.encode_video_ffmpeg()`.  Handles every
   tier and is the default for non-HEVC tiers (`web`, `hq`, `export`,
   `reference`).
 - `videotoolbox` — `LTX_2_MLX.videotoolbox.encode.encode_video_videotoolbox()`.
@@ -464,7 +465,7 @@ Decode-only validation can read that sidecar without rerunning denoising:
 ```bash
 python scripts/decode_latent_debug.py \
     --latent outputs/sample.npz \
-    --weights weights/ltx-2/ltx-2.3-22b-distilled-1.1.safetensors \
+    --weights weights/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
     --modes auto \
     --decode-audio \
     --show-memory \
@@ -477,7 +478,7 @@ audio into each variant so the results can be judged as complete clips:
 ```bash
 python scripts/probe_vae_boundary.py \
     --latent outputs/sample.npz \
-    --weights weights/ltx-2/ltx-2.3-22b-distilled-1.1.safetensors \
+    --weights weights/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
     --variants orig orig_zero_convpad \
     --decode-audio \
     --output-dir outputs/boundary_probe
@@ -596,7 +597,7 @@ components directly.
 
 ## Performance Benchmarks
 
-Measured on M3 Max with 128GB unified memory:
+Measured on the development machine (Apple Silicon):
 
 | Resolution | Frames | Steps | Time |
 |------------|--------|-------|------|

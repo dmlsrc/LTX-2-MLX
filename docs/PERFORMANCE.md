@@ -1082,7 +1082,6 @@ MLX exposes:
 - `mx.fast.layer_norm`
 - `mx.fast.rope`
 - `mx.fast.metal_kernel`
-- `mx.fast.cuda_kernel`
 
 Current code uses fast SDPA and RMSNorm.  `mx.fast.rope` exists and
 supports `traditional`, `base`, `scale`, `offset`, and 1D `freqs` in the
