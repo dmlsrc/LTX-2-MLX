@@ -169,12 +169,14 @@ appear to have removed the original root cause without anyone re-testing:
 - `av_ca_timestep_scale_multiplier` set to 1000 (was 1) — fixed audio-video
   cross-attention gate factor.
 
-**Resolution in code** (commit landing May 21, 2026):
-- Channelwise normalization gated behind `LTX_NORMALIZE_AUDIO_NOISE` env var.
-- **Default: OFF.**  Now matches upstream Lightricks input distribution.
-- Set `LTX_NORMALIZE_AUDIO_NOISE=1` to restore legacy MLX behavior for A/B.
-- `env_flags` field in run-log sidecar records which mode produced each
-  output, so post-hoc forensics can identify the regime.
+**Resolution in code:**
+- May 21, 2026: channelwise normalization gated behind `LTX_NORMALIZE_AUDIO_NOISE`,
+  default OFF, so the default already matched the upstream Lightricks distribution.
+- June 18, 2026: the env var, the `_channelwise_normalize_audio_noise` method, and the
+  run-log `env_flags` entry were REMOVED entirely.  The bug was confirmed resolved (table
+  above) and the toggle was a latent parity-divergence footgun: flipping it on diverged
+  from Lightricks AND perturbed the video branch via `a2v` cross-attention.  Lock-in
+  guard: `tests/test_audio_noise_parity.py`.
 
 **Why this matters for cross-modal output**, not just audio: the V2.3 AV
 transformer has `a2v` cross-attention layers — changing the audio noise
@@ -184,11 +186,11 @@ prop layout, and speech tone all shifted coherently between the two
 modes.  Default OFF puts us on the same attractor as a stock Lightricks
 run with the same prompt+seed.
 
-**DO NOT RE-ADD the unconditional normalization without re-validating
-that the duration-amplitude symptom has returned.**  If you suspect it
-has, regenerate a 20-second clip with `LTX_NORMALIZE_AUDIO_NOISE=0` and
-compare per-second RMS against the table above before changing the
-default.
+**DO NOT RE-ADD the normalization without re-validating that the
+duration-amplitude symptom has actually returned.**  If you suspect it
+has, regenerate a 20-second clip on the current (un-normalized) path and
+compare per-second RMS against the table above before adding any
+whitening back.
 
 ### Temporal Degradation Pattern (RESOLVED — May 21, 2026)
 Historical observation (April 2026):

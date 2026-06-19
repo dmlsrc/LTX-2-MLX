@@ -26,7 +26,6 @@ import mlx.core as mx
 # Falls back to the X0 path automatically when state has a non-uniform mask
 # (image conditioning) or when the wrapped transformer isn't an X0Model.
 _USE_VELOCITY_MODE = bool(os.environ.get("LTX_VELOCITY_MODE"))
-_NORMALIZE_AUDIO_NOISE = bool(os.environ.get("LTX_NORMALIZE_AUDIO_NOISE"))
 
 
 def _env_enabled(name: str, disable_name: str | None = None) -> bool:
@@ -383,14 +382,6 @@ class AVPipeline:
         mx.eval(waveform)
 
         return waveform
-
-    @staticmethod
-    def _channelwise_normalize_audio_noise(latent: mx.array) -> mx.array:
-        """Normalize pure audio noise so duration changes do not suppress amplitude."""
-        x = (latent - mx.mean(latent)) / (mx.std(latent) + 1e-8)
-        mean = mx.mean(x, axis=1, keepdims=True)
-        std = mx.std(x, axis=1, keepdims=True) + 1e-8
-        return (x - mean) / std
 
     def _apply_cross_attn_scales(self, scale: float, start_block: int):
         """Set cross-attention scale on late transformer blocks."""
@@ -1368,14 +1359,6 @@ class AVPipeline:
             audio_tools = self._create_audio_tools(audio_shape)
             audio_state = audio_tools.create_initial_state(dtype=config.dtype)
             audio_state = noiser(audio_state, noise_scale=1.0)
-            emit_progress_message(
-                "  Audio noise normalization: "
-                f"{'enabled' if _NORMALIZE_AUDIO_NOISE else 'disabled'}"
-            )
-            if _NORMALIZE_AUDIO_NOISE:
-                audio_state = audio_state.replace(
-                    latent=self._channelwise_normalize_audio_noise(audio_state.latent)
-                )
 
         emit_progress_message(
             f"  Distilled stage 1: {len(stage_1_sigmas) - 1} steps at "

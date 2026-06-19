@@ -205,7 +205,7 @@ x0 = latent - sigma * velocity
 
 **Issue**: `AVPipeline._channelwise_normalize_audio_noise` unconditionally whitened the per-channel statistics of the audio noise tensor at stage-1 init.  Lightricks does not normalize the noise — the audio LoRA was trained on un-normalized `N(0,1) * sigma_max`.  Originally added as a workaround for a "duration-dependent amplitude bug" (see [AUDIO_ISSUES.md](AUDIO_ISSUES.md)) that has since been resolved by other fixes.
 
-**Fix**: [`LTX_2_MLX/pipelines/av_pipeline.py:30,1188-1198`](../LTX_2_MLX/pipelines/av_pipeline.py) — env-gated behind `LTX_NORMALIZE_AUDIO_NOISE`, default OFF.  Set to `=1` to restore legacy MLX behavior for A/B.  See [AUDIO_ISSUES.md](AUDIO_ISSUES.md) for the empirical re-test that confirmed the bug is no longer present (20-second clip RMS 588 vs 608 between modes, both with healthy ~1000-1600 RMS dialog bursts).
+**Fix**: first env-gated behind `LTX_NORMALIZE_AUDIO_NOISE` (default OFF, May 21 2026), then **removed entirely** (June 18 2026) once the underlying bug was confirmed resolved -- the normalization diverged from upstream and perturbed the video branch via `a2v` cross-attention.  See [AUDIO_ISSUES.md](AUDIO_ISSUES.md) for the empirical re-test (20-second clip RMS 588 vs 608 between the two modes, both with healthy ~1000-1600 RMS dialog bursts).  Lock-in guard: `tests/test_audio_noise_parity.py`.
 
 ### 9. Keyframe Conditioning Routing (V2.3 — May 21, 2026)
 
@@ -221,7 +221,7 @@ Subagent line-by-line audit of `AVPipeline.generate_distilled_two_stage` vs cano
 
 | # | Divergence | Status |
 |---|---|---|
-| 1 | Audio noise normalization (unconditional → env-gated, default OFF) | ✅ Fixed |
+| 1 | Audio noise normalization (unconditional -> env-gated default OFF -> removed) | ✅ Fixed |
 | 2 | Multi-image conditioning routing (always latent → keyframe for non-zero frame_index) | ✅ Fixed |
 | 3 | Missing `stage_1_sigmas` / `stage_2_sigmas` override kwargs | ✅ Fixed |
 | 4 | `distilled.py` dormant code retired (removed from working tree) | ✅ Fixed |
