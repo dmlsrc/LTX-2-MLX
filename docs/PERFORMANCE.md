@@ -36,6 +36,32 @@ top are most recent; older history is preserved at the bottom for context.
 gap-to-mlxv question, which drove most of the 05-15/05-16 investigation, is
 closed.
 
+### End-to-end timings by resolution and length
+
+Measured on **M1 Max, 64 GB** (BF16, distilled two-stage, audio on, `--fast-mode`),
+compiled from this project's own `_run.json` sidecars; recent runs are treated as
+authoritative. Denoise is stage 1 + stage 2; "VAE decode + encode" is the video
+VAE decode (which dominates) plus the HEVC encode; "+ VSR 4x" adds the VideoToolbox
+4x super-resolution upscale and the encode of the upscaled frames.
+
+| Resolution | Length | Denoise | VAE decode + encode | Audio | Total | Total + VSR 4x |
+|------------|--------|---------|---------------------|-------|-------|----------------|
+| 128x128  | 15s (361f) | 46s      | 21s     | 9s  | ~1.5 min  | -         |
+| 320x192  | 30s (721f) | 2.4 min  | 27s     | 20s | ~3.4 min  | ~4.0 min  |
+| 576x320  | 5s (121f)  | 67s      | 13s     | 3s  | ~1.8 min  | -         |
+| 576x320  | 10s (241f) | 2.3 min  | 56s     | 6s  | ~3.6 min  | -         |
+| 576x320  | 30s (721f) | 7.3 min  | 66s     | 19s | ~9.0 min  | ~10.7 min |
+| 704x384  | 20s (481f) | 9.5 min  | 76s     | 13s | ~11.0 min | -         |
+| 768x448  | 2s (49f)   | 83s      | 8s      | 1s  | ~1.7 min  | ~1.8 min  |
+| 768x448  | 30s (721f) | 17.0 min | 2.1 min | 20s | ~20.1 min | ~22.3 min |
+| 1024x576 | 20s (481f) | 21.7 min | 2.2 min | 13s | ~24.3 min | -         |
+
+Notes: denoise scales roughly with pixels x frames, and stage 2 (full resolution)
+dominates. VAE decode is significant even without VSR -- at 1024x576x481 it is
+~2.1 min of the 2.2 min decode+encode phase. VSR roughly doubles the decode+encode
+phase. Single-stage (`text-to-video`) is far slower at high resolution
+(1024x576x481 is ~57 min vs ~24 min for distilled).
+
 ### Default flag stack (auto-enabled)
 
 The following ship enabled by default:

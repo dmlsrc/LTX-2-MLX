@@ -112,6 +112,21 @@ ltx2mlx "Your prompt" --pipeline two-stage --height 768 --width 1024
 
 See [Pipelines Guide](docs/PIPELINES.md) for all 6 pipelines and options.
 
+## Performance
+
+Typical end-to-end times on **M1 Max, 64 GB** (BF16, distilled two-stage, audio on):
+
+| Resolution | Length | Total |
+|------------|--------|-------|
+| 768x448  | 2s  | ~1.7 min |
+| 576x320  | 30s | ~9 min |
+| 768x448  | 30s | ~20 min |
+| 1024x576 | 20s | ~24 min |
+
+Denoise dominates; VAE decode + encode is the bulk of the rest, and VSR (4x
+upscale) adds roughly 10-15%. Full per-stage breakdown across resolutions and
+lengths in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## Optimization Tips
 
 - **Use default BF16 compute** - override with `--dtype float16` or `--dtype float32` only for experiments
