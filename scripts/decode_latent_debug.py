@@ -398,15 +398,24 @@ def decode_audio_latent(
     # decode (for debug/analysis of a saved latent). Output-producing harnesses
     # pass onset_mode="auto" to match AVPipeline._decode_audio. See
     # docs/AUDIO_ISSUES.md.
+    onset_fired = False
     if onset_mode != "off":
-        from LTX_2_MLX.audio import mitigate_onset_latent
+        from LTX_2_MLX.audio import detect_onset_latent_spike
 
-        audio_latent = mitigate_onset_latent(audio_latent, mode=onset_mode, verbose=True)
+        onset_fired = onset_mode == "force" or detect_onset_latent_spike(audio_latent)
     mel_spectrogram = audio_decoder(audio_latent)
     mx_mod.eval(mel_spectrogram)
     waveform = vocoder(mel_spectrogram)
     waveform = waveform.astype(mx_mod.float32)
     mx_mod.eval(waveform)
+    if onset_fired:
+        # The causal-VAE first-frame spike decodes to a transient confined to the
+        # leading ~120 ms (verified); zero-fill it (content starts ~175 ms).
+        from LTX_2_MLX.audio import DEFAULT_TRIM_MS, trim_onset
+
+        sr = int(getattr(vocoder, "output_sample_rate", 48000))
+        waveform = trim_onset(waveform, sr, trim_ms=DEFAULT_TRIM_MS)
+        print(f"  audio onset (latent-detected): zero-filled leading {DEFAULT_TRIM_MS:g} ms (sequence-start spike)")
     return waveform
 
 

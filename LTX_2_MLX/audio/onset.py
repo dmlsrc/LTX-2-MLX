@@ -290,17 +290,24 @@ def mitigate_onset(
 
 
 # ---------------------------------------------------------------------------
-# Latent-domain onset mitigation (causal-VAE sequence-start boundary spike)
+# Latent-domain onset DETECTION (causal-VAE sequence-start boundary spike)
 # ---------------------------------------------------------------------------
 # The audio VAE is causal in time, so its first latent frame is encoded against
 # zero-padding (a cold-start boundary).  In the 8-channel audio latent this lands
 # as a concentrated single-channel spike at frame 0 that the vocoder renders as a
 # broadband t=0 click.  Total frame-0 energy is normal -- it is the per-channel
 # concentration that clicks -- so the waveform RMS detector above misses it.
-# Flattening the leading frames to the typical (time-mean) frame removes it at
-# the source.  See docs/AUDIO_ISSUES.md -> "what predicts a click".
+#
+# This detector is the reliable TRIGGER for that click class.  The mitigation is
+# the waveform `trim_onset` zero-fill applied to the decoded audio: the spike
+# decodes to a transient confined to the leading ~120 ms (well before the first
+# spoken word at ~175 ms), so zeroing that region clears it with no content loss
+# -- verified on the diagnosed clip.  Flattening the latent first was tried and
+# dropped: it only dents the spike (the decoder is itself causal and leaves an
+# audible residual), and the waveform zero-fill overwrites that region anyway.
+# Decode-only -- saved sidecars and stage-2 latents are upstream and untouched.
+# See docs/AUDIO_ISSUES.md -> "Sequence-Start Audio Spike".
 
-DEFAULT_LATENT_FLATTEN_FRAMES = 3
 DEFAULT_LATENT_SPIKE_RATIO = 2.0
 DEFAULT_LATENT_CONCENTRATION = 1.8
 
@@ -333,52 +340,6 @@ def detect_onset_latent_spike(
     peak = float(mx.max(f0))
     mean = float(mx.mean(f0))
     return peak > ratio and peak > concentration * mean
-
-
-def flatten_onset_latent(
-    latent: mx.array, *, n_frames: int = DEFAULT_LATENT_FLATTEN_FRAMES
-) -> mx.array:
-    """Replace the leading `n_frames` audio-latent frames with the time-mean frame.
-
-    Returns a NEW array; the input (e.g. a saved sidecar) is never mutated, and
-    the frame count is preserved.
-    """
-    if n_frames <= 0:
-        return latent
-    has_batch = latent.ndim == 4
-    x = latent if has_batch else latent[None]
-    n = min(n_frames, x.shape[2])
-    rep = mx.mean(x, axis=2, keepdims=True)            # (B, C, 1, F): the typical frame
-    rep = mx.broadcast_to(rep, (x.shape[0], x.shape[1], n, x.shape[3])).astype(x.dtype)
-    out = mx.concatenate([rep, x[:, :, n:, :]], axis=2)
-    return out if has_batch else out[0]
-
-
-def mitigate_onset_latent(
-    latent: mx.array,
-    *,
-    mode: str = "auto",
-    n_frames: int = DEFAULT_LATENT_FLATTEN_FRAMES,
-    verbose: bool = False,
-) -> mx.array:
-    """Apply the latent-domain onset flatten per `mode` (auto / off / force).
-
-    auto   flatten only when `detect_onset_latent_spike` fires.
-    off    pass through unchanged.
-    force  always flatten the leading `n_frames`.
-
-    Decode-time mitigation: the returned latent is what the VAE decodes, NOT what
-    is saved as a sidecar -- callers must keep the original for the sidecar.
-    """
-    m = (mode or "auto").lower()
-    if m == "off":
-        return latent
-    if m == "force" or (m == "auto" and detect_onset_latent_spike(latent)):
-        if verbose:
-            why = "forced" if m == "force" else "sequence-start spike detected"
-            print(f"  audio onset (latent): flattened leading {n_frames} frames ({why})")
-        return flatten_onset_latent(latent, n_frames=n_frames)
-    return latent
 
 
 # ---------------------------------------------------------------------------

@@ -339,10 +339,16 @@ padding), so the denoiser learns it and reproduces it.  Confirmed near-universal
 (ch4 in 79%; ch5/ch0 in older configs; frame0 is the global-hottest frame in 71%).
 
 CAUSATION proven by decode test: decoding `final_audio_latent` with the first 3
-frames flattened to the per-channel median collapses the onset (first-25 ms peak
-0.47x -> 0.13x of global; first-25 ms RMS 1.22x -> 0.27x).  ch4-only fix = ~25% of
-the reduction; all-channel flatten = ~75%.  NOT a pure decoder edge effect --
-flattening the latent fixes it.
+frames flattened collapses MOST of the onset (first-25 ms peak 0.47x -> 0.13x of
+global; first-25 ms RMS 1.22x -> 0.27x).  ch4-only fix = ~25% of the reduction;
+all-channel flatten = ~75%.  So the latent spike is the DOMINANT contributor --
+but not the whole story: the 0.13x residual is still an audible "pfft", because
+the VAE decoder is ITSELF causal (zero-pads its own first frame) and leaves an
+edge transient that flattening the latent cannot reach.  Empirically (2026-06-18)
+that residual is a low-level smear (peak ~0.05) spread across 0-120 ms, dying by
+~105 ms; the original click occupies the same 0-120 ms window.  Content starts at
+~180 ms, so the WHOLE artifact -- latent spike AND decoder-edge residual -- sits
+in the silence before the first word.
 
 UPSTREAM SHIPS IT UNMITIGATED: the reference encoder zero-pads (the source); the
 decoder upsample "drop first element" is causal length-alignment, not a declick; no
@@ -353,19 +359,26 @@ vocoder would likely remove the artifact, but that is a TRAINING-time change (it
 alters the latent distribution), not retrofittable at inference.  So an
 inference-side mitigation is genuinely required, not a missing port.
 
-FIX (proven safe): detect the first-frame channel concentration in the LATENT
-(max-channel-ratio > ~2x at frame 0) and flatten the first ~3 audio latent frames to
-the per-channel median before decode -- removes the click at the source, natural
-quiet onset.  Audio-domain fallback: zero-fill the leading ~120 ms (content starts
-~175 ms, so safe -- verified 120 ms->end is sample-identical to the original, video
-byte-identical).  The existing `auto` RMS mode (loud-click + 100-250 ms silence) still
-handles the dialog-heavy case; this peak/spectral transient needs the new
-latent-domain path.
+FIX (verified 2026-06-18, by ear + measurement): detect the first-frame channel
+concentration in the LATENT (`detect_onset_latent_spike`: max-channel-ratio > ~2x
+at frame 0 AND concentrated) -- the reliable trigger the waveform RMS detector is
+blind to -- then zero-fill the leading 120 ms of the DECODED waveform
+(`trim_onset`).  Because the artifact (spike + decoder-edge residual) lives
+entirely in 0-120 ms and content starts ~180 ms, the zero-fill clears it with no
+content loss (first-120 ms RMS -> 0.00; 120 ms->end sample-identical to the
+original, video byte-identical).  The latent flatten was implemented first and then
+DROPPED: it only dents the spike and leaves the audible decoder-edge residual, and
+the waveform zero-fill overwrites the 0-120 ms region anyway, so it earned nothing.
+Decode-only -- saved sidecars and stage-2 latents are upstream and untouched.  Wired
+to `--audio-onset-trim` (off disables it); the existing `auto` RMS mode still
+independently handles the loud-dialog-onset case.
 
 Exact encoder mel front-end (reference `audio_vae/ops.py`, for a real encoder probe):
 torchaudio MelSpectrogram, sr=24000, hop_length=160, n_mels=64, hann window,
-center=True, pad_mode="reflect", power=1.0, mel_scale/norm="slaney".  Decode-flatten
-experiment: `$SHARED_TEMP_DIR/trace_analysis/audio_onset_causation.py`.
+center=True, pad_mode="reflect", power=1.0, mel_scale/norm="slaney".  Decode
+experiment: `$SHARED_TEMP_DIR/trace_analysis/audio_onset_causation.py` (latent
+flatten causation; decode a long-clip audio sidecar raw vs detect + zero-fill for a
+raw-vs-fixed A/B listen).
 
 **Reproduction inputs:**
 - Output: any `.{mp4,wav,npz}` sidecar bundle from a generate.py run

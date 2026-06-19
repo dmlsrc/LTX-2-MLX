@@ -378,12 +378,11 @@ class AVPipeline:
         # is decode-only: stage 2 produced this latent upstream and the sidecars
         # captured it already, so both stay exactly as they came out of the
         # transformer.  See docs/AUDIO_ISSUES.md.
-        from ..audio import mitigate_onset_latent
+        from ..audio import DEFAULT_TRIM_MS, detect_onset_latent_spike, trim_onset
 
-        audio_latent = mitigate_onset_latent(
-            audio_latent,
-            mode=getattr(self, "audio_onset_latent_mode", "auto"),
-            verbose=True,
+        onset_mode = getattr(self, "audio_onset_latent_mode", "auto")
+        onset_fired = onset_mode != "off" and (
+            onset_mode == "force" or detect_onset_latent_spike(audio_latent)
         )
 
         # Decode latent to mel spectrogram (output is log-mel, which vocoder expects)
@@ -394,6 +393,18 @@ class AVPipeline:
         waveform = self.vocoder(mel_spectrogram)
         waveform = waveform.astype(mx.float32)
         mx.eval(waveform)
+
+        # The causal-VAE first-frame spike decodes to a transient confined to the
+        # leading ~120 ms (verified); zero-fill it when the latent detector fires
+        # (content starts ~175 ms). Decode-only -- sidecars and stage 2 are
+        # upstream and untouched. See docs/AUDIO_ISSUES.md.
+        if onset_fired:
+            sr = int(getattr(self.vocoder, "output_sample_rate", 48000))
+            waveform = trim_onset(waveform, sr, trim_ms=DEFAULT_TRIM_MS)
+            print(
+                f"  audio onset (latent-detected): zero-filled leading "
+                f"{DEFAULT_TRIM_MS:g} ms (sequence-start spike)"
+            )
 
         return waveform
 
