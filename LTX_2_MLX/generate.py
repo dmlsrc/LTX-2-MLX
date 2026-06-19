@@ -1301,7 +1301,6 @@ def encode_av_gemma_batch(
     if tokenizer is None:
         return None
 
-    print("  Loading Gemma 3 model...")
     config = Gemma3Config()
     gemma = Gemma3Model(config)
     load_gemma3_weights(gemma, gemma_path)
@@ -1346,8 +1345,6 @@ def encode_av_gemma_batch(
             del last_hidden
             continue
 
-        print(f"  Got {len(all_hidden_states)} hidden states for {label}")
-
         # Strip padding to real tokens only (matching ComfyUI behavior).
         # Left-padded: real tokens are at the END. The embeddings connector
         # appends registers to extend the sequence to 1024+, so no rounding needed.
@@ -1373,7 +1370,6 @@ def encode_av_gemma_batch(
 
         del last_hidden
 
-    print("  Clearing Gemma from memory before AV text encoder...")
     del gemma
     del tokenizer
     gc.collect()
@@ -1410,7 +1406,6 @@ def encode_av_gemma_batch(
 
         del all_hidden_states
 
-    print("  Clearing AV text encoder from memory...")
     del text_encoder
     del gemma_outputs
     gc.collect()
@@ -1685,7 +1680,7 @@ def load_av_transformer(
     fast_str = " (fast mode)" if fast_mode else ""
     profile_str = " (profile first call)" if profile_transformer_once else ""
     v2_str = " (V2)" if cross_attention_adaln else ""
-    print(f"Loading AudioVideo transformer ({compute_dtype_name(compute_dtype)}{mem_str}{fast_str}{profile_str}{v2_str})...")
+    print(f"  {compute_dtype_name(compute_dtype)}{mem_str}{fast_str}{profile_str}{v2_str}")
     if transformer_config:
         print(
             "  Transformer config: "
@@ -2458,8 +2453,11 @@ def generate_video(
     print(f"\n{'='*50}")
     print("LTX-2 MLX Video Generation")
     print(f"{'='*50}")
-    print(f"Prompt: {prompt}")
-    print(f"Resolution: {width}x{height}, {num_frames} frames")
+    print("Prompt:")
+    print("-" * 70)
+    print(prompt)
+    print("-" * 70)
+    print(f"Resolution: {width}x{height}, {num_frames} frames ({num_frames / output_fps:.1f}s @ {output_fps:g}fps)")
     steps_display = (
         f"{len(DISTILLED_SIGMA_VALUES) - 1}+{len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1}"
         if distilled_two_stage_requested
@@ -2670,7 +2668,7 @@ def generate_video(
 
     # Enhance prompt if requested (expands short prompts to detailed descriptions)
     if enhance_prompt_flag and use_gemma:
-        print("\n[0/5] Enhancing prompt...")
+        print("\n=== Enhancing prompt ===")
         prompt = enhance_prompt(prompt, gemma_path)
         print("  Using enhanced prompt for generation")
     timings.mark("setup")
@@ -2710,7 +2708,7 @@ def generate_video(
     audio_vae_load_path = weight_family_load_paths.get("audio_vae", audio_vae_weights_path)
     vocoder_load_path = weight_family_load_paths.get("vocoder", vocoder_weights_path)
 
-    print("\n[1/5] Encoding prompt...")
+    print("\n=== Encoding prompt ===")
     if embedding_path:
         loaded_conditioning = load_text_conditioning(embedding_path, use_av_encoder)
         text_encoding = loaded_conditioning["positive_video_encoding"]
@@ -2831,7 +2829,7 @@ def generate_video(
     # Load model
     # V2.3 always uses the AV transformer (dual video/audio cross-attention)
     if use_av_encoder:
-        print("\n[2/5] Loading AudioVideo transformer...")
+        print("\n=== Loading transformer ===")
         if not use_placeholder and transformer_weights_path:
             # Audio pretranspose mirrors video by default for AV models - the
             # audio modules see the same per-step dispatch pattern, so the
@@ -3015,10 +3013,10 @@ def generate_video(
         if defer_av_decoder_load:
             vae_decoder_loader = load_video_vae_decoder
         else:
-            print("\n[3/5] Loading VAE decoder...")
+            print("  Loading VAE decoder...")
             vae_decoder = load_video_vae_decoder()
     else:
-        print("\n[3/5] VAE decoder skipped by user")
+        print("  VAE decoder skipped (by user)")
     timings.mark("vae decoder setup" if defer_av_decoder_load else "vae decoder load")
 
     # === TWO-STAGE PIPELINE ===
@@ -3065,7 +3063,7 @@ def generate_video(
             print("  Audio generation: ENABLED")
 
         # Load spatial upscaler
-        print("\n[3.5/5] Loading spatial upscaler...")
+        print("  Loading spatial upscaler...")
         spatial_upscaler = SpatialUpscaler()
         if not use_placeholder:
             load_spatial_upscaler_weights(spatial_upscaler, spatial_upscaler_weights)
@@ -3085,7 +3083,7 @@ def generate_video(
         )
 
         # Load video encoder
-        print("[3.5/5] Loading VAE encoder...")
+        print("  Loading VAE encoder...")
         video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
         if not use_placeholder:
             load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
@@ -3117,7 +3115,7 @@ def generate_video(
             audio_sample_rate = vocoder.output_sample_rate if vocoder else 24000
 
         # Create two-stage pipeline
-        print("\n[4/5] Creating two-stage pipeline...")
+        print("  Creating two-stage pipeline...")
         pipeline = TwoStagePipeline(
             transformer=model,
             video_encoder=video_encoder,
@@ -3164,7 +3162,7 @@ def generate_video(
             )]
 
         # Run pipeline
-        print("\n[5/5] Running two-stage generation...")
+        print("\n=== Running two-stage generation ===")
         video, audio_waveform = pipeline(
             positive_encoding=text_encoding,
             negative_encoding=null_encoding,
@@ -3226,7 +3224,7 @@ def generate_video(
             raise ValueError("IC-LoRA pipeline requires VAE decoder")
 
         # Load VAE encoder
-        print("[3.5/5] Loading VAE encoder...")
+        print("  Loading VAE encoder...")
         video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
         if video_vae_load_path and not use_placeholder:
             load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
@@ -3234,7 +3232,7 @@ def generate_video(
             print("  Skipping weights load (placeholder)")
 
         # Load spatial upscaler
-        print("[3.6/5] Loading spatial upscaler...")
+        print("  Loading spatial upscaler...")
         spatial_upscaler = SpatialUpscaler()
         upscaler_path = spatial_upscaler_weights or "weights/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
         if os.path.exists(upscaler_path):
@@ -3252,7 +3250,7 @@ def generate_video(
             lora_configs = [LoRAConfig(path=ic_lora_weights, strength=1.0)]
 
         # Create IC-LoRA pipeline
-        print("\n[4/5] Creating IC-LoRA pipeline...")
+        print("  Creating IC-LoRA pipeline...")
         ic_pipeline = ICLoraPipeline(
             transformer=model,
             video_encoder=video_encoder,
@@ -3298,7 +3296,7 @@ def generate_video(
             )]
 
         # Run pipeline
-        print("\n[5/5] Running IC-LoRA generation...")
+        print("\n=== Running IC-LoRA generation ===")
         video = ic_pipeline(
             text_encoding=text_encoding,
             text_mask=mx.ones((1, text_encoding.shape[1]), dtype=mx.int32),
@@ -3357,7 +3355,7 @@ def generate_video(
             raise ValueError("Keyframe interpolation pipeline requires VAE decoder")
 
         # Load VAE encoder
-        print("[3.5/5] Loading VAE encoder...")
+        print("  Loading VAE encoder...")
         video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
         if video_vae_load_path and not use_placeholder:
             load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
@@ -3365,7 +3363,7 @@ def generate_video(
             print("  Skipping weights load (placeholder)")
 
         # Load spatial upscaler for two-stage
-        print("[3.6/5] Loading spatial upscaler...")
+        print("  Loading spatial upscaler...")
         spatial_upscaler = SpatialUpscaler()
         upscaler_path = spatial_upscaler_weights or "weights/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
         if os.path.exists(upscaler_path):
@@ -3374,7 +3372,7 @@ def generate_video(
             print(f"  Warning: Spatial upscaler weights not found at {upscaler_path}")
 
         # Create keyframe interpolation pipeline
-        print("\n[4/5] Creating keyframe interpolation pipeline...")
+        print("  Creating keyframe interpolation pipeline...")
         kf_pipeline = KeyframeInterpolationPipeline(
             transformer=model,
             video_encoder=video_encoder,
@@ -3396,7 +3394,7 @@ def generate_video(
         )
 
         # Run pipeline
-        print(f"\n[5/5] Running keyframe interpolation ({num_steps} steps)...")
+        print(f"\n=== Running keyframe interpolation ({num_steps} steps) ===")
         video = kf_pipeline(
             text_encoding=text_encoding,
             text_mask=mx.ones((1, text_encoding.shape[1]), dtype=mx.int32),
@@ -3459,14 +3457,14 @@ def generate_video(
 
         video_encoder = None
         if images:
-            print("[3.5/5] Loading VAE encoder...")
+            print("  Loading VAE encoder...")
             video_encoder = NativeConv3dVideoEncoder(compute_dtype=compute_dtype)
             if video_vae_load_path and not use_placeholder:
                 load_native_vae_encoder_weights(video_encoder, video_vae_load_path)
             else:
                 print("  Skipping weights load (placeholder)")
         elif distilled_two_stage:
-            print("[3.5/5] Loading VAE encoder statistics...")
+            print("  Loading VAE encoder statistics...")
             if video_vae_load_path and not use_placeholder:
                 video_encoder = load_native_vae_encoder_statistics(video_vae_load_path)
             else:
@@ -3477,7 +3475,7 @@ def generate_video(
                 )
                 print("  Using placeholder VAE encoder statistics")
         else:
-            print("[3.5/5] VAE encoder skipped (no image conditioning)")
+            print("  VAE encoder skipped (no image conditioning)")
 
         spatial_upscaler = None
         spatial_upscaler_loader = None
@@ -3528,7 +3526,7 @@ def generate_video(
                 audio_decoder, vocoder, audio_sample_rate = load_audio_decode_stack()
 
         # Create one-stage pipeline with audio support
-        print("\n[4/5] Creating audio-video pipeline...")
+        print("  Creating audio-video pipeline...")
         av_pipeline = AVPipeline(
             transformer=model,
             video_encoder=video_encoder,
@@ -3593,9 +3591,9 @@ def generate_video(
         # Run pipeline with audio
         if distilled_two_stage:
             print(
-                f"\n[5/5] Running distilled two-stage generation "
+                f"\n=== Running distilled two-stage generation "
                 f"({len(DISTILLED_SIGMA_VALUES) - 1}+"
-                f"{len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1} steps)..."
+                f"{len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1} steps) ==="
             )
 
             stage_labels = {
@@ -3655,7 +3653,7 @@ def generate_video(
                     spatial_upscaler_loader=spatial_upscaler_loader,
                 )
         else:
-            print(f"\n[5/5] Running audio-video generation ({num_steps} steps)...")
+            print(f"\n=== Running audio-video generation ({num_steps} steps) ===")
 
             _resolved_backend = resolve_output_backend(
                 output_backend, output_tier,
@@ -4759,12 +4757,6 @@ def main():
         duration_seconds=args.duration,
         fps=args.fps,
     )
-    if args.duration is not None:
-        print(
-            f"Resolved duration {args.duration}s at {args.fps}fps "
-            f"to {resolved_num_frames} frames"
-        )
-
     def _expand_optional_lora_values(values, count: int, option: str):
         if not values:
             return [None] * count
