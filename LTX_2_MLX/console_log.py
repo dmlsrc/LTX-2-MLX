@@ -20,9 +20,35 @@ No existing `print()` is touched: the redirection happens at the stream level.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
+import shlex
 import sys
 import threading
+
+
+def format_command(argv: list[str]) -> str:
+    """Render argv as a readable, runnable shell command.
+
+    The program name, then one continued line per argument group: a flag stays
+    on the same line as its value (`--height 448`), while bare flags
+    (`--fast-mode`) and positionals (the prompt) get their own line. This keeps
+    the command copy-pastable without breaking every token onto a separate line.
+    """
+    if not argv:
+        return ""
+    lines = [os.path.basename(argv[0])]
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        nxt = argv[i + 1] if i + 1 < len(argv) else None
+        if tok.startswith("-") and nxt is not None and not nxt.startswith("-"):
+            lines.append(f"{shlex.quote(tok)} {shlex.quote(nxt)}")
+            i += 2
+        else:
+            lines.append(shlex.quote(tok))
+            i += 1
+    return " \\\n  ".join(lines)
 
 # CSI sequences we care about positionally (A/B/J); everything else (SGR colors,
 # K, etc.) is matched so it can be dropped without leaking escapes into the file.

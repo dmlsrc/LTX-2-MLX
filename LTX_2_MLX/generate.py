@@ -4761,12 +4761,10 @@ def main():
     )
     if args.save_console_log:
         import atexit
-        import shlex
 
-        from LTX_2_MLX.console_log import start_console_capture
+        from LTX_2_MLX.console_log import format_command, start_console_capture
 
-        _argv = [os.path.basename(sys.argv[0]), *sys.argv[1:]]
-        _command = " \\\n  ".join(shlex.quote(a) for a in _argv)
+        _command = format_command(sys.argv)
         _console_path = os.path.splitext(resolved_output_path)[0] + "_console.txt"
         atexit.register(start_console_capture(_console_path, _command))
 

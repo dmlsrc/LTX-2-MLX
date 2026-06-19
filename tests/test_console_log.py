@@ -9,8 +9,22 @@ import io
 import sys
 import threading
 
-from LTX_2_MLX.console_log import _ScreenTee, _Tee, capture_console
+from LTX_2_MLX.console_log import _ScreenTee, _Tee, capture_console, format_command
 from LTX_2_MLX.progress import StackedPhaseBars
+
+
+def test_format_command_keeps_flag_and_value_on_one_line():
+    cmd = format_command(
+        ["/usr/bin/ltx2mlx", "a prompt", "--pipeline", "distilled",
+         "--height", "448", "--fast-mode", "--width", "768"]
+    )
+    lines = cmd.split(" \\\n  ")
+    assert lines[0] == "ltx2mlx"
+    assert lines[1] == "'a prompt'"          # positional on its own line, quoted
+    assert "--pipeline distilled" in lines   # flag + value together
+    assert "--height 448" in lines
+    assert "--width 768" in lines
+    assert "--fast-mode" in lines            # bare flag on its own line
 
 
 def test_single_bar_carriage_return_collapses_to_final_line():
