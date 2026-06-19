@@ -579,21 +579,12 @@ def decode_tiled(
             f"spatial={len(h_tiles.starts)}x{len(w_tiles.starts)}, "
             f"total={total_jobs}"
         )
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            tqdm = None
-    else:
-        tqdm = None
 
     pending: mx.array | None = None
     pending_weights: mx.array | None = None
     pending_start = 0
 
-    progress = (
-        tqdm(total=total_jobs, desc="Tiled decode", ncols=80, ascii=True, mininterval=2.0)
-        if tqdm else None
-    )
+    progress = None
 
     try:
         for ti in range(temporal_count):

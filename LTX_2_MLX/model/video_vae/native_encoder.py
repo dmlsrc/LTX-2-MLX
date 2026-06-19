@@ -223,12 +223,6 @@ class NativeConv3dVideoEncoder(nn.Module):
             F' = 1 + (F - 1) / 8, H' = H / 32, W' = W / 32.
         """
         pbar = None
-        try:
-            from tqdm import tqdm
-            has_tqdm = show_progress
-        except ImportError:
-            has_tqdm = False
-            tqdm = None
 
         # Validate frame count
         frames_count = video.shape[2]
@@ -246,30 +240,27 @@ class NativeConv3dVideoEncoder(nn.Module):
         x = video.transpose(0, 2, 3, 4, 1)
 
         def step(x_in, block, desc):
-            nonlocal pbar
             x_out = block(x_in, causal=True)
             mx.eval(x_out)
-            if has_tqdm and pbar is not None:
+            if pbar is not None:
                 pbar.update(1)
-                pbar.set_description(desc)
             return x_out
 
-        if has_tqdm:
-            pbar = tqdm(total=12, desc="VAE encode", ncols=80, ascii=True, mininterval=2.0)
+        if show_progress:
+            from ...progress import PhaseBar
+            pbar = PhaseBar(total=12, desc="VAE encode", unit="block")
 
         # Patchify: (B, F, H, W, 3) -> (B, F, H/4, W/4, 48) (BFHWC)
         x = patchify_spatial_bfhwc(x, patch_size=self.patch_size)
         mx.eval(x)
-        if has_tqdm and pbar is not None:
+        if pbar is not None:
             pbar.update(1)
-            pbar.set_description("patchify done")
 
         # Conv in
         x = self.conv_in(x, causal=True)
         mx.eval(x)
-        if has_tqdm and pbar is not None:
+        if pbar is not None:
             pbar.update(1)
-            pbar.set_description("conv_in done")
 
         # Down blocks
         x = step(x, self.down_blocks_0, "down_block 0")  # 128ch
@@ -289,9 +280,8 @@ class NativeConv3dVideoEncoder(nn.Module):
         # Conv out: 1024 -> 129 (128 means + 1 uniform logvar)
         x = self.conv_out(x, causal=True)
         mx.eval(x)
-        if has_tqdm and pbar is not None:
+        if pbar is not None:
             pbar.update(1)
-            pbar.set_description("conv_out done")
             pbar.close()
 
         # BFHWC (B, F', H', W', 129) -> BCFHW (B, 129, F', H', W')

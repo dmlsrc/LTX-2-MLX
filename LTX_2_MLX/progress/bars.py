@@ -1,7 +1,7 @@
 """Phase-accurate stacked progress bars for the VSR pipeline.
 
 Single-line bars rendered directly to stderr via carriage-return +
-ANSI cursor movement - no tqdm dependency. The layout matches
+ANSI cursor movement - no third-party progress-bar dependency. The layout matches
 LTX_2_MLX/generate.py's `DenoiseProgress` shape, minus the STEP1 column
 (meaningful for seconds-long denoise steps, useless for 50 ms VSR
 frames that round to "0m 00s"):
@@ -425,7 +425,7 @@ class StackedPhaseBars:
         `position` controls where the message lands relative to the bars
         in the captured / persistent terminal scrollback:
 
-        - `"above"` (default, tqdm.write() semantics):
+        - `"above"` (default, scroll-message-above-bars semantics):
             Erase the live bars, print the message at the position they
             used to occupy, then redraw the bars one (or more) lines
             further down.  Live bars stay anchored at the bottom; the

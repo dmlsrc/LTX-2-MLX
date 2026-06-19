@@ -26,7 +26,6 @@ classifiers = [
 
 dependencies = [
     "mlx>=0.31.2",
-    "tqdm>=4.68.2",
     "sentencepiece>=0.2.1",
     # Native macOS audio/video I/O (AVFoundation AVAudioFile, VideoToolbox,
     # CVPixelBuffer, CoreMedia). Mandatory: this is an Apple-Silicon-only project

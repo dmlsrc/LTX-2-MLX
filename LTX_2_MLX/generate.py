@@ -1214,47 +1214,6 @@ def get_vae_config(checkpoint_path: str) -> dict:
         return {}
 
 
-# Try to import tqdm for progress bars
-try:
-    from tqdm import tqdm
-    HAS_TQDM = True
-except ImportError:
-    HAS_TQDM = False
-    print("Note: Install tqdm for progress bars: pip install tqdm")
-
-
-def progress_bar(iterable, desc=None, total=None):
-    """Create a progress bar wrapper.
-
-    ``ascii`` and ``mininterval`` keep Terminal.app from re-rasterizing a
-    fancy unicode bar at 10 Hz while MLX is using the GPU.
-    """
-    if HAS_TQDM:
-        return tqdm(iterable, desc=desc, total=total, ncols=80, ascii=True, mininterval=2.0)
-    return _simple_progress(iterable, desc, total)
-
-
-def _simple_progress(iterable, desc, total):
-    """Simple progress fallback when tqdm is not available.
-
-    Updates at most every 2 s (and skips identical lines) so the fallback
-    matches the throttled tqdm path.
-    """
-    items = list(iterable)
-    total = len(items) if total is None else total
-    last_print = 0.0
-    last_text = ""
-    for i, item in enumerate(items):
-        now = time.perf_counter()
-        text = f"{desc}: {i+1}/{total}"
-        if (now - last_print) >= 2.0 and text != last_text:
-            print(f"\r{text}", end="", flush=True)
-            last_print = now
-            last_text = text
-        yield item
-    print()  # newline after completion
-
-
 # LTX-2 system prompt for video generation (used during encoding)
 T2V_SYSTEM_PROMPT = """Describe the video in extreme detail, focusing on the visual content, without any introductory phrases."""
 

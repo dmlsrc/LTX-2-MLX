@@ -67,31 +67,17 @@ def load_transformer_weights(
     """
     import gc
 
-    try:
-        from tqdm import tqdm
-        has_tqdm = True
-    except ImportError:
-        has_tqdm = False
-        print(f"Loading weights from {weights_path}...")
+    from ..progress import PhaseBar
 
     raw_weights = mx.load(weights_path)
-    if has_tqdm:
-        key_iter = tqdm(
-            raw_weights.items(),
-            desc="Loading transformer",
-            ncols=80,
-            total=len(raw_weights),
-            ascii=True,
-            mininterval=1.0,
-        )
-    else:
-        key_iter = raw_weights.items()
+    bar = PhaseBar(total=len(raw_weights), desc="Loading transformer", unit="tensor")
 
     weights_dict = {}
     loaded_count = 0
     skipped_count = 0
 
-    for pytorch_key, value in key_iter:
+    for pytorch_key, value in raw_weights.items():
+        bar.update(1)
         # Only process diffusion model keys
         if not pytorch_key.startswith("model.diffusion_model."):
             continue
@@ -108,6 +94,7 @@ def load_transformer_weights(
         weights_dict[mlx_key] = value
         loaded_count += 1
 
+    bar.close()
     del raw_weights
     gc.collect()
 

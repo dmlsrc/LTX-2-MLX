@@ -406,22 +406,11 @@ def load_spatial_upscaler_weights(upscaler: SpatialUpscaler, weights_path: str) 
         upscaler: SpatialUpscaler instance
         weights_path: Path to safetensors file
     """
-    try:
-        from tqdm import tqdm
-        has_tqdm = True
-    except ImportError:
-        has_tqdm = False
-
     print(f"Loading Spatial Upscaler weights from {weights_path}...")
     loaded_count = 0
     weights = mx.load(weights_path)
 
-    if has_tqdm:
-        key_iter = tqdm(weights.items(), desc="Loading upscaler", ncols=80, total=len(weights), ascii=True, mininterval=1.0)
-    else:
-        key_iter = weights.items()
-
-    for key, value in key_iter:
+    for key, value in weights.items():
         # Map weights to model
         if key == "initial_conv.weight":
             # 3D conv weight: keep as (out_C, in_C, kT, kH, kW)

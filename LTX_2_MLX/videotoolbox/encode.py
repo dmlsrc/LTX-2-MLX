@@ -244,7 +244,7 @@ def encode_video_videotoolbox(
     # (the caller is showing a "VAE chunks" bar above us), those raw prints
     # would stomp on the bar row.  Redirect them through a StringIO and
     # emit the captured block via `progress_stack.write()` so the lines
-    # land cleanly above the bars (tqdm.write-style); when no stack is
+    # land cleanly above the bars (scroll-message-above-bars style); when no stack is
     # supplied, the prints flow normally to stdout.
     _setup_buf: io.StringIO | None = None
     if progress_stack is not None:
