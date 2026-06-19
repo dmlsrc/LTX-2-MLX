@@ -375,10 +375,11 @@ independently handles the loud-dialog-onset case.
 
 Exact encoder mel front-end (reference `audio_vae/ops.py`, for a real encoder probe):
 torchaudio MelSpectrogram, sr=24000, hop_length=160, n_mels=64, hann window,
-center=True, pad_mode="reflect", power=1.0, mel_scale/norm="slaney".  Decode
-experiment: `$SHARED_TEMP_DIR/trace_analysis/audio_onset_causation.py` (latent
-flatten causation; decode a long-clip audio sidecar raw vs detect + zero-fill for a
-raw-vs-fixed A/B listen).
+center=True, pad_mode="reflect", power=1.0, mel_scale/norm="slaney".  In-repo repro:
+`scripts/decode_latent_debug.py --decode-audio` decodes a saved `final_audio_latent`
+raw (onset off), while the vsr/encode harnesses decode it with the shipped mitigation
+(onset "auto"); profile either output with `scripts/analyze_audio_onset.py` (below) for
+the raw-vs-fixed onset comparison.
 
 **Reproduction inputs:**
 - Output: any `.{mp4,wav,npz}` sidecar bundle from a generate.py run
