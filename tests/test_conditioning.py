@@ -256,15 +256,22 @@ class TestVideoConditionByLatentIndex:
         # clean_latent should be updated
         assert conditioned_state.clean_latent.shape == initial_state.clean_latent.shape
 
-        # The conditioned region in latent and clean_latent should match
+        # clean_latent carries the conditioning tokens; the noisy latent field keeps
+        # its original (generative) values so the noiser composites per the mask.
         tokens = patchifier.patchify(cond_latent)
         num_tokens = tokens.shape[1]
 
         np.testing.assert_allclose(
-            np.array(conditioned_state.latent[0, :num_tokens]),
             np.array(conditioned_state.clean_latent[0, :num_tokens]),
+            np.array(tokens[0]),
             rtol=1e-6,
-            err_msg="Conditioned region should match in latent and clean_latent",
+            err_msg="clean_latent conditioned region should hold the conditioning tokens",
+        )
+        np.testing.assert_allclose(
+            np.array(conditioned_state.latent[0, :num_tokens]),
+            np.array(initial_state.latent[0, :num_tokens]),
+            rtol=1e-6,
+            err_msg="noisy latent field should keep its original values, not the tokens",
         )
 
 

@@ -79,9 +79,11 @@ class VideoConditionByKeyframeIndex:
             dtype=latent_state.denoise_mask.dtype,
         )
 
-        # Concatenate to existing state
+        # Concatenate to existing state. The noisy latent field gets placeholder
+        # zeros at the conditioned positions; the real conditioning values live in
+        # clean_latent and are composited in by the noiser per the denoise mask.
         return LatentState(
-            latent=mx.concatenate([latent_state.latent, tokens], axis=1),
+            latent=mx.concatenate([latent_state.latent, mx.zeros_like(tokens)], axis=1),
             denoise_mask=mx.concatenate([latent_state.denoise_mask, denoise_mask], axis=1),
             positions=mx.concatenate([latent_state.positions, positions], axis=2),
             clean_latent=mx.concatenate([latent_state.clean_latent, tokens], axis=1),

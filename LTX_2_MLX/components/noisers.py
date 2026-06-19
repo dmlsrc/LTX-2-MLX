@@ -9,8 +9,11 @@ class GaussianNoiser:
     """
     Adds Gaussian noise to a latent state, scaled by the denoise mask.
 
-    The noise is blended with the original latent based on the denoise mask,
-    where mask=1 means full noise and mask=0 means original latent preserved.
+    Two-step blend matching Lightricks' GaussianNoiser: the generative latent is
+    noised by ``noise_scale``, then composited onto ``clean_latent`` per the
+    denoise mask (mask=1 -> fully noised, mask=0 -> clean_latent preserved). The
+    conditioning values therefore come from ``clean_latent``; the noisy ``latent``
+    field holds zeros at conditioned positions.
     """
 
     def __init__(self, key: mx.array | None = None):
@@ -51,19 +54,23 @@ class GaussianNoiser:
                 dtype=latent_state.latent.dtype,
             )
 
-        # Scale the denoise mask by noise_scale
         # Handle both 2D (B, T) and 3D (B, T, 1) masks from patchification
         mask = latent_state.denoise_mask
         if mask.ndim == 2:
             # Expand mask to broadcast with latent: (B, T) -> (B, T, 1)
-            scaled_mask = mx.expand_dims(mask, axis=-1) * noise_scale
-        else:
-            # Mask is already 3D (B, T, 1), use directly
-            scaled_mask = mask * noise_scale
+            mask = mx.expand_dims(mask, axis=-1)
 
-        # Blend noise with original latent based on mask
-        # Where mask=1: use noise, where mask=0: keep original
-        latent = noise * scaled_mask + latent_state.latent * (1 - scaled_mask)
+        # Two-step blend (matches Lightricks GaussianNoiser, computed in float32):
+        #   1. noise the generative latent by noise_scale at every position;
+        #   2. composite that onto clean_latent per the denoise mask, so the
+        #      conditioning values come from clean_latent (not the noisy latent
+        #      field, which holds zeros at conditioned positions).
+        # For a hard mask (0/1) or noise_scale==1 this equals the old single-step
+        # form; it differs only for fractional masks at noise_scale<1 (stage 2).
+        base = latent_state.latent.astype(mx.float32)
+        clean = latent_state.clean_latent.astype(mx.float32)
+        noised = base + noise_scale * (noise.astype(mx.float32) - base)
+        latent = clean + mask.astype(mx.float32) * (noised - clean)
 
         return latent_state.replace(latent=latent.astype(latent_state.latent.dtype))
 
@@ -107,9 +114,11 @@ class DeterministicNoiser:
         # Handle both 2D (B, T) and 3D (B, T, 1) masks from patchification
         mask = latent_state.denoise_mask
         if mask.ndim == 2:
-            scaled_mask = mx.expand_dims(mask, axis=-1) * noise_scale
-        else:
-            scaled_mask = mask * noise_scale
-        latent = noise * scaled_mask + latent_state.latent * (1 - scaled_mask)
+            mask = mx.expand_dims(mask, axis=-1)
+        # Same two-step clean_latent blend as GaussianNoiser (see there).
+        base = latent_state.latent.astype(mx.float32)
+        clean = latent_state.clean_latent.astype(mx.float32)
+        noised = base + noise_scale * (noise.astype(mx.float32) - base)
+        latent = clean + mask.astype(mx.float32) * (noised - clean)
 
         return latent_state.replace(latent=latent.astype(latent_state.latent.dtype))

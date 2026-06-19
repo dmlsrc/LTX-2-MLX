@@ -88,11 +88,11 @@ class VideoConditionByLatentIndex:
                 f"latent_idx={self.latent_idx}, tokens.shape={tokens.shape}"
             )
 
-        # Create new arrays with conditioning applied
-        # Replace latent tokens
-        latent_before = latent_state.latent[:, :start_token]
-        latent_after = latent_state.latent[:, stop_token:]
-        new_latent = mx.concatenate([latent_before, tokens, latent_after], axis=1)
+        # Conditioning values go into clean_latent only; the noisy latent field
+        # keeps its original (generative) values across the conditioned range, and
+        # the noiser composites clean_latent in per the denoise mask. (Matches
+        # Lightricks dropping the latent[start:stop] = tokens write.)
+        new_latent = latent_state.latent
 
         # Replace clean_latent tokens
         clean_before = latent_state.clean_latent[:, :start_token]
