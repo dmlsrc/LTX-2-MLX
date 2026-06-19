@@ -153,13 +153,12 @@ def load_latents(
         raise KeyError(
             f"{path} does not contain {video_key} (stage={stage!r}, {missing_hint}); keys={keys}"
         )
-    if dtype_key not in metadata:
-        raise KeyError(
-            f"{path} is missing {dtype_key} (stage={stage!r}); keys={keys}"
-        )
-
+    # The *_mlx_dtype tag exists only in the legacy npz sidecar (numpy has no
+    # bf16, so the writer widens to float32 and records the original dtype here).
+    # Safetensors preserves the dtype natively, so the tag is absent and the
+    # loaded tensor already carries the correct dtype -- no re-cast needed.
     latent_array = arrays[video_key]
-    stored_dtype = metadata[dtype_key]
+    stored_dtype = metadata.get(dtype_key)
     has_audio = audio_key in arrays
     audio_array = arrays[audio_key] if has_audio else None
     audio_shape = audio_array.shape if audio_array is not None else None
@@ -180,7 +179,7 @@ def load_latents(
 
     resolved = parse_dtype(mx_mod, latent_dtype)
     if resolved == "auto":
-        resolved = parse_dtype(mx_mod, stored_dtype)
+        resolved = parse_dtype(mx_mod, stored_dtype) if stored_dtype else None
 
     latent = latent_array
     if resolved is not None:
@@ -190,10 +189,11 @@ def load_latents(
 
     audio_latent = None
     if audio_array is not None:
-        if audio_dtype is None:
-            raise KeyError(f"{path} contains final_audio_latent but is missing final_audio_latent_mlx_dtype")
-        audio_resolved = parse_dtype(mx_mod, audio_dtype)
-        audio_latent = audio_array.astype(audio_resolved)
+        # npz widens bf16 -> float32 and tags the dtype, so re-cast when tagged;
+        # safetensors keeps the native dtype (no tag, no re-cast).
+        if audio_dtype is not None:
+            audio_array = audio_array.astype(parse_dtype(mx_mod, audio_dtype))
+        audio_latent = audio_array
         mx_mod.eval(audio_latent)
         print(f"Decode audio latent dtype: {audio_latent.dtype}")
 
