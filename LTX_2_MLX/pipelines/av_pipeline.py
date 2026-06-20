@@ -1040,9 +1040,10 @@ class AVPipeline:
             if rope_arrays:
                 mx.eval(*rope_arrays)
 
+        sigmas_host = sigmas.tolist()
         for step_idx in range(num_steps):
-            sigma = float(sigmas[step_idx])
-            sigma_next = float(sigmas[step_idx + 1])
+            sigma = sigmas_host[step_idx]
+            sigma_next = sigmas_host[step_idx + 1]
             dt = sigma_next - sigma
 
             profile_step = step_idx + 1
@@ -1147,6 +1148,8 @@ class AVPipeline:
                     denoised_sample=video_denoised,
                     sigmas=sigmas,
                     step_index=step_idx,
+                    sigma=sigma,
+                    sigma_next=sigma_next,
                 )
                 video_state = video_state.replace(latent=new_video_latent)
 
@@ -1157,6 +1160,8 @@ class AVPipeline:
                         denoised_sample=audio_denoised,
                         sigmas=sigmas,
                         step_index=step_idx,
+                        sigma=sigma,
+                        sigma_next=sigma_next,
                     )
                     audio_state = audio_state.replace(latent=new_audio_latent)
                     # Sync eval (one call, both arrays).  Profiled vs async_eval:

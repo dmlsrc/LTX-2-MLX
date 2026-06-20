@@ -591,7 +591,6 @@ class VocoderWithBWE(nn.Module):
         # Stage 1: Main vocoder (108 convolutions)
         x = self.vocoder(mel_spec)
         mx.eval(x)
-        mx.clear_cache()
 
         _, _, length_low_rate = x.shape
         output_length = (
@@ -609,7 +608,6 @@ class VocoderWithBWE(nn.Module):
         # Stage 2: Compute mel from vocoder output for BWE
         mel = self._compute_mel(x)  # (B, C, n_mels, T_frames)
         mx.eval(mel)
-        mx.clear_cache()
 
         # Stage 3: BWE generator (another 108 convolutions) + resampler
         mel_for_bwe = mel.transpose(0, 1, 3, 2)  # (B, C, T_frames, mel_bins)
@@ -617,12 +615,10 @@ class VocoderWithBWE(nn.Module):
         residual = self.bwe_generator(mel_for_bwe)
         mx.eval(residual)
         del mel_for_bwe
-        mx.clear_cache()
 
         skip = self.resampler(x)
         mx.eval(skip)
         del x  # Free base waveform
-        mx.clear_cache()
 
         result = mx.clip(residual + skip, -1, 1)[:, :, :output_length]
         mx.eval(result)
@@ -767,7 +763,6 @@ class Vocoder(nn.Module):
             x = mx.stack(block_outputs, axis=0).mean(axis=0)
 
             mx.eval(x)
-            mx.clear_cache()  # Free intermediate buffers between vocoder stages
 
         # Post-activation
         if self.is_amp and self.act_post is not None:

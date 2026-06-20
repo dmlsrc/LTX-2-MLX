@@ -388,16 +388,13 @@ class Gemma3Model(nn.Module):
             sliding_attn_mask = full_attn_mask & window_bool[None, None, :, :]
 
         # Process through layers
-        layer_iter = list(enumerate(self.layers))
-
-        for _, layer in layer_iter:
+        for layer in self.layers:
             # Add hidden states BEFORE each layer (matching PyTorch behavior)
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
             # Use the correct mask for this layer type
             layer_mask = sliding_attn_mask if layer.layer_type == "sliding_attention" else full_attn_mask
             hidden_states = layer(hidden_states, layer_mask, position_ids)
-            mx.eval(hidden_states)  # Force eval for progress tracking
 
         # Final norm
         hidden_states = self.norm(hidden_states)

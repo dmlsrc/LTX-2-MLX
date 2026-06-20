@@ -24,6 +24,9 @@ class EulerDiffusionStep:
         denoised_sample: mx.array,
         sigmas: mx.array,
         step_index: int,
+        *,
+        sigma: float | None = None,
+        sigma_next: float | None = None,
     ) -> mx.array:
         """
         Take a single Euler diffusion step.
@@ -33,6 +36,10 @@ class EulerDiffusionStep:
             denoised_sample: Predicted denoised sample from the model.
             sigmas: Full sigma schedule array.
             step_index: Current step index in the schedule.
+            sigma, sigma_next: Optional pre-extracted host floats for this
+                step.  When provided, the two scalars are not re-read from
+                ``sigmas`` (avoids a redundant device->host sync per step on
+                the hot path); when ``None`` they are extracted as before.
 
         Returns:
             Updated sample at the next sigma level, cast back to ``sample``'s
@@ -45,8 +52,10 @@ class EulerDiffusionStep:
         difference under MLX 0.31.2 (lazy graph fusion appears to elide the
         redundancy already), but reads more directly.
         """
-        sigma = float(sigmas[step_index])
-        sigma_next = float(sigmas[step_index + 1])
+        if sigma is None:
+            sigma = float(sigmas[step_index])
+        if sigma_next is None:
+            sigma_next = float(sigmas[step_index + 1])
 
         sample_dtype = sample.dtype
         sample_f32 = sample if sample.dtype == mx.float32 else sample.astype(mx.float32)

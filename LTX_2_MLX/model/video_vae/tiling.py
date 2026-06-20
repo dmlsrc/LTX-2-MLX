@@ -503,8 +503,13 @@ def _merge_temporal_pending(
     merged_t = merged_end - merged_start
 
     b, c, _t, h, w = pending.shape
+    # Blend weights vary only along T when spatial tiling is off, where they are
+    # kept as a (1, 1, T, 1, 1) column rather than a full (1, 1, T, H, W) buffer.
+    # Derive the weight spatial extent from the weights array, not the data, so
+    # this merge works for both the reduced and full-resolution shapes.
+    wh, ww = pending_weights.shape[3], pending_weights.shape[4]
     merged = mx.zeros((b, c, merged_t, h, w), dtype=mx.float32)
-    merged_weights = mx.zeros((1, 1, merged_t, h, w), dtype=mx.float32)
+    merged_weights = mx.zeros((1, 1, merged_t, wh, ww), dtype=mx.float32)
 
     pending_slice = slice(pending_start - merged_start, pending_end - merged_start)
     chunk_slice = slice(chunk_start - merged_start, chunk_end - merged_start)
@@ -514,16 +519,16 @@ def _merge_temporal_pending(
         merged_weights,
         pending_weights,
         pending_slice,
-        slice(0, h),
-        slice(0, w),
+        slice(0, wh),
+        slice(0, ww),
     )
     merged = _assign_add_5d(merged, chunk, chunk_slice, slice(0, h), slice(0, w))
     merged_weights = _assign_add_5d(
         merged_weights,
         chunk_weights,
         chunk_slice,
-        slice(0, h),
-        slice(0, w),
+        slice(0, wh),
+        slice(0, ww),
     )
     mx.eval(merged, merged_weights)
     return merged, merged_weights, merged_start
@@ -568,6 +573,12 @@ def decode_tiled(
         h_tiles = AxisTiles([0], [latent_h], [0], [0])
         w_tiles = AxisTiles([0], [latent_w], [0], [0])
 
+    # With spatial tiling inactive there is a single full-frame spatial tile and
+    # the spatial masks are all-ones, so the blend weight varies only along T.
+    # In that case keep weights as a (1, 1, T, 1, 1) column and skip both the
+    # full-resolution mask outer product and the chunk read-modify-write.
+    spatial_off = tiling_config.spatial_config is None
+
     temporal_count = len(t_tiles.starts)
     spatial_count = len(h_tiles.starts) * len(w_tiles.starts)
     total_jobs = temporal_count * spatial_count
@@ -595,7 +606,9 @@ def decode_tiled(
             )
             chunk_t = out_t_slice.stop - out_t_slice.start
             chunk = mx.zeros((b, 3, chunk_t, out_h, out_w), dtype=mx.float32)
-            chunk_weights = mx.zeros((1, 1, chunk_t, out_h, out_w), dtype=mx.float32)
+            weights_h = 1 if spatial_off else out_h
+            weights_w = 1 if spatial_off else out_w
+            chunk_weights = mx.zeros((1, 1, chunk_t, weights_h, weights_w), dtype=mx.float32)
             mx.eval(chunk, chunk_weights)
 
             for hi in range(len(h_tiles.starts)):
@@ -631,30 +644,39 @@ def decode_tiled(
 
                     decoded = decoded[:, :, :actual_t, :actual_h, :actual_w].astype(mx.float32)
 
-                    mask = (
-                        mask_t[:actual_t].reshape(1, 1, actual_t, 1, 1)
-                        * mask_h[:actual_h].reshape(1, 1, 1, actual_h, 1)
-                        * mask_w[:actual_w].reshape(1, 1, 1, 1, actual_w)
-                    ).astype(mx.float32)
-
                     actual_t_slice = slice(0, actual_t)
                     actual_h_slice = slice(out_h_slice.start, out_h_slice.start + actual_h)
                     actual_w_slice = slice(out_w_slice.start, out_w_slice.start + actual_w)
 
-                    chunk = _assign_add_5d(
-                        chunk,
-                        decoded * mask,
-                        actual_t_slice,
-                        actual_h_slice,
-                        actual_w_slice,
-                    )
-                    chunk_weights = _assign_add_5d(
-                        chunk_weights,
-                        mask,
-                        actual_t_slice,
-                        actual_h_slice,
-                        actual_w_slice,
-                    )
+                    if spatial_off:
+                        # All-ones spatial masks: weight by the temporal ramp
+                        # only, and assign directly into the freshly-zeroed chunk
+                        # (single spatial tile, so there is no overlap to add).
+                        mask = mask_t[:actual_t].reshape(1, 1, actual_t, 1, 1).astype(mx.float32)
+                        chunk[:, :, actual_t_slice, actual_h_slice, actual_w_slice] = (
+                            decoded * mask
+                        )
+                        chunk_weights[:, :, actual_t_slice, :, :] = mask
+                    else:
+                        mask = (
+                            mask_t[:actual_t].reshape(1, 1, actual_t, 1, 1)
+                            * mask_h[:actual_h].reshape(1, 1, 1, actual_h, 1)
+                            * mask_w[:actual_w].reshape(1, 1, 1, 1, actual_w)
+                        ).astype(mx.float32)
+                        chunk = _assign_add_5d(
+                            chunk,
+                            decoded * mask,
+                            actual_t_slice,
+                            actual_h_slice,
+                            actual_w_slice,
+                        )
+                        chunk_weights = _assign_add_5d(
+                            chunk_weights,
+                            mask,
+                            actual_t_slice,
+                            actual_h_slice,
+                            actual_w_slice,
+                        )
 
                     mx.eval(chunk, chunk_weights)
                     del decoded, mask, tile_latent
