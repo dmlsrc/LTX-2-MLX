@@ -49,7 +49,8 @@ def render_comparison(
         alpha = mx.full((out_h, out_w, 1), 255, dtype=mx.uint8)
         rgba = mx.concatenate([rgba, alpha], axis=-1)
 
-    src = bytes(memoryview(mx.contiguous(rgba)))
+    # memoryview view of the frame; NSData copies it, so no intermediate bytes.
+    src = memoryview(mx.contiguous(rgba)).cast("B")
     data = Foundation.NSData.dataWithBytes_length_(src, len(src))
     pre_ci = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
         data, out_w * 4, (out_w, out_h),
