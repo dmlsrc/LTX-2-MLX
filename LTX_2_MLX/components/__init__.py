@@ -3,7 +3,6 @@
 from .diffusion_steps import (
     EulerDiffusionStep,
     HeunDiffusionStep,
-    Res2sDiffusionStep,
 )
 from .guiders import (
     CFGGuider,
@@ -29,7 +28,6 @@ from .perturbations import (
     create_batched_stg_config,
     create_stg_perturbation,
 )
-from .res2s import get_res2s_coefficients, phi
 from .schedulers import (
     DISTILLED_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
@@ -58,9 +56,6 @@ __all__ = [
     # Diffusion steps
     "EulerDiffusionStep",
     "HeunDiffusionStep",
-    "Res2sDiffusionStep",
-    "phi",
-    "get_res2s_coefficients",
     # Patchifiers
     "VideoLatentPatchifier",
     "AudioPatchifier",
