@@ -507,7 +507,8 @@ def build_vae_tiling_config(
     spatial_overlap_pixels: int = 64,
 ) -> tuple[TilingConfig | None, bool]:
     """Resolve CLI VAE tiling knobs before handing off to a pipeline."""
-    if mode == "off":
+    if mode == "single":
+        # Single-pass decode: no tiling config; the caller passes single_pass=True.
         return None, False
     if mode == "auto":
         if force_tiled:
@@ -553,9 +554,12 @@ def build_vae_tiling_config(
 def describe_vae_tiling_config(
     tiling_config: TilingConfig | None,
     auto_tiling: bool,
+    single_pass: bool = False,
 ) -> str:
+    if single_pass:
+        return "single (one decode)"
     if tiling_config is None:
-        return "auto (off)" if auto_tiling else "off"
+        return "auto (fits)" if auto_tiling else "single (one decode)"
 
     parts = []
     temporal = tiling_config.temporal_config
@@ -2065,7 +2069,6 @@ def generate_video(
     vae_temporal_overlap_frames: int = 24,
     vae_spatial_tile_pixels: int | None = None,
     vae_spatial_overlap_pixels: int = 64,
-    decode_single_pass: bool = False,
     pipeline_type: str = "text-to-video",
     enhance_prompt_flag: bool = False,
     cross_attn_scale: float = 1.0,
@@ -2315,6 +2318,7 @@ def generate_video(
         mlx_cache_limit_bytes = int(mlx_cache_limit_gb * (1000**3))
         mx.set_cache_limit(mlx_cache_limit_bytes)
         mx.clear_cache()
+    decode_single_pass = vae_tiling_mode == "single"
     vae_tiling_config, vae_auto_tiling = build_vae_tiling_config(
         vae_tiling_mode,
         height=height,
@@ -2483,7 +2487,7 @@ def generate_video(
             "(denoise only; VAE/audio/vocoder keep compute dtype)"
         )
     if not skip_vae:
-        print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
+        print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling, single_pass=decode_single_pass)}")
     if skip_vae:
         print("VAE decoding: SKIPPED")
     elif vae_decoder_backend == "native":
@@ -4696,23 +4700,15 @@ def main():
     )
     parser.add_argument(
         "--vae-tiling",
-        choices=["auto", "off", "custom"],
+        choices=["auto", "single", "custom"],
         default="auto",
         help=(
-            "VAE decode tiling policy. auto and off both let the decoder pick a plan "
-            "sized to the memory budget + the int32 Conv3d boundary (one decode if it "
-            "fits, else bounded tiles); custom uses the tile sizes below. Use "
-            "--decode-single-pass to force one decode regardless of size."
-        ),
-    )
-    parser.add_argument(
-        "--decode-single-pass",
-        action="store_true",
-        help=(
-            "Decode the whole clip in ONE native Conv3d call (no tiling, no chunking). "
-            "Logs whether the frame count crosses the int32 Conv3d output-addressing "
-            "boundary -- frames past it decode white (silent). Safe well past ~7 frames; "
-            "the boundary is resolution-dependent (e.g. ~273 frames at 1280x768)."
+            "VAE decode policy. auto sizes a plan to the memory budget + the int32 "
+            "Conv3d boundary (one decode if the clip fits, else bounded tiles). single "
+            "forces ONE decode regardless of size -- it logs whether the frame count "
+            "crosses the int32 boundary, past which frames decode white (silent); the "
+            "boundary is resolution-dependent (e.g. ~273 frames at 1280x768). custom uses "
+            "the tile sizes below."
         ),
     )
     parser.add_argument(
@@ -4999,7 +4995,6 @@ def main():
         stage2_lora_fuse_mode=args.stage2_lora_fuse_mode,
         tiled_vae=args.tiled_vae,
         vae_tiling_mode=args.vae_tiling,
-        decode_single_pass=args.decode_single_pass,
         vae_temporal_tile_frames=args.vae_temporal_tile_frames,
         vae_temporal_overlap_frames=args.vae_temporal_overlap_frames,
         vae_spatial_tile_pixels=args.vae_spatial_tile_pixels,

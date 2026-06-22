@@ -1330,7 +1330,7 @@ one frame is `4,718,592` elements, and `2^31 / 4,718,592 = 455.11`.  The
 last fully good frame is `454`; frame `455` is a transition; frame `456+`
 collapses (white tail).  MLX PR `ml-explore/mlx#3524` appears to fix this
 implicit Conv3d pointer-offset overflow; once a local MLX release includes
-that PR, retest 1024x576 native Conv3d with `--vae-tiling off`.
+that PR, retest 1024x576 native Conv3d with `--vae-tiling single`.
 
 Temporal-only multi-tile native Conv3d decode avoids the tail at 1024x576:
 
@@ -1463,7 +1463,7 @@ results on bakery 512x288x481:
 
 End-to-end bakery AV smoke with warm caches, `r16` resident-group compile,
 FF pretranspose, attn pretranspose, `--vae-decoder native`,
-`--vae-tiling off`: denoise RUN 7m08s avg 53.4 s/it; total 8m07s.  Native
+`--vae-tiling single`: denoise RUN 7m08s avg 53.4 s/it; total 8m07s.  Native
 Conv3d at 512x288 with no tiling is the fastest decode mode measured.
 
 ### Terminal redraw throttling
