@@ -2065,6 +2065,7 @@ def generate_video(
     vae_temporal_overlap_frames: int = 24,
     vae_spatial_tile_pixels: int | None = None,
     vae_spatial_overlap_pixels: int = 64,
+    decode_single_pass: bool = False,
     pipeline_type: str = "text-to-video",
     enhance_prompt_flag: bool = False,
     cross_attn_scale: float = 1.0,
@@ -3180,6 +3181,7 @@ def generate_video(
         frames = iter_decoded_frames(
             video_latent, pipeline.video_decoder,
             tiling=config.tiling_config, output_format="uint8_rgb",
+            single_pass=decode_single_pass,
         )
 
         if audio_waveform is not None:
@@ -3319,6 +3321,7 @@ def generate_video(
         frames = iter_decoded_frames(
             video_latent, ic_pipeline.video_decoder,
             tiling=config.tiling_config, output_format="uint8_rgb",
+            single_pass=decode_single_pass,
         )
 
         # Save video
@@ -3424,6 +3427,7 @@ def generate_video(
         frames = iter_decoded_frames(
             video_latent, kf_pipeline.video_decoder,
             tiling=config.tiling_config, output_format="uint8_rgb",
+            single_pass=decode_single_pass,
         )
 
         # Save video
@@ -3785,6 +3789,7 @@ def generate_video(
                         final_video_latent, av_pipeline.video_decoder,
                         tiling=effective_tiling,
                         output_format="fp16_rgba",
+                        single_pass=decode_single_pass,
                     ):
                         vae_pbar.update(1)
                         for i, frame in enumerate(chunk_frames):
@@ -4699,6 +4704,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--decode-single-pass",
+        action="store_true",
+        help=(
+            "Decode the whole clip in ONE native Conv3d call (no tiling, no chunking). "
+            "Logs whether the frame count crosses the int32 Conv3d output-addressing "
+            "boundary -- frames past it decode white (silent). Safe well past ~7 frames; "
+            "the boundary is resolution-dependent (e.g. ~273 frames at 1280x768)."
+        ),
+    )
+    parser.add_argument(
         "--vae-temporal-tile-frames",
         type=parse_non_negative_int,
         default=None,
@@ -4982,6 +4997,7 @@ def main():
         stage2_lora_fuse_mode=args.stage2_lora_fuse_mode,
         tiled_vae=args.tiled_vae,
         vae_tiling_mode=args.vae_tiling,
+        decode_single_pass=args.decode_single_pass,
         vae_temporal_tile_frames=args.vae_temporal_tile_frames,
         vae_temporal_overlap_frames=args.vae_temporal_overlap_frames,
         vae_spatial_tile_pixels=args.vae_spatial_tile_pixels,

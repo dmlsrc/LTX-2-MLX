@@ -51,7 +51,11 @@ from typing import Any
 
 import mlx.core as mx
 
-from ..model.video_vae.tiling import TilingConfig, decode_streaming
+from ..model.video_vae.tiling import (
+    TilingConfig,
+    decode_single_pass,
+    decode_streaming,
+)
 
 # Per-frame list vs. single (T,H,W,C) ndarray.  Default is the
 # per-frame list because the downstream loop can null each entry as
@@ -136,6 +140,7 @@ def iter_decoded_chunks(
     tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
     compute_dtype: Any = mx.bfloat16,
+    single_pass: bool = False,
 ) -> Iterator[list[mx.array]]:
     """Yield decoded chunks as per-frame MLX-array lists.
 
@@ -149,6 +154,21 @@ def iter_decoded_chunks(
     `TilingConfig.auto()` decides no tiling is needed).
     """
     convert = _converter_for(output_format)
+
+    if single_pass:
+        # --decode-single-pass: one decoder call over the whole clip, no tiling or
+        # chunking. decode_single_pass logs whether the frame count crosses the
+        # int32 Conv3d boundary (frames past it decode white). One big yield.
+        video = decode_single_pass(latent, decoder)
+        out = convert(video)
+        del video
+        try:
+            mx.clear_cache()
+        except Exception:
+            pass
+        gc.collect()
+        yield out
+        return
 
     # decode_streaming handles tiling=None (no spatial tiling + the default
     # temporal chunking), so the no-tiling path streams like any other and never
@@ -173,6 +193,7 @@ def iter_decoded_frames(
     tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
     compute_dtype: Any = mx.bfloat16,
+    single_pass: bool = False,
 ) -> Iterator[mx.array]:
     """Flat per-frame iterator over the chunked decode.
 
@@ -192,6 +213,7 @@ def iter_decoded_frames(
         tiling=tiling,
         output_format=output_format,
         compute_dtype=compute_dtype,
+        single_pass=single_pass,
     ):
         # Null each slot as its frame is handed off: the decoded frame frees on
         # consume, so the per-chunk peak resident frame count drops linearly.

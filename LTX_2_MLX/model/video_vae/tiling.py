@@ -11,11 +11,15 @@ paths.
 from __future__ import annotations
 
 import gc
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import mlx.core as mx
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_TEMPORAL_SCALE = 8
 DEFAULT_SPATIAL_SCALE = 32
@@ -532,6 +536,46 @@ def _merge_temporal_pending(
     )
     mx.eval(merged, merged_weights)
     return merged, merged_weights, merged_start
+
+
+def decode_single_pass(
+    latent: Any, decoder: Any, *, timestep: float | None = 0.05
+) -> mx.array:
+    """Decode the WHOLE latent in one decoder call -- no tiling, no chunking.
+
+    The opt-in escape hatch (``--decode-single-pass``). Returns the raw
+    ``(B, C, T, H, W)`` decoder output in [-1, 1]; the caller converts. Holds the
+    entire decoded video resident at once.
+
+    The real ceiling is the MLX native Conv3d's int32 output addressing: once the
+    decode crosses ~2**31 elements at the ``ceil(H/8) * ceil(W/8) * 512``-channel
+    stage, the output index overflows and **every frame past that point decodes
+    pure white** (frames before it are correct), silently, with no error. Safe
+    only when the frame count is within ``_native_conv3d_safe_frames(H, W)`` for
+    the output resolution -- this logs a WARNING naming the exact white-onset
+    frame otherwise. Use ``decode_streaming`` for anything larger.
+    """
+    if latent.ndim == 4:
+        latent = latent[None]
+    _, _, lt, lh, lw = latent.shape
+    n_frames = 1 + (int(lt) - 1) * DEFAULT_TEMPORAL_SCALE
+    out_h = int(lh) * DEFAULT_SPATIAL_SCALE
+    out_w = int(lw) * DEFAULT_SPATIAL_SCALE
+    safe = _native_conv3d_safe_frames(out_h, out_w)
+    if n_frames > safe:
+        _log.warning(
+            "decode_single_pass: %d frames at %dx%d EXCEEDS the int32 Conv3d boundary "
+            "(%d safe frames). Frames %d..%d will decode WHITE (silent); frames 0..%d "
+            "are correct. Use decode_streaming or reduce frames/resolution.",
+            n_frames, out_w, out_h, safe, safe, n_frames - 1, safe - 1,
+        )
+    else:
+        _log.info(
+            "decode_single_pass: %d frames at %dx%d is within the int32 Conv3d boundary "
+            "(%d safe frames); single-pass decode is safe.",
+            n_frames, out_w, out_h, safe,
+        )
+    return decoder(latent, timestep=timestep)
 
 
 def decode_streaming(

@@ -1,6 +1,5 @@
 """Video VAE encoder and decoder (native MLX Conv3d, BFHWC)."""
 
-from .decode_utils import decode_single_pass
 from .native_decoder import (
     NativeConv3dVideoDecoder,
     load_native_vae_decoder_weights,
@@ -21,6 +20,7 @@ from .tiling import (
     TemporalChunkConfig,
     TilingConfig,
     compute_trapezoidal_mask_1d,
+    decode_single_pass,
     decode_streaming,
 )
 

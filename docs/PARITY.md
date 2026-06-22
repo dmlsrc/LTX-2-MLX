@@ -251,8 +251,8 @@ Official precision baseline:
   final cos/sin to hidden dtype.
 - BWE vocoder is a scoped FP32 island and then returns the input dtype.  This is
   official parity behavior, not a local bug.
-- HQ / res2s is not the distilled two-stage path, but if ported it has deliberate
-  FP64 sampler math.
+- HQ / res2s (the second-order Res2s sampler pipeline) was removed as dead code
+  with no caller; if it is ever re-added it would need deliberate FP64 sampler math.
 
 Findings:
 

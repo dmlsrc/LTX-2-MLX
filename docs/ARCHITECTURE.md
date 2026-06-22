@@ -66,7 +66,7 @@ LTX_2_MLX/
 │   │   ├── native_blocks.py  # Shared Conv3d/ResBlock primitives for encoder + decoder
 │   │   ├── native_decoder.py # Production MLX-native Conv3d VAE decoder
 │   │   ├── native_encoder.py # Production MLX-native Conv3d VAE encoder
-│   │   ├── decode_utils.py   # decode_latent() polymorphic decode helper
+│   │   ├── tiling.py         # decode_streaming() + decode_single_pass(): the decode paths + tiling config
 │   │   └── ops.py            # Depth-to-space, pixel shuffle operations
 │   │
 │   ├── audio_vae/
