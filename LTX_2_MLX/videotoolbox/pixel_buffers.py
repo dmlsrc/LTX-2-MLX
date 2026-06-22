@@ -213,11 +213,6 @@ def _frame_buffer(frame: Any) -> memoryview:
     return memoryview(frame.tobytes())  # non-contiguous numpy fallback
 
 
-def _frame_bytes(frame: Any) -> bytes:
-    """Raw bytes of a frame (copies; for the NSData/CoreImage path that copies anyway)."""
-    return bytes(_frame_buffer(frame))
-
-
 def write_fp16_rgba(rgba_fp16: Any, pb: Any) -> None:
     """Memcpy a (H,W,4) fp16 RGBA frame (mlx or numpy) into a RGBAHalf CVPixelBuffer.
 
@@ -288,7 +283,7 @@ def upload_frame_to_buffer(frame: Any, pb: Any) -> None:
     # NV12 (and any other format CoreImage can render into). Pick the CIImage
     # source format from the input dtype: RGBAh for fp16, RGBA8 for uint8.
     if _frame_is_fp16(frame):
-        src = _frame_bytes(frame)
+        src = _frame_buffer(frame)
         data = Foundation.NSData.dataWithBytes_length_(src, len(src))
         ci_image = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
             data, w * 8, (w, h), Quartz.kCIFormatRGBAh, srgb_colorspace(),
@@ -299,7 +294,7 @@ def upload_frame_to_buffer(frame: Any, pb: Any) -> None:
     # uint8 RGB -> opaque RGBA8 for CoreImage.
     f = frame if isinstance(frame, mx.array) else mx.array(frame)
     alpha = mx.full((h, w, 1), 255, dtype=mx.uint8)
-    src = _frame_bytes(mx.concatenate([f, alpha], axis=-1))
+    src = _frame_buffer(mx.concatenate([f, alpha], axis=-1))
     data = Foundation.NSData.dataWithBytes_length_(src, len(src))
     ci_image = Quartz.CIImage.alloc().initWithBitmapData_bytesPerRow_size_format_colorSpace_(
         data, w * 4, (w, h), Quartz.kCIFormatRGBA8, srgb_colorspace(),
