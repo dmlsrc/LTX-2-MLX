@@ -422,8 +422,6 @@ def tiling_config_for_mode(mode: str, latent: Any | None = None):
         TilingConfig,
     )
 
-    if mode == "none":
-        return None
     if mode == "auto":
         if latent is None:
             raise ValueError("mode=auto requires a latent to infer decoded dimensions")
@@ -787,7 +785,7 @@ def main(argv: list[str] | None = None) -> None:
         nargs="+",
         default=["auto"],
         help=(
-            "Modes: none, auto, default, spatial64, spatial128, temporal24, temporal32, "
+            "Modes: auto, default, spatial64, spatial128, temporal24, temporal32, "
             "both64_24, both384_24, both256_24, both128_24, both128_32, test_small_both"
         ),
     )
