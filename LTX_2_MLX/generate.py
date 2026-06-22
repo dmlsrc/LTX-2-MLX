@@ -4699,8 +4699,10 @@ def main():
         choices=["auto", "off", "custom"],
         default="auto",
         help=(
-            "VAE decode tiling policy. auto preserves the pipeline default, off decodes "
-            "the full latent volume, and custom uses the tile sizes below."
+            "VAE decode tiling policy. auto and off both let the decoder pick a plan "
+            "sized to the memory budget + the int32 Conv3d boundary (one decode if it "
+            "fits, else bounded tiles); custom uses the tile sizes below. Use "
+            "--decode-single-pass to force one decode regardless of size."
         ),
     )
     parser.add_argument(

@@ -584,27 +584,31 @@ def decode_streaming(
     tiling_config: TilingConfig | None = None,
     timestep: float | None = 0.05,
     show_progress: bool = True,
-    key: mx.array | None = None,
 ) -> Iterator[mx.array]:
     """Decode a latent tensor by tiles, yielding blended chunks.
 
-    ``tiling_config=None`` means no spatial tiling plus the default temporal
-    chunking, matched to the historical 7-latent-frame / 2-overlap decode (chunk
-    and overlap are pixel-space, so x the 8x temporal scale gives 56 / 16). This
-    is the single decode path -- every caller streams, and "no tiling" never
-    means accumulate the whole video.
+    ``tiling_config=None`` means "no explicit tiling": a plan is derived from the
+    latent's own output dimensions with the same native-Conv3d auto logic, bounded
+    by the estimated memory budget and the int32 Conv3d boundary. auto returns None
+    when the whole clip fits in one decode, so that is single-passed (one decoder
+    call, one yield); otherwise it streams the memory/int32-bounded tile plan. "No
+    tiling" never accumulates the whole video on a clip that does not fit.
     """
-    del key  # Reserved for API compatibility.
+    b, _c, latent_t, latent_h, latent_w = latent.shape
 
     if tiling_config is None:
-        tiling_config = TilingConfig(
-            spatial_config=None,
-            temporal_config=TemporalChunkConfig(
-                chunk_size_in_frames=56, chunk_overlap_in_frames=16
-            ),
+        out_frames = 1 + (int(latent_t) - 1) * DEFAULT_TEMPORAL_SCALE
+        tiling_config = TilingConfig.auto_native_conv3d(
+            int(latent_h) * DEFAULT_SPATIAL_SCALE,
+            int(latent_w) * DEFAULT_SPATIAL_SCALE,
+            out_frames,
         )
+        if tiling_config is None:
+            # Whole clip fits under the memory budget + the int32 Conv3d boundary:
+            # one decoder call, one yield, no chunking.
+            yield decoder_fn(latent, timestep=timestep, show_progress=show_progress)
+            return
 
-    b, _c, latent_t, latent_h, latent_w = latent.shape
     scale_t, scale_h, scale_w = (
         DEFAULT_TEMPORAL_SCALE,
         DEFAULT_SPATIAL_SCALE,

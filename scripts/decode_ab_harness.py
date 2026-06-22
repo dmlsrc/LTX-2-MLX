@@ -71,7 +71,6 @@ def decode_latent(
     latent: mx.array,
     decoder: Any,
     timestep: float | None = 0.05,
-    key: mx.array | None = None,
     temporal_chunk_size: int = 7,
     temporal_overlap: int = 2,
     dtype: Any | None = None,
@@ -88,7 +87,6 @@ def decode_latent(
     dtype: None / uint8 -> (T, H, W, 3) uint8; a float dtype -> raw (B, C, T, H, W)
     in [-1, 1].
     """
-    del key  # Reserved for API parity with the former product signature.
     if latent.ndim == 4:
         latent = latent[None]
 

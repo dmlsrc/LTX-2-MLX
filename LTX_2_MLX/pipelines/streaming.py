@@ -170,9 +170,10 @@ def iter_decoded_chunks(
         yield out
         return
 
-    # decode_streaming handles tiling=None (no spatial tiling + the default
-    # temporal chunking), so the no-tiling path streams like any other and never
-    # accumulates the whole video. (compute_dtype is vestigial here -- the
+    # decode_streaming handles tiling=None by running the native-Conv3d auto logic
+    # (one decode if the clip fits the memory budget + the int32 boundary, else
+    # memory/int32-bounded tiles), so the no-tiling path streams without ever
+    # accumulating the whole video. (compute_dtype is vestigial here -- the
     # per-chunk converter owns the final dtype, as the tiled path already did.)
     for chunk in decode_streaming(latent, decoder, tiling, show_progress=False):
         out = convert(chunk)
