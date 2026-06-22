@@ -51,8 +51,11 @@ from typing import Any
 
 import mlx.core as mx
 
-from ..model.video_vae.decode_utils import decode_latent
-from ..model.video_vae.tiling import TilingConfig, decode_tiled
+from ..model.video_vae.tiling import (
+    TemporalTilingConfig,
+    TilingConfig,
+    decode_tiled,
+)
 
 # Per-frame list vs. single (T,H,W,C) ndarray.  Default is the
 # per-frame list because the downstream loop can null each entry as
@@ -152,24 +155,23 @@ def iter_decoded_chunks(
     convert = _converter_for(output_format)
 
     if tiling is None:
-        # Single-shot decode.  decode_latent does its own internal
-        # temporal chunking + overlap blending; the result is a full
-        # (B,C,T,H,W) tensor in `compute_dtype`.  We then convert in
-        # one shot and free.
-        video = decode_latent(latent, decoder, dtype=compute_dtype)
-        try:
-            mx.clear_cache()
-        except Exception:
-            pass
-        out = convert(video)
-        del video
-        try:
-            mx.clear_cache()
-        except Exception:
-            pass
-        gc.collect()
-        yield out
-        return
+        # "No tiling" no longer means "accumulate the whole video." Synthesize a
+        # temporal-only config matched to decode_latent's chunking (7 latent
+        # frames / 2 overlap; tile sizes are pixel-space, so x the temporal scale
+        # of 8 gives 56 / 16) and stream through decode_tiled. A clip short enough
+        # to be a single chunk reproduces the old single-shot result; a long clip
+        # tapers to one temporal chunk's worth instead of the full video. This
+        # keeps the streaming path actually streaming once the MLX conv3d overflow
+        # fix stops forcing tiling on moderate clips. (compute_dtype is now
+        # vestigial here -- decode_tiled returns the decoder's native output and
+        # the per-chunk converter owns the final dtype, as the tiled path already
+        # did.)
+        tiling = TilingConfig(
+            spatial_config=None,
+            temporal_config=TemporalTilingConfig(
+                tile_size_in_frames=56, tile_overlap_in_frames=16
+            ),
+        )
 
     for chunk in decode_tiled(latent, decoder, tiling, show_progress=False):
         out = convert(chunk)
