@@ -210,13 +210,13 @@ def iter_decoded_frames(
         output_format=output_format,
         compute_dtype=compute_dtype,
     ):
-        # `pop(0)` lets the inner list shrink as frames are yielded,
-        # so the per-chunk peak resident frame count drops linearly as
-        # the consumer drains the chunk - even though Python's list
-        # backing array won't shrink physically until the list is
-        # destroyed at end-of-iteration.
-        while chunk_frames:
-            yield chunk_frames.pop(0)
+        # Null each slot as its frame is handed off: the decoded frame frees on
+        # consume, so the per-chunk peak resident frame count drops linearly.
+        # Indexed drain is O(n) vs `pop(0)`'s O(n^2); a plain
+        # `for frame in chunk_frames` would pin the whole chunk and break the taper.
+        for i, frame in enumerate(chunk_frames):
+            chunk_frames[i] = None
+            yield frame
 
 
 def latent_dims(latent: Any) -> tuple[int, int, int]:

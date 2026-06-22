@@ -3769,8 +3769,11 @@ def generate_video(
                         output_format="fp16_rgba",
                     ):
                         vae_pbar.update(1)
-                        while chunk_frames:
-                            yield chunk_frames.pop(0)
+                        for i, frame in enumerate(chunk_frames):
+                            # Null the slot at hand-off so the decoded frame frees
+                            # as consumed; plain iteration would pin the whole chunk.
+                            chunk_frames[i] = None
+                            yield frame
 
                 final_path = encode_video_dispatch(
                     _chunk_aware_frames(), output_path,
