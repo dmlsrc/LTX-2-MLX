@@ -411,22 +411,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         print("NPZ has no audio latent; encoding video-only.")
 
     # Resolve tiling the same way LTX_2_MLX/generate.py does. With the
-    # native backend `TilingConfig.auto` may return None (no tiling
-    # needed) and the decode runs as a single pass through decode_latent -
-    # NO spatial seams. The legacy simple-decoder branch always splits
-    # spatially for width > 512, which is what was creating edge artifacts.
-    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
+    # native backend `TilingConfig.auto` may return None (no spatial tiling
+    # needed); decode_streaming handles None (no spatial tiling + default
+    # temporal chunking) and streams either way. The legacy simple-decoder
+    # branch always split spatially for width > 512, which created edge artifacts.
     from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_streaming
     tiling_cfg = TilingConfig.auto(
         height=height, width=width, num_frames=n_frames,
         decoder_backend=args.vae_decoder_backend,
     )
     if tiling_cfg is None:
-        print("VAE tiling: off (auto picked single-shot decode for this backend/shape)")
-        def chunk_iter():
-            video = decode_latent(latent, decoder)
-            mx.eval(video)
-            yield video
+        print("VAE tiling: off (no spatial tiling; default temporal chunking)")
     else:
         sp = tiling_cfg.spatial_config
         tp = tiling_cfg.temporal_config
@@ -439,8 +434,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             if tp else "no temporal tiling"
         )
         print(f"VAE tiling: {spatial_desc}, {temporal_desc}")
-        def chunk_iter():
-            yield from decode_streaming(latent, decoder, tiling_cfg, show_progress=True)
+
+    def chunk_iter():
+        yield from decode_streaming(latent, decoder, tiling_cfg, show_progress=True)
 
     # Pipelined decode -> per-encoder writer queues -> ffmpeg.
     # Subprocesses launch BEFORE the decode loop so libx265 can start chewing

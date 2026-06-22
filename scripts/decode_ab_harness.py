@@ -56,7 +56,6 @@ for _p in (str(_SCRIPTS.parent), str(_SCRIPTS)):
 from decode_latent_debug import make_decoder  # noqa: E402
 
 from LTX_2_MLX import sidecars  # noqa: E402
-from LTX_2_MLX.model.video_vae.decode_utils import decode_latent  # noqa: E402
 from LTX_2_MLX.model.video_vae.tiling import (  # noqa: E402
     TemporalChunkConfig,
     TilingConfig,
@@ -66,6 +65,94 @@ from LTX_2_MLX.model.video_vae.tiling import (  # noqa: E402
 # Matches decode_latent(temporal_chunk_size=7, temporal_overlap=2); tile sizes are
 # pixel-space, multiplied through the 8x temporal VAE scale.
 _MATCHED_TILE = TemporalChunkConfig(chunk_size_in_frames=56, chunk_overlap_in_frames=16)
+
+
+def decode_latent(
+    latent: mx.array,
+    decoder: Any,
+    timestep: float | None = 0.05,
+    key: mx.array | None = None,
+    temporal_chunk_size: int = 7,
+    temporal_overlap: int = 2,
+    dtype: Any | None = None,
+) -> mx.array:
+    """Accumulate-and-blend decode -- the A/B baseline this harness measures against.
+
+    This is the decode the product pipelines ran before they switched to streaming
+    (``decode_streaming``). It lives here, not in the product package, because the
+    only remaining reason to keep it is to compare the streamed decode against it.
+    Decodes in overlapping temporal chunks (``temporal_chunk_size`` latent frames,
+    blended over ``temporal_overlap``) to dodge the MLX conv3d early-frame noise
+    bug, accumulating into one whole-video tensor.
+
+    dtype: None / uint8 -> (T, H, W, 3) uint8; a float dtype -> raw (B, C, T, H, W)
+    in [-1, 1].
+    """
+    del key  # Reserved for API parity with the former product signature.
+    if latent.ndim == 4:
+        latent = latent[None]
+
+    T = latent.shape[2]
+    if T <= temporal_chunk_size:
+        video = decoder(latent, timestep=timestep)
+    else:
+        def latent_t_to_pixel_t(lt):
+            pt = lt
+            for _ in range(3):
+                pt = pt * 2 - 1
+            return pt
+
+        total_pixel_frames = latent_t_to_pixel_t(T)
+        stride = temporal_chunk_size - temporal_overlap
+        decoded_chunks = []
+        t = 0
+        while t < T:
+            end = min(t + temporal_chunk_size, T)
+            if end - t < temporal_overlap + 1 and t > 0:
+                t = max(0, end - temporal_chunk_size)
+                end = min(t + temporal_chunk_size, T)
+            chunk_latent = latent[:, :, t:end, :, :]
+            chunk_video = decoder(chunk_latent, timestep=timestep)
+            mx.eval(chunk_video)
+            decoded_chunks.append((t, end, chunk_video))
+            if end >= T:
+                break
+            t += stride
+
+        if len(decoded_chunks) == 1:
+            video = decoded_chunks[0][2][:, :, :total_pixel_frames, :, :]
+        else:
+            overlap_pixel_ref = latent_t_to_pixel_t(temporal_overlap)
+            video = decoded_chunks[0][2]
+            for i in range(1, len(decoded_chunks)):
+                _curr_start_l, _curr_end_l, curr_video = decoded_chunks[i]
+                curr_pixel_len = curr_video.shape[2]
+                overlap_pixels = min(overlap_pixel_ref, curr_pixel_len, video.shape[2])
+                if overlap_pixels <= 1:
+                    video = mx.concatenate([video, curr_video], axis=2)
+                    continue
+                prev_overlap = video[:, :, -overlap_pixels:, :, :]
+                curr_overlap = curr_video[:, :, :overlap_pixels, :, :]
+                curr_tail = curr_video[:, :, overlap_pixels:, :, :]
+                ramp = mx.linspace(0.0, 1.0, overlap_pixels).reshape(1, 1, overlap_pixels, 1, 1)
+                blended = prev_overlap * (1.0 - ramp) + curr_overlap * ramp
+                video = mx.concatenate(
+                    [video[:, :, :-overlap_pixels, :, :], blended, curr_tail], axis=2
+                )
+            video = video[:, :, :total_pixel_frames, :, :]
+
+    if dtype is None or dtype == mx.uint8:
+        video = mx.clip((video + 1) / 2, 0, 1) * 255
+        video = video.astype(mx.uint8)
+        video = video[0]
+        video = video.transpose(1, 2, 3, 0)
+        return video
+    if dtype in (mx.float16, mx.float32, mx.bfloat16):
+        return video.astype(dtype) if dtype != video.dtype else video
+    raise ValueError(
+        f"decode_latent dtype must be None / mx.uint8 / mx.float16 / mx.float32 / "
+        f"mx.bfloat16; got {dtype!r}"
+    )
 
 
 def _to_thwc_unit(video: mx.array) -> mx.array:

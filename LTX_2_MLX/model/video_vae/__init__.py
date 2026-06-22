@@ -1,6 +1,6 @@
 """Video VAE encoder and decoder (native MLX Conv3d, BFHWC)."""
 
-from .decode_utils import decode_latent, decode_single_pass
+from .decode_utils import decode_single_pass
 from .native_decoder import (
     NativeConv3dVideoDecoder,
     load_native_vae_decoder_weights,
@@ -33,7 +33,6 @@ __all__ = [
     "pixel_unshuffle_3d",
     # Decoder: single-pass (whole clip, one call) + chunked-streaming
     "decode_single_pass",
-    "decode_latent",
     "NativeConv3dVideoDecoder",
     "load_native_vae_decoder_weights",
     # Encoder

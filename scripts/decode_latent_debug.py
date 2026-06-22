@@ -285,7 +285,6 @@ def compare_spatial_padding_modes(
     full_decode_chunk_size: int,
     timings: RunTimings,
 ) -> None:
-    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     from LTX_2_MLX.model.video_vae.tiling import decode_streaming
 
     print("\n" + "=" * 80)
@@ -299,63 +298,46 @@ def compare_spatial_padding_modes(
     chunks = 0
     started = time.perf_counter()
 
-    if cfg is None:
-        lhs = decode_latent(
-            latent,
-            manual_decoder,
-            temporal_chunk_size=full_decode_chunk_size,
-        )
-        rhs = decode_latent(
-            latent,
-            conv_decoder,
-            temporal_chunk_size=full_decode_chunk_size,
-        )
+    # decode_streaming handles cfg=None (no spatial tiling + default temporal
+    # chunking), so manual- vs conv-padding decode is compared chunk-by-chunk
+    # for every mode.
+    lhs_iter = iter(decode_streaming(latent, manual_decoder, cfg, show_progress=False))
+    rhs_iter = iter(decode_streaming(latent, conv_decoder, cfg, show_progress=False))
+    while True:
+        try:
+            lhs = next(lhs_iter)
+        except StopIteration:
+            try:
+                next(rhs_iter)
+            except StopIteration:
+                break
+            raise RuntimeError(
+                "Conv-padding decode yielded more chunks than manual-padding decode"
+            ) from None
+
+        try:
+            rhs = next(rhs_iter)
+        except StopIteration as exc:
+            raise RuntimeError("Manual-padding decode yielded more chunks than conv-padding decode") from exc
+
         mx_mod.eval(lhs, rhs)
-        max_abs, mean_abs, rms, cos = compare_tensors("full", lhs, rhs, mx_mod)
+        max_abs, mean_abs, rms, cos = compare_tensors(
+            f"chunk {chunks}",
+            lhs,
+            rhs,
+            mx_mod,
+        )
         worst_max = max(worst_max, max_abs)
         worst_mean = max(worst_mean, mean_abs)
         worst_rms = max(worst_rms, rms)
         worst_cos = min(worst_cos, cos)
-        chunks = 1
+        chunks += 1
         del lhs, rhs
-    else:
-        lhs_iter = iter(decode_streaming(latent, manual_decoder, cfg, show_progress=False))
-        rhs_iter = iter(decode_streaming(latent, conv_decoder, cfg, show_progress=False))
-        while True:
-            try:
-                lhs = next(lhs_iter)
-            except StopIteration:
-                try:
-                    next(rhs_iter)
-                except StopIteration:
-                    break
-                raise RuntimeError(
-                    "Conv-padding decode yielded more chunks than manual-padding decode"
-                ) from None
-
-            try:
-                rhs = next(rhs_iter)
-            except StopIteration as exc:
-                raise RuntimeError("Manual-padding decode yielded more chunks than conv-padding decode") from exc
-
-            mx_mod.eval(lhs, rhs)
-            max_abs, mean_abs, rms, cos = compare_tensors(
-                f"chunk {chunks}",
-                lhs,
-                rhs,
-                mx_mod,
-            )
-            worst_max = max(worst_max, max_abs)
-            worst_mean = max(worst_mean, mean_abs)
-            worst_rms = max(worst_rms, rms)
-            worst_cos = min(worst_cos, cos)
-            chunks += 1
-            del lhs, rhs
-            gc.collect()
-            try:
-                mx_mod.clear_cache()
-            except Exception:
-                pass
+        gc.collect()
+        try:
+            mx_mod.clear_cache()
+        except Exception:
+            pass
 
     timings.add(f"{mode} spatial padding compare", time.perf_counter() - started)
     print(
@@ -588,7 +570,6 @@ def decode_mode(
     audio_waveform: Any | None = None,
     audio_sample_rate: int | None = None,
 ) -> None:
-    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     from LTX_2_MLX.model.video_vae.tiling import decode_streaming
 
     print("\n" + "=" * 80)
@@ -704,56 +685,38 @@ def decode_mode(
             shutil.rmtree(frame_root)
         frame_root.mkdir(parents=True, exist_ok=True)
 
-    if cfg is None:
+    # decode_streaming handles cfg=None (no spatial tiling + default temporal
+    # chunking), so the decode streams chunk-by-chunk for every mode.
+    chunk_index = 0
+    chunk_iter = iter(decode_streaming(latent, decoder, cfg, show_progress=True))
+    while True:
         started = time.perf_counter()
-        video = decode_latent(
-            latent,
-            decoder,
-            temporal_chunk_size=full_decode_chunk_size,
-        )
-        mx_mod.eval(video)
+        try:
+            chunk = next(chunk_iter)
+        except StopIteration:
+            break
+        mx_mod.eval(chunk)
         decode_seconds += time.perf_counter() - started
 
+        if show_memory:
+            print(f"chunk {chunk_index}:", mlx_mem_summary(mx_mod))
         if video_output_mode == "none":
-            frame_index = decoded_frame_count(video)
-            del video
+            frame_index += decoded_frame_count(chunk)
+            del chunk
         else:
             started = time.perf_counter()
-            frames = frames_from_video_tensor(video, mx_mod)
-            frame_index = write_frames(frames, frame_root, 0)
+            frames = frames_from_video_tensor(chunk, mx_mod)
+            frame_index = write_frames(frames, frame_root, frame_index)
             write_seconds += time.perf_counter() - started
-            del video, frames
-    else:
-        chunk_index = 0
-        chunk_iter = iter(decode_streaming(latent, decoder, cfg, show_progress=True))
-        while True:
-            started = time.perf_counter()
-            try:
-                chunk = next(chunk_iter)
-            except StopIteration:
-                break
-            mx_mod.eval(chunk)
-            decode_seconds += time.perf_counter() - started
-
-            if show_memory:
-                print(f"chunk {chunk_index}:", mlx_mem_summary(mx_mod))
-            if video_output_mode == "none":
-                frame_index += decoded_frame_count(chunk)
-                del chunk
-            else:
-                started = time.perf_counter()
-                frames = frames_from_video_tensor(chunk, mx_mod)
-                frame_index = write_frames(frames, frame_root, frame_index)
-                write_seconds += time.perf_counter() - started
-                del chunk, frames
-            gc.collect()
-            try:
-                mx_mod.clear_cache()
-            except Exception:
-                pass
-            if show_memory and video_output_mode == "frames":
-                print(f"after writing chunk {chunk_index}:", mlx_mem_summary(mx_mod))
-            chunk_index += 1
+            del chunk, frames
+        gc.collect()
+        try:
+            mx_mod.clear_cache()
+        except Exception:
+            pass
+        if show_memory and video_output_mode == "frames":
+            print(f"after writing chunk {chunk_index}:", mlx_mem_summary(mx_mod))
+        chunk_index += 1
 
     timings.add(f"{mode} decode", decode_seconds)
     if video_output_mode == "frames":

@@ -231,39 +231,14 @@ def iter_latent_chunks(
        "uint8_rgb"  -> (T,H,W,3) uint8  (for LowLatency VSR / NV12 source)
        "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
     """
-    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     from LTX_2_MLX.model.video_vae.tiling import decode_streaming
     from scripts.encode_modes_harness import chunk_to_uint8
 
     convert = chunk_to_rgba_fp16 if output_format == "fp16_rgba" else chunk_to_uint8
 
-    if cfg is None:
-        # Single-shot path. Ask decode_latent for the raw float (B,C,T,H,W)
-        # output so the converter can quantize at the destination format
-        # instead of paying an 8-bit round-trip inside decode_latent.
-        video = decode_latent(latent, decoder, dtype=mx_mod.bfloat16)
-        # decode_latent's internal temporal chunking + overlap blending
-        # accumulates ~ceil(T/7) chunks plus concatenate buffers. After it
-        # returns, those locals are gone but MLX still caches the underlying
-        # Metal buffers. Force-release before convert() starts allocating
-        # its own intermediates.
-        try:
-            mx_mod.clear_cache()
-        except Exception:
-            pass
-        out = convert(video, mx_mod)
-        # convert() already clears the cache after building the Python-owned
-        # numpy copy. Now drop `video` (the only remaining MLX tensor) and
-        # clear once more so the inner loop runs on a clean MLX heap.
-        del video
-        try:
-            mx_mod.clear_cache()
-        except Exception:
-            pass
-        gc.collect()
-        yield out
-        return
-
+    # decode_streaming handles cfg=None (no spatial tiling + default temporal
+    # chunking), so this streams chunk-by-chunk for every case -- no whole-video
+    # accumulate. convert() quantizes each chunk at the destination format.
     for chunk in decode_streaming(latent, decoder, cfg, show_progress=False):
         out = convert(chunk, mx_mod)
         # convert() clears the cache; `chunk` is the only MLX tensor still
@@ -773,8 +748,8 @@ def main() -> None:
         "--vae-tiling", choices=["auto", "off"], default="auto",
         help=(
             "auto (default) lets TilingConfig.auto_native_conv3d pick tile size "
-            "from RAM + int32 conv3d limits. off forces a single decode_latent "
-            "pass; faster end-to-end when it fits, OOMs on long clips."
+            "from RAM + int32 conv3d limits. off uses no spatial tiling (default "
+            "temporal chunking); the decode streams chunk-by-chunk either way."
         ),
     )
     parser.add_argument("--output-dir", required=True)

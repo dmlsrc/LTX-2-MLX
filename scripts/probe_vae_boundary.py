@@ -217,7 +217,6 @@ def decode_variant(
     audio_wav_path: Path | None = None,
     audio_sample_rate: int | None = None,
 ) -> int:
-    from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
     from LTX_2_MLX.model.video_vae.tiling import decode_streaming
 
     print("\n" + "=" * 80)
@@ -245,44 +244,30 @@ def decode_variant(
 
     patch_context = DecoderSpatialPadding(decoder, "zero") if variant.zero_spatial_conv_padding else nullcontext()
     with patch_context:
-        if cfg is None:
+        # decode_streaming handles cfg=None (no spatial tiling + default temporal
+        # chunking), so the boundary variant streams chunk-by-chunk for every case.
+        chunk_index = 0
+        chunk_iter = iter(decode_streaming(variant_latent, decoder, cfg, show_progress=True))
+        while True:
             started = time.perf_counter()
-            video = decode_latent(
-                variant_latent,
-                decoder,
-                temporal_chunk_size=full_decode_chunk_size,
-            )
-            mx_mod.eval(video)
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                break
+            mx_mod.eval(chunk)
             decode_seconds += time.perf_counter() - started
+            if show_memory:
+                print(f"chunk {chunk_index}:", mlx_mem_summary(mx_mod))
 
             started = time.perf_counter()
-            frames = crop_frames(frames_from_video_tensor(video, mx_mod), variant.crop_pixels)
-            frame_index = write_frames(frames, frames_dir, 0)
+            frames = crop_frames(frames_from_video_tensor(chunk, mx_mod), variant.crop_pixels)
+            frame_index = write_frames(frames, frames_dir, frame_index)
             write_seconds += time.perf_counter() - started
-            del video, frames
-        else:
-            chunk_index = 0
-            chunk_iter = iter(decode_streaming(variant_latent, decoder, cfg, show_progress=True))
-            while True:
-                started = time.perf_counter()
-                try:
-                    chunk = next(chunk_iter)
-                except StopIteration:
-                    break
-                mx_mod.eval(chunk)
-                decode_seconds += time.perf_counter() - started
-                if show_memory:
-                    print(f"chunk {chunk_index}:", mlx_mem_summary(mx_mod))
-
-                started = time.perf_counter()
-                frames = crop_frames(frames_from_video_tensor(chunk, mx_mod), variant.crop_pixels)
-                frame_index = write_frames(frames, frames_dir, frame_index)
-                write_seconds += time.perf_counter() - started
-                del chunk, frames
-                maybe_clear_mlx(mx_mod)
-                if show_memory:
-                    print(f"after writing chunk {chunk_index}:", mlx_mem_summary(mx_mod))
-                chunk_index += 1
+            del chunk, frames
+            maybe_clear_mlx(mx_mod)
+            if show_memory:
+                print(f"after writing chunk {chunk_index}:", mlx_mem_summary(mx_mod))
+            chunk_index += 1
 
     timings.add(f"{variant.name} decode", decode_seconds)
     timings.add(f"{variant.name} write frames", write_seconds)
