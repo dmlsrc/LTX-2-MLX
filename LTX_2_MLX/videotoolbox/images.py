@@ -74,7 +74,10 @@ def _mx_to_cgimage(img: Any) -> Any:
         a = mx.concatenate([a, mx.full((h, w, 1), 255, dtype=mx.uint8)], axis=2)
     a = a.astype(mx.uint8)
     mx.eval(a)
-    buf = bytearray(bytes(a))
+    # Independent mutable backing for the CGBitmapContext (CG renders into it
+    # and retains the pointer); cast("B") fills it in one copy. Do not pass a
+    # bare memoryview - CG would hold MLX-managed memory that MLX may recycle.
+    buf = bytearray(memoryview(mx.contiguous(a)).cast("B"))
     ctx = Quartz.CGBitmapContextCreate(buf, w, h, 8, w * 4, srgb_colorspace(), _RGBX)
     if ctx is None:
         raise ValueError("CGBitmapContextCreate failed building CGImage")
@@ -181,7 +184,10 @@ def draw_labels(
         [a[:, :, :3], mx.full((h, w, 1), 255, dtype=mx.uint8)], axis=2
     ).astype(mx.uint8)
     mx.eval(rgba)
-    buf = bytearray(bytes(rgba))
+    # Independent mutable backing for the CGBitmapContext (CG renders into it
+    # and retains the pointer); cast("B") fills it in one copy. Do not pass a
+    # bare memoryview - CG would hold MLX-managed memory that MLX may recycle.
+    buf = bytearray(memoryview(mx.contiguous(rgba)).cast("B"))
     ctx = Quartz.CGBitmapContextCreate(buf, w, h, 8, w * 4, srgb_colorspace(), _RGBX)
     if ctx is None:
         raise ValueError("CGBitmapContextCreate failed for label drawing")
