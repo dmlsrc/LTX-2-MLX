@@ -80,7 +80,9 @@ class AudioTrack:
         if n <= 0:
             return None
         bytes_per_frame = 4 * self.channels
-        chunk_bytes = self._bytes[start_frame * bytes_per_frame: end_frame * bytes_per_frame]
+        # Zero-copy view into self._bytes; CMBlockBufferReplaceDataBytes copies it
+        # into the block below, so the intermediate bytes slice is avoidable.
+        chunk_bytes = memoryview(self._bytes)[start_frame * bytes_per_frame: end_frame * bytes_per_frame]
         data_len = len(chunk_bytes)
 
         err, block = CoreMedia.CMBlockBufferCreateWithMemoryBlock(
@@ -174,7 +176,9 @@ def _write_wav(samples: Any, path: Any, sample_rate: int, *, float32: bool) -> N
     buf.setFrameLength_(frames)
     fcd = buf.floatChannelData()  # deinterleaved float32, channels x frames
     for c in range(channels):
-        memoryview(fcd[c].as_buffer(frames))[:] = bytes(memoryview(mx.contiguous(w[c])))
+        # cast("B") is a zero-copy byte view of the float32 samples (byte-identical
+        # to bytes(...)); the slice-assign copies it into the AVAudio channel buffer.
+        memoryview(fcd[c].as_buffer(frames))[:] = memoryview(mx.contiguous(w[c])).cast("B")
     ok, err = out.writeFromBuffer_error_(buf, None)
     if not ok:
         raise RuntimeError(f"AVAudioFile could not write {path}: {err}")

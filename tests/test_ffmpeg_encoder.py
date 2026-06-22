@@ -16,7 +16,7 @@ import mlx.core as mx
 import pytest
 
 from LTX_2_MLX.ffmpeg_encoder import (
-    _frame_to_bytes,
+    _frame_buffer,
     encode_video_ffmpeg,
 )
 
@@ -33,12 +33,12 @@ def _sha(b: bytes) -> str:
 
 
 def test_frame_byte_stream_8bit():
-    stream = b"".join(_frame_to_bytes(f, 8) for f in _frames())
+    stream = b"".join(bytes(_frame_buffer(f, 8)) for f in _frames())
     assert (_sha(stream), len(stream)) == ("ea4498f4c4f9dbd7a8b33f89", 180)
 
 
 def test_frame_byte_stream_16bit():
-    stream = b"".join(_frame_to_bytes(f, 16) for f in _frames())
+    stream = b"".join(bytes(_frame_buffer(f, 16)) for f in _frames())
     assert (_sha(stream), len(stream)) == ("79b71bf74558573206c5156e", 360)
 
 

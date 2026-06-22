@@ -230,14 +230,15 @@ def build_ffmpeg_cmd(
     return cmd
 
 
-def _frame_to_bytes(frame: Any, bit_depth: int) -> bytes:
-    """One (H, W, 3) frame -> raw little-endian bytes at the target bit depth.
+def _frame_buffer(frame: Any, bit_depth: int) -> memoryview:
+    """One (H, W, 3) frame -> raw little-endian buffer at the target bit depth.
 
     Accepts an mlx array or anything ``mlx.core.array()`` can adopt (a numpy
     frame, a buffer). For 16-bit tiers the 8->16 promotion uses *257 (so
     0xFF -> 0xFFFF), the bit-exact full-range stretch, not a left-shift; 16->8 is
-    a right shift by 8. The conversion runs in MLX and the bytes come straight
-    from the array's buffer, so no numpy and no per-video materialization.
+    a right shift by 8. The conversion runs in MLX and the returned ``memoryview``
+    views the array's buffer directly (no bytes copy); it holds that buffer alive,
+    so the caller must consume it before the next frame (the encode loop does).
     """
     f = frame if isinstance(frame, mx.array) else mx.array(frame)
     if f.ndim != 3 or f.shape[-1] != 3:
@@ -257,7 +258,7 @@ def _frame_to_bytes(frame: Any, bit_depth: int) -> bytes:
         raise ValueError(f"Cannot use {f.dtype} frames for an 8-bit tier")
     out = mx.contiguous(out)
     mx.eval(out)
-    return bytes(memoryview(out))
+    return memoryview(out)
 
 
 def encode_video_ffmpeg(
@@ -380,7 +381,7 @@ def encode_video_ffmpeg(
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         try:
             for frame in frame_stream:
-                proc.stdin.write(_frame_to_bytes(frame, preset.frame_bit_depth))
+                proc.stdin.write(_frame_buffer(frame, preset.frame_bit_depth))
         finally:
             proc.stdin.close()
         rc = proc.wait()
