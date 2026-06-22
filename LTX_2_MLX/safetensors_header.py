@@ -12,6 +12,7 @@ otherwise materialize every tensor just to surface the header metadata.)
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,9 @@ from typing import Any
 def read_safetensors_header(path: str | Path) -> dict[str, Any]:
     """Parse and return the full safetensors JSON header (no tensor data)."""
     with open(path, "rb") as f:
-        header_len = int.from_bytes(f.read(8), "little")
+        # "<Q" = 8-byte little-endian u64; struct enforces the width, so a
+        # truncated header raises here instead of silently parsing a short value.
+        header_len = struct.unpack("<Q", f.read(8))[0]
         return json.loads(f.read(header_len))
 
 
