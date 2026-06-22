@@ -537,13 +537,28 @@ def _merge_temporal_pending(
 def decode_streaming(
     latent: mx.array,
     decoder_fn,
-    tiling_config: TilingConfig,
+    tiling_config: TilingConfig | None = None,
     timestep: float | None = 0.05,
     show_progress: bool = True,
     key: mx.array | None = None,
 ) -> Iterator[mx.array]:
-    """Decode a latent tensor by tiles and blend overlaps."""
+    """Decode a latent tensor by tiles, yielding blended chunks.
+
+    ``tiling_config=None`` means no spatial tiling plus the default temporal
+    chunking, matched to the historical 7-latent-frame / 2-overlap decode (chunk
+    and overlap are pixel-space, so x the 8x temporal scale gives 56 / 16). This
+    is the single decode path -- every caller streams, and "no tiling" never
+    means accumulate the whole video.
+    """
     del key  # Reserved for API compatibility.
+
+    if tiling_config is None:
+        tiling_config = TilingConfig(
+            spatial_config=None,
+            temporal_config=TemporalChunkConfig(
+                chunk_size_in_frames=56, chunk_overlap_in_frames=16
+            ),
+        )
 
     b, _c, latent_t, latent_h, latent_w = latent.shape
     scale_t, scale_h, scale_w = (

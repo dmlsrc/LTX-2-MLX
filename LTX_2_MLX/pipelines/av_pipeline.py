@@ -70,7 +70,6 @@ from ..loader import (
 )
 from ..model.audio_vae import AudioDecoder, Vocoder
 from ..model.transformer import LTXModel, LTXModelType, X0Model
-from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
 from ..model.video_vae.tiling import TilingConfig, decode_streaming
@@ -1662,19 +1661,17 @@ class AVPipeline:
                     f"  VAE decode started ({decoder_name}, {tiling_desc})..."
                 )
                 decode_start = time.perf_counter()
-                if effective_tiling:
-                    emit_progress_message(
-                        "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
-                    )
-                    video = None
-                    for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
-                        video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                        mx.eval(video)
-                        del chunk
-                        gc.collect()
-                        mx.clear_cache()
-                else:
-                    video = decode_latent(final_video_latent, self.video_decoder)
+                # Single decode path: decode_streaming yields chunks and handles
+                # effective_tiling=None internally (default temporal chunking, no
+                # spatial tiling) -- no decode_latent accumulate fork.
+                emit_progress_message("  Streaming VAE decode (chunked; prevents GPU watchdog timeout)")
+                video = None
+                for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
+                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                    mx.eval(video)
+                    del chunk
+                    gc.collect()
+                    mx.clear_cache()
                 mx.eval(video)
                 decode_elapsed = time.perf_counter() - decode_start
                 emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
@@ -2056,19 +2053,17 @@ class AVPipeline:
                     f"  VAE decode started ({decoder_name}, {tiling_desc})..."
                 )
                 decode_start = time.perf_counter()
-                if effective_tiling:
-                    emit_progress_message(
-                        "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
-                    )
-                    video = None
-                    for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
-                        video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                        mx.eval(video)
-                        del chunk
-                        gc.collect()
-                        mx.clear_cache()
-                else:
-                    video = decode_latent(final_video_latent, self.video_decoder)
+                # Single decode path: decode_streaming yields chunks and handles
+                # effective_tiling=None internally (default temporal chunking, no
+                # spatial tiling) -- no decode_latent accumulate fork.
+                emit_progress_message("  Streaming VAE decode (chunked; prevents GPU watchdog timeout)")
+                video = None
+                for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
+                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                    mx.eval(video)
+                    del chunk
+                    gc.collect()
+                    mx.clear_cache()
                 mx.eval(video)
                 decode_elapsed = time.perf_counter() - decode_start
                 emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
@@ -2515,19 +2510,17 @@ class AVPipeline:
                     f"  VAE decode started ({decoder_name}, {tiling_desc})..."
                 )
                 decode_start = time.perf_counter()
-                if effective_tiling:
-                    emit_progress_message(
-                        "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
-                    )
-                    video = None
-                    for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
-                        video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
-                        mx.eval(video)
-                        del chunk
-                        gc.collect()
-                        mx.clear_cache()
-                else:
-                    video = decode_latent(final_video_latent, self.video_decoder)
+                # Single decode path: decode_streaming yields chunks and handles
+                # effective_tiling=None internally (default temporal chunking, no
+                # spatial tiling) -- no decode_latent accumulate fork.
+                emit_progress_message("  Streaming VAE decode (chunked; prevents GPU watchdog timeout)")
+                video = None
+                for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
+                    video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
+                    mx.eval(video)
+                    del chunk
+                    gc.collect()
+                    mx.clear_cache()
                 mx.eval(video)
                 decode_elapsed = time.perf_counter() - decode_start
                 emit_progress_message(f"  VAE decode complete in {decode_elapsed:.1f}s")
