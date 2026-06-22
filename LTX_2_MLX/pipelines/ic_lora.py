@@ -33,10 +33,9 @@ from ..conditioning.tools import VideoLatentTools
 from ..loader import LoRAConfig, fuse_loras_into_model, restore_transformer_cache_state
 from ..model.transformer import LTXModel, X0Model
 from ..model.upscaler import SpatialUpscaler
-from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
-from ..model.video_vae.tiling import TilingConfig, decode_streaming
+from ..model.video_vae.tiling import TilingConfig
 from ..types import NATIVE_FPS, LatentState, VideoLatentShape, VideoPixelShape
 from .common import (
     ImageCondition,
@@ -751,13 +750,8 @@ class ICLoraPipeline:
 
         final_latent = video_state_2.latent
 
-        # Decode to video
-        if config.tiling_config:
-            video = decode_streaming(final_latent, self.video_decoder, config.tiling_config)
-        else:
-            video = decode_latent(final_latent, self.video_decoder)
-
-        return video
+        # Return the video latent; the caller streams it through self.video_decoder.
+        return final_latent
 
 
 def create_ic_lora_pipeline(

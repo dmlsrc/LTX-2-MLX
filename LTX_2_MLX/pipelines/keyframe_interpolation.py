@@ -24,10 +24,9 @@ from ..conditioning.keyframe import VideoConditionByKeyframeIndex
 from ..conditioning.tools import VideoLatentTools
 from ..model.transformer import LTXModel, X0Model
 from ..model.upscaler import SpatialUpscaler
-from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
-from ..model.video_vae.tiling import TilingConfig, decode_streaming
+from ..model.video_vae.tiling import TilingConfig
 from ..types import NATIVE_FPS, LatentState, VideoLatentShape, VideoPixelShape
 from ..videotoolbox.images import load_image_rgb, resize_lanczos
 from .common import (
@@ -388,14 +387,8 @@ class KeyframeInterpolationPipeline:
         stage_1_latent = video_state.latent
 
         if not config.use_two_stage:
-            # Single-stage: decode directly
-            if config.tiling_config:
-                video = decode_streaming(
-                    stage_1_latent, self.video_decoder, config.tiling_config
-                )
-            else:
-                video = decode_latent(stage_1_latent, self.video_decoder)
-            return video
+            # Single-stage: return the stage-1 latent for the caller to stream-decode.
+            return stage_1_latent
 
         # ====== STAGE 2: Upsample and refine ======
         if self.spatial_upscaler is None:
@@ -479,13 +472,8 @@ class KeyframeInterpolationPipeline:
 
         final_latent = video_state_2.latent
 
-        # Decode to video
-        if config.tiling_config:
-            video = decode_streaming(final_latent, self.video_decoder, config.tiling_config)
-        else:
-            video = decode_latent(final_latent, self.video_decoder)
-
-        return video
+        # Return the video latent; the caller streams it through self.video_decoder.
+        return final_latent
 
 
 def create_keyframe_pipeline(

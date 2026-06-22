@@ -3163,7 +3163,7 @@ def generate_video(
 
         # Run pipeline
         print("\n=== Running two-stage generation ===")
-        video, audio_waveform = pipeline(
+        video_latent, audio_waveform = pipeline(
             positive_encoding=text_encoding,
             negative_encoding=null_encoding,
             config=config,
@@ -3172,9 +3172,15 @@ def generate_video(
             negative_audio_encoding=null_audio_encoding,
         )
 
-        # Decoded video is an mx (T, H, W, C) uint8 array; slice per-frame (no numpy).
-        frames = [video[t] for t in range(video.shape[0])]
-        print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
+        # Stream-decode the latent chunk-by-chunk into the encoder; the whole
+        # decoded video is never resident at once (frames is a lazy generator).
+        from LTX_2_MLX.pipelines.streaming import iter_decoded_frames, latent_dims
+        n_frames, frame_h, frame_w = latent_dims(video_latent)
+        print(f"  Decoding {n_frames} frames at ({frame_h}, {frame_w}) [streaming]")
+        frames = iter_decoded_frames(
+            video_latent, pipeline.video_decoder,
+            tiling=config.tiling_config, output_format="uint8_rgb",
+        )
 
         if audio_waveform is not None:
             print(f"  Generated audio: {audio_waveform.shape}")
@@ -3297,7 +3303,7 @@ def generate_video(
 
         # Run pipeline
         print("\n=== Running IC-LoRA generation ===")
-        video = ic_pipeline(
+        video_latent = ic_pipeline(
             text_encoding=text_encoding,
             text_mask=mx.ones((1, text_encoding.shape[1]), dtype=mx.int32),
             config=config,
@@ -3305,9 +3311,15 @@ def generate_video(
             video_conditioning=video_conditioning,
         )
 
-        # Decoded video is an mx (T, H, W, C) array; slice per-frame (no numpy).
-        frames = [video[t] for t in range(video.shape[0])]
-        print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
+        # Stream-decode the latent chunk-by-chunk into the encoder; the whole
+        # decoded video is never resident at once (frames is a lazy generator).
+        from LTX_2_MLX.pipelines.streaming import iter_decoded_frames, latent_dims
+        n_frames, frame_h, frame_w = latent_dims(video_latent)
+        print(f"  Decoding {n_frames} frames at ({frame_h}, {frame_w}) [streaming]")
+        frames = iter_decoded_frames(
+            video_latent, ic_pipeline.video_decoder,
+            tiling=config.tiling_config, output_format="uint8_rgb",
+        )
 
         # Save video
         print(f"\nSaving video to {output_path}...")
@@ -3395,7 +3407,7 @@ def generate_video(
 
         # Run pipeline
         print(f"\n=== Running keyframe interpolation ({num_steps} steps) ===")
-        video = kf_pipeline(
+        video_latent = kf_pipeline(
             text_encoding=text_encoding,
             text_mask=mx.ones((1, text_encoding.shape[1]), dtype=mx.int32),
             keyframes=parsed_keyframes,
@@ -3404,9 +3416,15 @@ def generate_video(
             negative_text_mask=mx.ones((1, null_encoding.shape[1]), dtype=mx.int32),
         )
 
-        # Decoded video is an mx (T, H, W, C) array; slice per-frame (no numpy).
-        frames = [video[t] for t in range(video.shape[0])]
-        print(f"  Generated {len(frames)} frames at {frames[0].shape[:2]}")
+        # Stream-decode the latent chunk-by-chunk into the encoder; the whole
+        # decoded video is never resident at once (frames is a lazy generator).
+        from LTX_2_MLX.pipelines.streaming import iter_decoded_frames, latent_dims
+        n_frames, frame_h, frame_w = latent_dims(video_latent)
+        print(f"  Decoding {n_frames} frames at ({frame_h}, {frame_w}) [streaming]")
+        frames = iter_decoded_frames(
+            video_latent, kf_pipeline.video_decoder,
+            tiling=config.tiling_config, output_format="uint8_rgb",
+        )
 
         # Save video
         print(f"\nSaving video to {output_path}...")

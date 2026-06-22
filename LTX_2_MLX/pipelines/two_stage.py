@@ -43,10 +43,9 @@ from ..loader import (
 from ..model.audio_vae import AudioDecoder, Vocoder
 from ..model.transformer import LTXModel, LTXModelType, X0Model
 from ..model.upscaler import SpatialUpscaler
-from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
-from ..model.video_vae.tiling import TilingConfig, decode_streaming
+from ..model.video_vae.tiling import TilingConfig
 from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
 from .common import (
     ImageCondition,
@@ -861,12 +860,6 @@ class TwoStagePipeline:
 
         final_video_latent = video_state_2.latent
 
-        # Decode to video
-        if config.tiling_config:
-            video = decode_streaming(final_video_latent, self.video_decoder, config.tiling_config)
-        else:
-            video = decode_latent(final_video_latent, self.video_decoder)
-
         # Decode audio if enabled
         audio_waveform = None
         if config.audio_enabled and audio_state_2 is not None and audio_tools_2 is not None:
@@ -875,7 +868,10 @@ class TwoStagePipeline:
             final_audio_latent = audio_state_2.latent
             audio_waveform = self._decode_audio(final_audio_latent)
 
-        return video, audio_waveform
+        # Return the video latent; the caller streams it through self.video_decoder
+        # chunk-by-chunk into the encoder, so the whole decoded video is never
+        # resident at once. (Audio is small, so it is decoded eagerly above.)
+        return final_video_latent, audio_waveform
 
 
 def create_two_stage_pipeline(
