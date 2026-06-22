@@ -1,6 +1,6 @@
 """Video VAE encoder and decoder (native MLX Conv3d, BFHWC)."""
 
-from .decode_utils import decode_latent
+from .decode_utils import decode_latent, decode_single_pass
 from .native_decoder import (
     NativeConv3dVideoDecoder,
     load_native_vae_decoder_weights,
@@ -18,10 +18,10 @@ from .ops import (
 )
 from .tiling import (
     SpatialTilingConfig,
-    TemporalTilingConfig,
+    TemporalChunkConfig,
     TilingConfig,
     compute_trapezoidal_mask_1d,
-    decode_tiled,
+    decode_streaming,
 )
 
 __all__ = [
@@ -31,7 +31,8 @@ __all__ = [
     "PerChannelStatistics",
     "pixel_shuffle_3d",
     "pixel_unshuffle_3d",
-    # Decoder
+    # Decoder: single-pass (whole clip, one call) + chunked-streaming
+    "decode_single_pass",
     "decode_latent",
     "NativeConv3dVideoDecoder",
     "load_native_vae_decoder_weights",
@@ -41,7 +42,7 @@ __all__ = [
     # Tiling
     "TilingConfig",
     "SpatialTilingConfig",
-    "TemporalTilingConfig",
-    "decode_tiled",
+    "TemporalChunkConfig",
+    "decode_streaming",
     "compute_trapezoidal_mask_1d",
 ]

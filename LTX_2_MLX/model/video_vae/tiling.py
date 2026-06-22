@@ -128,31 +128,31 @@ class SpatialTilingConfig:
 
 
 @dataclass(frozen=True)
-class TemporalTilingConfig:
+class TemporalChunkConfig:
     """Temporal tile configuration in decoded-frame coordinates."""
 
-    tile_size_in_frames: int
-    tile_overlap_in_frames: int = 0
+    chunk_size_in_frames: int
+    chunk_overlap_in_frames: int = 0
 
     def __post_init__(self) -> None:
-        if self.tile_size_in_frames < 16:
+        if self.chunk_size_in_frames < 16:
             raise ValueError(
-                f"tile_size_in_frames must be at least 16, got {self.tile_size_in_frames}"
+                f"chunk_size_in_frames must be at least 16, got {self.chunk_size_in_frames}"
             )
-        if self.tile_size_in_frames % DEFAULT_TEMPORAL_SCALE != 0:
+        if self.chunk_size_in_frames % DEFAULT_TEMPORAL_SCALE != 0:
             raise ValueError(
-                f"tile_size_in_frames must be divisible by {DEFAULT_TEMPORAL_SCALE}, "
-                f"got {self.tile_size_in_frames}"
+                f"chunk_size_in_frames must be divisible by {DEFAULT_TEMPORAL_SCALE}, "
+                f"got {self.chunk_size_in_frames}"
             )
-        if self.tile_overlap_in_frames % DEFAULT_TEMPORAL_SCALE != 0:
+        if self.chunk_overlap_in_frames % DEFAULT_TEMPORAL_SCALE != 0:
             raise ValueError(
-                f"tile_overlap_in_frames must be divisible by {DEFAULT_TEMPORAL_SCALE}, "
-                f"got {self.tile_overlap_in_frames}"
+                f"chunk_overlap_in_frames must be divisible by {DEFAULT_TEMPORAL_SCALE}, "
+                f"got {self.chunk_overlap_in_frames}"
             )
-        if self.tile_overlap_in_frames >= self.tile_size_in_frames:
+        if self.chunk_overlap_in_frames >= self.chunk_size_in_frames:
             raise ValueError(
                 "Temporal overlap must be smaller than tile size, got "
-                f"{self.tile_overlap_in_frames} and {self.tile_size_in_frames}"
+                f"{self.chunk_overlap_in_frames} and {self.chunk_size_in_frames}"
             )
 
 
@@ -161,7 +161,7 @@ class TilingConfig:
     """Configuration for tiled VAE decoding."""
 
     spatial_config: SpatialTilingConfig | None = None
-    temporal_config: TemporalTilingConfig | None = None
+    temporal_config: TemporalChunkConfig | None = None
 
     @classmethod
     def default(cls) -> TilingConfig:
@@ -171,9 +171,9 @@ class TilingConfig:
                 tile_size_in_pixels=512,
                 tile_overlap_in_pixels=64,
             ),
-            temporal_config=TemporalTilingConfig(
-                tile_size_in_frames=64,
-                tile_overlap_in_frames=24,
+            temporal_config=TemporalChunkConfig(
+                chunk_size_in_frames=64,
+                chunk_overlap_in_frames=24,
             ),
         )
 
@@ -213,7 +213,7 @@ class TilingConfig:
                 else None
             ),
             temporal_config=(
-                TemporalTilingConfig(tile_size_in_frames=64, tile_overlap_in_frames=24)
+                TemporalChunkConfig(chunk_size_in_frames=64, chunk_overlap_in_frames=24)
                 if needs_temporal
                 else None
             ),
@@ -277,9 +277,9 @@ class TilingConfig:
                         tile_size_in_pixels=spatial_tile,
                         tile_overlap_in_pixels=spatial_overlap,
                     ),
-                    temporal_config=TemporalTilingConfig(
-                        tile_size_in_frames=tile_frames,
-                        tile_overlap_in_frames=8,
+                    temporal_config=TemporalChunkConfig(
+                        chunk_size_in_frames=tile_frames,
+                        chunk_overlap_in_frames=8,
                     ),
                 )
 
@@ -288,9 +288,9 @@ class TilingConfig:
                 tile_size_in_pixels=spatial_tile,
                 tile_overlap_in_pixels=spatial_overlap,
             ),
-            temporal_config=TemporalTilingConfig(
-                tile_size_in_frames=32,
-                tile_overlap_in_frames=8,
+            temporal_config=TemporalChunkConfig(
+                chunk_size_in_frames=32,
+                chunk_overlap_in_frames=8,
             ),
         )
 
@@ -308,9 +308,9 @@ class TilingConfig:
     def temporal_only(cls, tile_size: int = 64, overlap: int = 24) -> TilingConfig:
         return cls(
             spatial_config=None,
-            temporal_config=TemporalTilingConfig(
-                tile_size_in_frames=tile_size,
-                tile_overlap_in_frames=overlap,
+            temporal_config=TemporalChunkConfig(
+                chunk_size_in_frames=tile_size,
+                chunk_overlap_in_frames=overlap,
             ),
         )
 
@@ -346,9 +346,9 @@ class TilingConfig:
                 tile_size_in_pixels=128,
                 tile_overlap_in_pixels=32,
             ),
-            temporal_config=TemporalTilingConfig(
-                tile_size_in_frames=32,
-                tile_overlap_in_frames=8,
+            temporal_config=TemporalChunkConfig(
+                chunk_size_in_frames=32,
+                chunk_overlap_in_frames=8,
             ),
         )
 
@@ -534,7 +534,7 @@ def _merge_temporal_pending(
     return merged, merged_weights, merged_start
 
 
-def decode_tiled(
+def decode_streaming(
     latent: mx.array,
     decoder_fn,
     tiling_config: TilingConfig,
@@ -557,8 +557,8 @@ def decode_tiled(
 
     if tiling_config.temporal_config is not None:
         tc = tiling_config.temporal_config
-        temporal_tile = tc.tile_size_in_frames // scale_t
-        temporal_overlap = tc.tile_overlap_in_frames // scale_t
+        temporal_tile = tc.chunk_size_in_frames // scale_t
+        temporal_overlap = tc.chunk_overlap_in_frames // scale_t
         t_tiles = _split_temporal_axis(latent_t, temporal_tile, temporal_overlap)
     else:
         t_tiles = AxisTiles([0], [latent_t], [0], [0])

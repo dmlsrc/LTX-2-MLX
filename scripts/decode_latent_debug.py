@@ -286,7 +286,7 @@ def compare_spatial_padding_modes(
     timings: RunTimings,
 ) -> None:
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
-    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
+    from LTX_2_MLX.model.video_vae.tiling import decode_streaming
 
     print("\n" + "=" * 80)
     print(f"Spatial padding parity mode: {mode}")
@@ -319,8 +319,8 @@ def compare_spatial_padding_modes(
         chunks = 1
         del lhs, rhs
     else:
-        lhs_iter = iter(decode_tiled(latent, manual_decoder, cfg, show_progress=False))
-        rhs_iter = iter(decode_tiled(latent, conv_decoder, cfg, show_progress=False))
+        lhs_iter = iter(decode_streaming(latent, manual_decoder, cfg, show_progress=False))
+        rhs_iter = iter(decode_streaming(latent, conv_decoder, cfg, show_progress=False))
         while True:
             try:
                 lhs = next(lhs_iter)
@@ -436,7 +436,7 @@ def write_wav(audio_waveform: Any, output_path: Path, sample_rate: int) -> None:
 def tiling_config_for_mode(mode: str, latent: Any | None = None):
     from LTX_2_MLX.model.video_vae.tiling import (
         SpatialTilingConfig,
-        TemporalTilingConfig,
+        TemporalChunkConfig,
         TilingConfig,
     )
 
@@ -467,37 +467,37 @@ def tiling_config_for_mode(mode: str, latent: Any | None = None):
     if mode == "temporal24":
         return TilingConfig(
             spatial_config=None,
-            temporal_config=TemporalTilingConfig(64, 24),
+            temporal_config=TemporalChunkConfig(64, 24),
         )
     if mode == "temporal32":
         return TilingConfig(
             spatial_config=None,
-            temporal_config=TemporalTilingConfig(64, 32),
+            temporal_config=TemporalChunkConfig(64, 32),
         )
     if mode == "both64_24":
         return TilingConfig(
             spatial_config=SpatialTilingConfig(512, 64),
-            temporal_config=TemporalTilingConfig(64, 24),
+            temporal_config=TemporalChunkConfig(64, 24),
         )
     if mode == "both384_24":
         return TilingConfig(
             spatial_config=SpatialTilingConfig(384, 64),
-            temporal_config=TemporalTilingConfig(64, 24),
+            temporal_config=TemporalChunkConfig(64, 24),
         )
     if mode == "both256_24":
         return TilingConfig(
             spatial_config=SpatialTilingConfig(256, 64),
-            temporal_config=TemporalTilingConfig(64, 24),
+            temporal_config=TemporalChunkConfig(64, 24),
         )
     if mode == "both128_24":
         return TilingConfig(
             spatial_config=SpatialTilingConfig(512, 128),
-            temporal_config=TemporalTilingConfig(64, 24),
+            temporal_config=TemporalChunkConfig(64, 24),
         )
     if mode == "both128_32":
         return TilingConfig(
             spatial_config=SpatialTilingConfig(512, 128),
-            temporal_config=TemporalTilingConfig(64, 32),
+            temporal_config=TemporalChunkConfig(64, 32),
         )
     if mode == "test_small_both":
         return TilingConfig.test_small_both()
@@ -589,7 +589,7 @@ def decode_mode(
     audio_sample_rate: int | None = None,
 ) -> None:
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
-    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
+    from LTX_2_MLX.model.video_vae.tiling import decode_streaming
 
     print("\n" + "=" * 80)
     print(f"Decode mode: {mode}")
@@ -725,7 +725,7 @@ def decode_mode(
             del video, frames
     else:
         chunk_index = 0
-        chunk_iter = iter(decode_tiled(latent, decoder, cfg, show_progress=True))
+        chunk_iter = iter(decode_streaming(latent, decoder, cfg, show_progress=True))
         while True:
             started = time.perf_counter()
             try:

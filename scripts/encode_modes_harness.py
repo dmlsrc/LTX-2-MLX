@@ -416,7 +416,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # NO spatial seams. The legacy simple-decoder branch always splits
     # spatially for width > 512, which is what was creating edge artifacts.
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
-    from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_tiled
+    from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_streaming
     tiling_cfg = TilingConfig.auto(
         height=height, width=width, num_frames=n_frames,
         decoder_backend=args.vae_decoder_backend,
@@ -435,12 +435,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             if sp else "no spatial tiling"
         )
         temporal_desc = (
-            f"temporal tile={tp.tile_size_in_frames} overlap={tp.tile_overlap_in_frames}"
+            f"temporal tile={tp.chunk_size_in_frames} overlap={tp.chunk_overlap_in_frames}"
             if tp else "no temporal tiling"
         )
         print(f"VAE tiling: {spatial_desc}, {temporal_desc}")
         def chunk_iter():
-            yield from decode_tiled(latent, decoder, tiling_cfg, show_progress=True)
+            yield from decode_streaming(latent, decoder, tiling_cfg, show_progress=True)
 
     # Pipelined decode -> per-encoder writer queues -> ffmpeg.
     # Subprocesses launch BEFORE the decode loop so libx265 can start chewing

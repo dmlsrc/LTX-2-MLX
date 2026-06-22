@@ -36,7 +36,7 @@ from ..model.upscaler import SpatialUpscaler
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
-from ..model.video_vae.tiling import TilingConfig, decode_tiled
+from ..model.video_vae.tiling import TilingConfig, decode_streaming
 from ..types import NATIVE_FPS, LatentState, VideoLatentShape, VideoPixelShape
 from .common import (
     ImageCondition,
@@ -753,7 +753,7 @@ class ICLoraPipeline:
 
         # Decode to video
         if config.tiling_config:
-            video = decode_tiled(final_latent, self.video_decoder, config.tiling_config)
+            video = decode_streaming(final_latent, self.video_decoder, config.tiling_config)
         else:
             video = decode_latent(final_latent, self.video_decoder)
 

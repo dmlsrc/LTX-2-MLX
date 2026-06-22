@@ -52,9 +52,9 @@ from typing import Any
 import mlx.core as mx
 
 from ..model.video_vae.tiling import (
-    TemporalTilingConfig,
+    TemporalChunkConfig,
     TilingConfig,
-    decode_tiled,
+    decode_streaming,
 )
 
 # Per-frame list vs. single (T,H,W,C) ndarray.  Default is the
@@ -158,22 +158,22 @@ def iter_decoded_chunks(
         # "No tiling" no longer means "accumulate the whole video." Synthesize a
         # temporal-only config matched to decode_latent's chunking (7 latent
         # frames / 2 overlap; tile sizes are pixel-space, so x the temporal scale
-        # of 8 gives 56 / 16) and stream through decode_tiled. A clip short enough
+        # of 8 gives 56 / 16) and stream through decode_streaming. A clip short enough
         # to be a single chunk reproduces the old single-shot result; a long clip
         # tapers to one temporal chunk's worth instead of the full video. This
         # keeps the streaming path actually streaming once the MLX conv3d overflow
         # fix stops forcing tiling on moderate clips. (compute_dtype is now
-        # vestigial here -- decode_tiled returns the decoder's native output and
+        # vestigial here -- decode_streaming returns the decoder's native output and
         # the per-chunk converter owns the final dtype, as the tiled path already
         # did.)
         tiling = TilingConfig(
             spatial_config=None,
-            temporal_config=TemporalTilingConfig(
-                tile_size_in_frames=56, tile_overlap_in_frames=16
+            temporal_config=TemporalChunkConfig(
+                chunk_size_in_frames=56, chunk_overlap_in_frames=16
             ),
         )
 
-    for chunk in decode_tiled(latent, decoder, tiling, show_progress=False):
+    for chunk in decode_streaming(latent, decoder, tiling, show_progress=False):
         out = convert(chunk)
         del chunk
         try:
@@ -262,12 +262,12 @@ def plan_vae_tiling(
         if sp else "no spatial"
     )
     temporal_desc = (
-        f"temporal tile={tp.tile_size_in_frames} overlap={tp.tile_overlap_in_frames}"
+        f"temporal tile={tp.chunk_size_in_frames} overlap={tp.chunk_overlap_in_frames}"
         if tp else "no temporal"
     )
     if tp is not None:
-        tile = tp.tile_size_in_frames
-        overlap = tp.tile_overlap_in_frames
+        tile = tp.chunk_size_in_frames
+        overlap = tp.chunk_overlap_in_frames
         step = max(1, tile - overlap)
         n_chunks = max(1, -(-(n_frames - overlap) // step))
     else:

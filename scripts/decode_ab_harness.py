@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""A/B harness: accumulating decode_latent vs streamed decode_tiled (matched chunks).
+"""A/B harness: accumulating decode_latent vs streamed decode_streaming (matched chunks).
 
 The streaming decode is being decoupled from tiling: the no-tiling path now streams
-through ``decode_tiled`` with a temporal config matched to ``decode_latent``'s own
+through ``decode_streaming`` with a temporal config matched to ``decode_latent``'s own
 chunking (7 latent frames / 2 overlap == 56 / 16 in pixel-space units, given the 8x
 temporal scale). The two outputs WILL differ at chunk boundaries (different blend
 code); this harness answers the only question that matters: is the streamed output
@@ -17,7 +17,7 @@ It does NOT do a pixel-equality check. It looks for the two named failure modes:
      output doesn't have.
 
 `decode_latent` (the accumulating baseline) is treated as ground truth: the question
-is purely whether the stream regresses against what ships today. Note decode_tiled is
+is purely whether the stream regresses against what ships today. Note decode_streaming is
 already the production decoder for every tiled (large) clip, so its blend is already
 validated; this just extends it to the no-tiling case.
 
@@ -38,22 +38,34 @@ import argparse
 import json
 import os
 import statistics
+import sys
 from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
 
-from LTX_2_MLX import sidecars
-from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
-from LTX_2_MLX.model.video_vae.tiling import (
-    TemporalTilingConfig,
+# Run as `python scripts/decode_ab_harness.py`: put the repo root and scripts/ on
+# the path so we can reuse decode_latent_debug.make_decoder (the split-checkpoint
+# VAE loader: config from the combined checkpoint, weights from the split VAE)
+# instead of reinventing the loading.
+_SCRIPTS = Path(__file__).resolve().parent
+for _p in (str(_SCRIPTS.parent), str(_SCRIPTS)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from decode_latent_debug import make_decoder  # noqa: E402
+
+from LTX_2_MLX import sidecars  # noqa: E402
+from LTX_2_MLX.model.video_vae.decode_utils import decode_latent  # noqa: E402
+from LTX_2_MLX.model.video_vae.tiling import (  # noqa: E402
+    TemporalChunkConfig,
     TilingConfig,
-    decode_tiled,
+    decode_streaming,
 )
 
 # Matches decode_latent(temporal_chunk_size=7, temporal_overlap=2); tile sizes are
 # pixel-space, multiplied through the 8x temporal VAE scale.
-_MATCHED_TILE = TemporalTilingConfig(tile_size_in_frames=56, tile_overlap_in_frames=16)
+_MATCHED_TILE = TemporalChunkConfig(chunk_size_in_frames=56, chunk_overlap_in_frames=16)
 
 
 def _to_thwc_unit(video: mx.array) -> mx.array:
@@ -89,7 +101,7 @@ def compare_decodes(
     # A: current accumulating path. B: streamed, chunk-matched.
     video_a = decode_latent(latent, decoder, timestep=timestep, dtype=mx.float32)
     cfg = TilingConfig(spatial_config=None, temporal_config=_MATCHED_TILE)
-    chunks = list(decode_tiled(latent, decoder, cfg, timestep=timestep, show_progress=False))
+    chunks = list(decode_streaming(latent, decoder, cfg, timestep=timestep, show_progress=False))
     video_b = mx.concatenate(chunks, axis=2)
 
     a = _to_thwc_unit(video_a)
@@ -140,42 +152,40 @@ def compare_decodes(
     return summary
 
 
-def _load_decoder(weights_path: str) -> Any:
-    from LTX_2_MLX.generate import get_vae_config
-    from LTX_2_MLX.model.video_vae.native_decoder import (
-        NativeConv3dVideoDecoder,
-        load_native_vae_decoder_weights,
-    )
-
-    cfg = get_vae_config(weights_path)
-    decoder = NativeConv3dVideoDecoder(
-        decoder_blocks=cfg.get("decoder_blocks"),
-        base_channels=cfg.get("decoder_base_channels", 128),
-        timestep_conditioning=cfg.get("timestep_conditioning", True),
-        compute_dtype=mx.bfloat16,
-    )
-    load_native_vae_decoder_weights(decoder, weights_path)
-    return decoder
+def _load_decoder(weights_path: str, config_weights_path: str | None) -> Any:
+    # Reuse the existing split-checkpoint loader: it reads decoder_blocks from
+    # config_weights_path (the combined checkpoint) and the weights from
+    # weights_path (the split video_vae), and defaults timestep_conditioning off.
+    return make_decoder(weights_path, mx.bfloat16, config_weights_path=config_weights_path)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--latent", required=True, help="sidecar .safetensors holding 'final_video_latent'")
-    ap.add_argument("--weights", default=os.environ.get("LTX_DEFAULT_WEIGHTS_PATH"), help="VAE checkpoint path")
+    ap.add_argument("--weights", required=True, help="VAE weights (the split video_vae.safetensors)")
+    ap.add_argument("--config-weights", default=os.environ.get("LTX_DEFAULT_WEIGHTS_PATH"),
+                    help="checkpoint carrying the VAE config/decoder_blocks (the combined checkpoint)")
     ap.add_argument("--out", required=True, help="output directory for crops + summary.json")
     ap.add_argument("--timestep", type=float, default=0.05)
     ap.add_argument("--latent-key", default="final_video_latent")
+    ap.add_argument("--crop-t", type=int, default=None,
+                    help="keep only the first N latent frames (cheaper run; needs >7 to multi-chunk)")
+    ap.add_argument("--crop-w", type=int, default=None,
+                    help="keep only the first N latent W columns; <=16 keeps pixel width <=512 so the "
+                         "no-tiling arm avoids the spatial conv3d overflow")
     args = ap.parse_args()
-
-    if not args.weights:
-        ap.error("--weights is required (or set LTX_DEFAULT_WEIGHTS_PATH)")
 
     arrays, _meta = sidecars.load_sidecar(args.latent)
     if args.latent_key not in arrays:
         ap.error(f"latent key {args.latent_key!r} not in sidecar; keys: {sorted(arrays)}")
     latent = arrays[args.latent_key]
+    if args.crop_t:
+        latent = latent[:, :, : args.crop_t]
+    if args.crop_w:
+        latent = latent[:, :, :, :, : args.crop_w]
+    print(f"latent {tuple(latent.shape)} (pixel ~ {latent.shape[-2] * 32} x {latent.shape[-1] * 32})")
 
-    decoder = _load_decoder(args.weights)
+    decoder = _load_decoder(args.weights, args.config_weights)
     summary = compare_decodes(latent, decoder, out_dir=Path(args.out), timestep=args.timestep)
 
     print(f"\nframes: A={summary['frame_count_a']} B={summary['frame_count_b']} compared={summary['frames_compared']}")

@@ -26,7 +26,7 @@ from ..model.transformer import LTXAVModel, LTXModel, LTXModelType, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
-from ..model.video_vae.tiling import TilingConfig, decode_tiled
+from ..model.video_vae.tiling import TilingConfig, decode_streaming
 from ..types import (
     LatentState,
     VideoLatentShape,
@@ -397,7 +397,7 @@ class RetakePipeline:
 
         effective_tiling = config.tiling_config
         if effective_tiling:
-            video_chunks = list(decode_tiled(video_state.latent, self.video_decoder, effective_tiling))
+            video_chunks = list(decode_streaming(video_state.latent, self.video_decoder, effective_tiling))
             video = mx.concatenate(video_chunks, axis=2) if len(video_chunks) > 1 else video_chunks[0]
         else:
             video = decode_latent(video_state.latent, self.video_decoder)

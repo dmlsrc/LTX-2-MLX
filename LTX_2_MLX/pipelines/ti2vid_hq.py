@@ -41,7 +41,7 @@ from ..model.upscaler import SpatialUpscaler
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
-from ..model.video_vae.tiling import TilingConfig, decode_tiled
+from ..model.video_vae.tiling import TilingConfig, decode_streaming
 from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
 from .common import (
     ImageCondition,
@@ -619,7 +619,7 @@ class TI2VidHQPipeline:
 
         effective_tiling = config._get_tiling_config()
         if effective_tiling:
-            video_chunks = list(decode_tiled(final_latent, self.video_decoder, effective_tiling))
+            video_chunks = list(decode_streaming(final_latent, self.video_decoder, effective_tiling))
             video = mx.concatenate(video_chunks, axis=2) if len(video_chunks) > 1 else video_chunks[0]
         else:
             video = decode_latent(final_latent, self.video_decoder)

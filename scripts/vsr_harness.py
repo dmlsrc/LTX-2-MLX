@@ -206,12 +206,12 @@ def plan_vae_tiling(latent: Any, backend: str) -> tuple[Any, int, str]:
         if sp else "no spatial"
     )
     temporal_desc = (
-        f"temporal tile={tp.tile_size_in_frames} overlap={tp.tile_overlap_in_frames}"
+        f"temporal tile={tp.chunk_size_in_frames} overlap={tp.chunk_overlap_in_frames}"
         if tp else "no temporal"
     )
     if tp is not None:
-        tile = tp.tile_size_in_frames
-        overlap = tp.tile_overlap_in_frames
+        tile = tp.chunk_size_in_frames
+        overlap = tp.chunk_overlap_in_frames
         step = max(1, tile - overlap)
         n_chunks = max(1, -(-(n_frames - overlap) // step))
     else:
@@ -232,7 +232,7 @@ def iter_latent_chunks(
        "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
     """
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
-    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
+    from LTX_2_MLX.model.video_vae.tiling import decode_streaming
     from scripts.encode_modes_harness import chunk_to_uint8
 
     convert = chunk_to_rgba_fp16 if output_format == "fp16_rgba" else chunk_to_uint8
@@ -264,7 +264,7 @@ def iter_latent_chunks(
         yield out
         return
 
-    for chunk in decode_tiled(latent, decoder, cfg, show_progress=False):
+    for chunk in decode_streaming(latent, decoder, cfg, show_progress=False):
         out = convert(chunk, mx_mod)
         # convert() clears the cache; `chunk` is the only MLX tensor still
         # live, so drop it + clear before yielding to the downstream loop.

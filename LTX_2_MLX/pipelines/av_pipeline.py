@@ -73,7 +73,7 @@ from ..model.transformer import LTXModel, LTXModelType, X0Model
 from ..model.video_vae.decode_utils import decode_latent
 from ..model.video_vae.native_decoder import NativeConv3dVideoDecoder
 from ..model.video_vae.native_encoder import NativeConv3dVideoEncoder
-from ..model.video_vae.tiling import TilingConfig, decode_tiled
+from ..model.video_vae.tiling import TilingConfig, decode_streaming
 from ..sidecars import save_sidecar
 from ..types import NATIVE_FPS, AudioLatentShape, LatentState, VideoLatentShape, VideoPixelShape
 from .common import (
@@ -1667,7 +1667,7 @@ class AVPipeline:
                         "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
                     )
                     video = None
-                    for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                    for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
                         video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
                         mx.eval(video)
                         del chunk
@@ -2061,7 +2061,7 @@ class AVPipeline:
                         "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
                     )
                     video = None
-                    for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                    for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
                         video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
                         mx.eval(video)
                         del chunk
@@ -2520,7 +2520,7 @@ class AVPipeline:
                         "  Using tiled VAE decoding (preventing GPU watchdog timeout)"
                     )
                     video = None
-                    for chunk in decode_tiled(final_video_latent, self.video_decoder, effective_tiling):
+                    for chunk in decode_streaming(final_video_latent, self.video_decoder, effective_tiling):
                         video = chunk if video is None else mx.concatenate([video, chunk], axis=2)
                         mx.eval(video)
                         del chunk

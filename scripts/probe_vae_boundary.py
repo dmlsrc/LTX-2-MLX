@@ -218,7 +218,7 @@ def decode_variant(
     audio_sample_rate: int | None = None,
 ) -> int:
     from LTX_2_MLX.model.video_vae.decode_utils import decode_latent
-    from LTX_2_MLX.model.video_vae.tiling import decode_tiled
+    from LTX_2_MLX.model.video_vae.tiling import decode_streaming
 
     print("\n" + "=" * 80)
     print(f"Boundary variant: {variant.name}")
@@ -262,7 +262,7 @@ def decode_variant(
             del video, frames
         else:
             chunk_index = 0
-            chunk_iter = iter(decode_tiled(variant_latent, decoder, cfg, show_progress=True))
+            chunk_iter = iter(decode_streaming(variant_latent, decoder, cfg, show_progress=True))
             while True:
                 started = time.perf_counter()
                 try:

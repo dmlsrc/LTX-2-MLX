@@ -56,7 +56,7 @@ from LTX_2_MLX.model.video_vae.native_decoder import (
 )
 from LTX_2_MLX.model.video_vae.tiling import (
     SpatialTilingConfig,
-    TemporalTilingConfig,
+    TemporalChunkConfig,
     TilingConfig,
 )
 from LTX_2_MLX.progress import PhaseBar, StackedPhaseBars
@@ -529,9 +529,9 @@ def build_vae_tiling_config(
 
     temporal_config = None
     if temporal_tile_frames > 0:
-        temporal_config = TemporalTilingConfig(
-            tile_size_in_frames=temporal_tile_frames,
-            tile_overlap_in_frames=temporal_overlap_frames,
+        temporal_config = TemporalChunkConfig(
+            chunk_size_in_frames=temporal_tile_frames,
+            chunk_overlap_in_frames=temporal_overlap_frames,
         )
 
     spatial_config = None
@@ -562,7 +562,7 @@ def describe_vae_tiling_config(
     if temporal is not None:
         parts.append(
             "temporal="
-            f"{temporal.tile_size_in_frames}/{temporal.tile_overlap_in_frames} frames"
+            f"{temporal.chunk_size_in_frames}/{temporal.chunk_overlap_in_frames} frames"
         )
     else:
         parts.append("temporal=off")

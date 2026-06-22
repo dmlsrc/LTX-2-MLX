@@ -1,13 +1,13 @@
 """Equivalence test for the tiled VAE decode blend (model/video_vae/tiling.py).
 
-``decode_tiled`` has a fast path for when spatial tiling is inactive: the blend
+``decode_streaming`` has a fast path for when spatial tiling is inactive: the blend
 weights then vary only along T, so it keeps them as a ``(1, 1, T, 1, 1)`` column
 and assigns each (single) spatial tile directly instead of read-modify-writing a
 full-resolution weight buffer.  That must be numerically identical to the general
 full-weight path.
 
 We check it with a deterministic pointwise "decoder" whose decoded-frame mapping
-matches what ``decode_tiled`` assumes for the causal VAE, so a tile's decoded
+matches what ``decode_streaming`` assumes for the causal VAE, so a tile's decoded
 length equals its output-slice length with no truncation.  The blended, tiled
 output must then reconstruct the full single-shot decode exactly (the trapezoidal
 overlap weights are a partition of unity), and the reduced-weight path must match
@@ -20,9 +20,9 @@ from LTX_2_MLX.model.video_vae.tiling import (
     DEFAULT_SPATIAL_SCALE,
     DEFAULT_TEMPORAL_SCALE,
     SpatialTilingConfig,
-    TemporalTilingConfig,
+    TemporalChunkConfig,
     TilingConfig,
-    decode_tiled,
+    decode_streaming,
 )
 
 ST = DEFAULT_TEMPORAL_SCALE  # 8
@@ -54,7 +54,7 @@ def _decoder_fn(tile, timestep=None, show_progress=False):
 
 def _run(latent, tiling_config):
     chunks = list(
-        decode_tiled(
+        decode_streaming(
             latent,
             _decoder_fn,
             tiling_config,
@@ -73,7 +73,7 @@ def _latent():
 
 def _temporal_only():
     # Heavy temporal overlap (5 tiles) with no spatial tiling.
-    return TemporalTilingConfig(tile_size_in_frames=16, tile_overlap_in_frames=8)
+    return TemporalChunkConfig(chunk_size_in_frames=16, chunk_overlap_in_frames=8)
 
 
 def test_spatial_off_reconstructs_full_decode():
