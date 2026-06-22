@@ -32,7 +32,6 @@ make_decoder = None
 make_audio_decoder_and_vocoder = None
 mlx_mem_summary = None
 parse_dtype = None
-tiling_config_for_mode = None
 write_frames = None
 decode_audio_latent = None
 write_wav = None
@@ -42,7 +41,7 @@ def load_runtime_deps() -> None:
     global np
     global RunTimings, Timer, encode_frames_dir, frames_from_video_tensor
     global load_latents, make_decoder, make_audio_decoder_and_vocoder, mlx_mem_summary
-    global parse_dtype, tiling_config_for_mode, write_frames, decode_audio_latent, write_wav
+    global parse_dtype, write_frames, decode_audio_latent, write_wav
 
     if np is None:
         import numpy as _np
@@ -81,9 +80,6 @@ def load_runtime_deps() -> None:
             parse_dtype as _parse_dtype,
         )
         from scripts.decode_latent_debug import (
-            tiling_config_for_mode as _tiling_config_for_mode,
-        )
-        from scripts.decode_latent_debug import (
             write_frames as _write_frames,
         )
         from scripts.decode_latent_debug import (
@@ -99,7 +95,6 @@ def load_runtime_deps() -> None:
         make_audio_decoder_and_vocoder = _make_audio_decoder_and_vocoder
         mlx_mem_summary = _mlx_mem_summary
         parse_dtype = _parse_dtype
-        tiling_config_for_mode = _tiling_config_for_mode
         write_frames = _write_frames
         decode_audio_latent = _decode_audio_latent
         write_wav = _write_wav
@@ -210,14 +205,12 @@ def decode_variant(
     output_dir: Path,
     fps: float,
     mx_mod: Any,
-    mode: str,
-    full_decode_chunk_size: int,
     show_memory: bool,
     timings: RunTimings,
     audio_wav_path: Path | None = None,
     audio_sample_rate: int | None = None,
 ) -> int:
-    from LTX_2_MLX.model.video_vae.tiling import decode_streaming
+    from LTX_2_MLX.model.video_vae.tiling import decode_single_pass
 
     print("\n" + "=" * 80)
     print(f"Boundary variant: {variant.name}")
@@ -232,7 +225,6 @@ def decode_variant(
         print("before decode:", mlx_mem_summary(mx_mod))
 
     variant_latent = pad_latent_spatial(latent, variant, mx_mod)
-    cfg = tiling_config_for_mode(mode, variant_latent)
     frames_dir = output_dir / f"frames_{variant.name}"
     if frames_dir.exists():
         shutil.rmtree(frames_dir)
@@ -244,30 +236,24 @@ def decode_variant(
 
     patch_context = DecoderSpatialPadding(decoder, "zero") if variant.zero_spatial_conv_padding else nullcontext()
     with patch_context:
-        # decode_streaming handles cfg=None (no spatial tiling + default temporal
-        # chunking), so the boundary variant streams chunk-by-chunk for every case.
-        chunk_index = 0
-        chunk_iter = iter(decode_streaming(variant_latent, decoder, cfg, show_progress=True))
-        while True:
-            started = time.perf_counter()
-            try:
-                chunk = next(chunk_iter)
-            except StopIteration:
-                break
-            mx_mod.eval(chunk)
-            decode_seconds += time.perf_counter() - started
-            if show_memory:
-                print(f"chunk {chunk_index}:", mlx_mem_summary(mx_mod))
+        # A boundary probe must see the UN-tiled decode: tiling splits + blends the
+        # frame edges and dodges the int32 white tail -- exactly the artifacts this
+        # diagnoses. So always single-pass (decode_single_pass logs the int32 verdict).
+        started = time.perf_counter()
+        video = decode_single_pass(variant_latent, decoder)
+        mx_mod.eval(video)
+        decode_seconds += time.perf_counter() - started
+        if show_memory:
+            print("after decode:", mlx_mem_summary(mx_mod))
 
-            started = time.perf_counter()
-            frames = crop_frames(frames_from_video_tensor(chunk, mx_mod), variant.crop_pixels)
-            frame_index = write_frames(frames, frames_dir, frame_index)
-            write_seconds += time.perf_counter() - started
-            del chunk, frames
-            maybe_clear_mlx(mx_mod)
-            if show_memory:
-                print(f"after writing chunk {chunk_index}:", mlx_mem_summary(mx_mod))
-            chunk_index += 1
+        started = time.perf_counter()
+        frames = crop_frames(frames_from_video_tensor(video, mx_mod), variant.crop_pixels)
+        frame_index = write_frames(frames, frames_dir, 0)
+        write_seconds += time.perf_counter() - started
+        del video, frames
+        maybe_clear_mlx(mx_mod)
+        if show_memory:
+            print("after writing:", mlx_mem_summary(mx_mod))
 
     timings.add(f"{variant.name} decode", decode_seconds)
     timings.add(f"{variant.name} write frames", write_seconds)
@@ -457,11 +443,6 @@ def main() -> None:
     parser.add_argument("--vae-dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
     parser.add_argument("--latent-dtype", choices=["auto", "bfloat16", "float16", "float32"], default="auto")
     parser.add_argument(
-        "--mode",
-        default="auto",
-        help="Decode mode from decode_latent_debug.py: auto, none, default, both384_24, etc.",
-    )
-    parser.add_argument(
         "--variants",
         nargs="+",
         default=[
@@ -483,7 +464,6 @@ def main() -> None:
         action="store_true",
         help="Decode final_audio_latent once, write boundary_probe_audio.wav, and mux it into every variant MP4.",
     )
-    parser.add_argument("--full-decode-chunk-size", type=int, default=9999)
     args = parser.parse_args()
     load_runtime_deps()
 
@@ -527,8 +507,6 @@ def main() -> None:
             output_dir=args.output_dir,
             fps=args.fps,
             mx_mod=mx,
-            mode=args.mode,
-            full_decode_chunk_size=args.full_decode_chunk_size,
             show_memory=args.show_memory,
             timings=timings,
             audio_wav_path=audio_wav_path,
