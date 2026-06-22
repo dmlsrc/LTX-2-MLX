@@ -226,15 +226,28 @@ def iter_latent_chunks(
     cfg: Any,
     mx_mod: Any,
     output_format: str = "uint8_rgb",
+    single_pass: bool = False,
 ) -> Iterator[mx.array]:
     """Yield decoded chunks. output_format selects the conversion:
        "uint8_rgb"  -> (T,H,W,3) uint8  (for LowLatency VSR / NV12 source)
        "fp16_rgba"  -> (T,H,W,4) fp16   (for HighQuality VSR / RGBAHalf source)
     """
-    from LTX_2_MLX.model.video_vae.tiling import decode_streaming
+    from LTX_2_MLX.model.video_vae.tiling import decode_single_pass, decode_streaming
     from scripts.encode_modes_harness import chunk_to_uint8
 
     convert = chunk_to_rgba_fp16 if output_format == "fp16_rgba" else chunk_to_uint8
+
+    if single_pass:
+        # --vae-tiling single: one whole-clip decode. decode_single_pass logs whether
+        # the frame count crosses the int32 boundary (frames past it decode white).
+        out = convert(decode_single_pass(latent, decoder), mx_mod)
+        try:
+            mx_mod.clear_cache()
+        except Exception:
+            pass
+        gc.collect()
+        yield out
+        return
 
     # decode_streaming handles cfg=None (no spatial tiling + default temporal
     # chunking), so this streams chunk-by-chunk for every case -- no whole-video
@@ -409,8 +422,8 @@ def run(args: argparse.Namespace) -> None:
         total_frames, in_h, in_w = latent_dims(latent)
         source_fps = args.source_fps
 
-        if args.vae_tiling == "off":
-            vae_cfg, n_vae_chunks, vae_tiling_desc = None, 1, "off (forced single-shot decode)"
+        if args.vae_tiling == "single":
+            vae_cfg, n_vae_chunks, vae_tiling_desc = None, 1, "single (one decode)"
         else:
             vae_cfg, n_vae_chunks, vae_tiling_desc = plan_vae_tiling(latent, args.vae_decoder_backend)
         print(
@@ -426,6 +439,7 @@ def run(args: argparse.Namespace) -> None:
             latent, decoder,
             cfg=vae_cfg, mx_mod=mx,
             output_format="fp16_rgba",
+            single_pass=args.vae_tiling == "single",
         )
     else:
         print(f"Reading video: {args.video}")
@@ -745,11 +759,11 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--vae-tiling", choices=["auto", "off"], default="auto",
+        "--vae-tiling", choices=["auto", "single"], default="auto",
         help=(
-            "auto (default) lets TilingConfig.auto_native_conv3d pick tile size "
-            "from RAM + int32 conv3d limits. off uses no spatial tiling (default "
-            "temporal chunking); the decode streams chunk-by-chunk either way."
+            "auto (default) lets TilingConfig.auto_native_conv3d size to RAM + the "
+            "int32 conv3d boundary (one decode if it fits, else bounded tiles). single "
+            "forces one decode; frames past the int32 boundary decode white."
         ),
     )
     parser.add_argument("--output-dir", required=True)

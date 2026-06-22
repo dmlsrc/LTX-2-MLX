@@ -303,9 +303,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--vae-tiling",
-        choices=["auto", "off", "custom"],
+        choices=["auto", "single", "custom"],
         default="auto",
-        help="VAE decode tiling policy.",
+        help="VAE decode policy. auto sizes to memory + the int32 Conv3d boundary; "
+        "single forces one decode (frames past the boundary decode white); custom "
+        "uses the tile sizes below.",
     )
     parser.add_argument("--tiled-vae", action="store_true", help="Force tiled VAE decode.")
     parser.add_argument("--vae-temporal-tile-frames", type=int, default=None)
@@ -629,6 +631,7 @@ def main() -> None:
         mx.set_cache_limit(int(args.mlx_cache_limit_gb * (1000**3)))
         mx.clear_cache()
 
+    decode_single_pass = args.vae_tiling == "single"
     vae_tiling_config, vae_auto_tiling = gen.build_vae_tiling_config(
         args.vae_tiling,
         height=height,
@@ -666,7 +669,7 @@ def main() -> None:
     print(f"Resolution: {width}x{height}, {inferred_frames} frames")
     print(f"Stage-2 steps: {len(gen.STAGE_2_DISTILLED_SIGMA_VALUES) - 1}, Seed: {seed}")
     print(f"Compute dtype: {gen.compute_dtype_name(compute_dtype)}")
-    print(f"VAE tiling: {gen.describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling)}")
+    print(f"VAE tiling: {gen.describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling, single_pass=decode_single_pass)}")
     print(f"Stage-1 latent shape: {latent_metadata['video_shape']}")
     if latent_metadata["audio_shape"] is not None:
         print(f"Stage-1 audio latent shape: {latent_metadata['audio_shape']}")
@@ -1078,6 +1081,7 @@ def main() -> None:
                     av_pipeline.video_decoder,
                     tiling=effective_tiling,
                     output_format="fp16_rgba",
+                    single_pass=decode_single_pass,
                 ):
                     vae_pbar.update(1)
                     for i, frame in enumerate(chunk_frames):
