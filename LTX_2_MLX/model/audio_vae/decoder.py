@@ -93,6 +93,7 @@ class CausalConv2d(nn.Module):
         kernel_size: int = 3,
         stride: int = 1,
         causality_axis: CausalityAxis = CausalityAxis.HEIGHT,
+        downsample: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -108,20 +109,33 @@ class CausalConv2d(nn.Module):
         # Pre-compute padding based on causality axis
         # PyTorch F.pad format: (pad_left, pad_right, pad_top, pad_bottom)
         # MLX mx.pad format: [(batch_before, batch_after), (C_before, C_after), (H_before, H_after), (W_before, W_after)]
-        pad_h = kernel_size - 1
-        pad_w = kernel_size - 1
-
-        if causality_axis == CausalityAxis.NONE:
-            # Symmetric padding
-            self._padding = [(0, 0), (0, 0), (pad_h // 2, pad_h - pad_h // 2), (pad_w // 2, pad_w - pad_w // 2)]
-        elif causality_axis == CausalityAxis.WIDTH:
-            # Causal along width (time): pad left only, symmetric on height
-            self._padding = [(0, 0), (0, 0), (pad_h // 2, pad_h - pad_h // 2), (pad_w, 0)]
-        elif causality_axis == CausalityAxis.HEIGHT:
-            # Causal along height (frequency): pad top only, symmetric on width
-            self._padding = [(0, 0), (0, 0), (pad_h, 0), (pad_w // 2, pad_w - pad_w // 2)]
+        if downsample:
+            # Strided (stride=2) downsample: the reference uses an asymmetric pad
+            # table distinct from the symmetric stride-1 causal pad, so the output
+            # samples in[2j:2j+3] (not the shifted in[2j-1:2j+2]). kernel_size=3.
+            if causality_axis == CausalityAxis.NONE:
+                self._padding = [(0, 0), (0, 0), (0, 1), (0, 1)]
+            elif causality_axis == CausalityAxis.WIDTH:
+                self._padding = [(0, 0), (0, 0), (0, 1), (2, 0)]
+            elif causality_axis == CausalityAxis.HEIGHT:
+                self._padding = [(0, 0), (0, 0), (2, 0), (0, 1)]
+            else:
+                raise ValueError(f"Invalid causality_axis: {causality_axis}")
         else:
-            raise ValueError(f"Invalid causality_axis: {causality_axis}")
+            pad_h = kernel_size - 1
+            pad_w = kernel_size - 1
+
+            if causality_axis == CausalityAxis.NONE:
+                # Symmetric padding
+                self._padding = [(0, 0), (0, 0), (pad_h // 2, pad_h - pad_h // 2), (pad_w // 2, pad_w - pad_w // 2)]
+            elif causality_axis == CausalityAxis.WIDTH:
+                # Causal along width (time): pad left only, symmetric on height
+                self._padding = [(0, 0), (0, 0), (pad_h // 2, pad_h - pad_h // 2), (pad_w, 0)]
+            elif causality_axis == CausalityAxis.HEIGHT:
+                # Causal along height (frequency): pad top only, symmetric on width
+                self._padding = [(0, 0), (0, 0), (pad_h, 0), (pad_w // 2, pad_w - pad_w // 2)]
+            else:
+                raise ValueError(f"Invalid causality_axis: {causality_axis}")
 
     def __call__(self, x: mx.array) -> mx.array:
         """Apply causal 2D convolution."""

@@ -25,7 +25,9 @@ class Downsample2d(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
         # Strided conv for downsampling (stride=2)
-        self.conv = CausalConv2d(channels, channels, kernel_size=3, stride=2)
+        # downsample=True uses the reference's asymmetric strided pad, so the time
+        # axis is not shifted by one position vs the trained weights.
+        self.conv = CausalConv2d(channels, channels, kernel_size=3, stride=2, downsample=True)
 
     def __call__(self, x: mx.array) -> mx.array:
         """Downsample by 2x."""

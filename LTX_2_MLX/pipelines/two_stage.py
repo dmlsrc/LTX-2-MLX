@@ -8,6 +8,7 @@ This combines the quality of CFG guidance with the speed of distilled refinement
 """
 
 import gc
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -560,18 +561,23 @@ class TwoStagePipeline:
         # Create components
         noiser = GaussianNoiser()
         stepper = self.diffusion_step
-        # MultiModalGuider matching Reddit/ComfyUI working config:
-        # CFG active, STG=0, modality_scale=3, rescale=0
+        # MultiModalGuider matching the Reddit/ComfyUI working config: CFG active,
+        # STG=0, modality_scale=3, rescale OFF by default. The reference instead runs
+        # a std-ratio rescale (rescale_scale=0.7 regular distilled / 0.45 HQ). Set
+        # LTX_RESCALE_SCALE=0.7 to A/B the reference rescale against the default.
+        rescale_scale = float(os.environ.get("LTX_RESCALE_SCALE", "0") or "0")
         video_guider = MultiModalGuider(
             params=MultiModalGuiderParams(
                 cfg_scale=config.cfg_scale,
                 modality_scale=config.modality_scale,
+                rescale_scale=rescale_scale,
             ),
         )
         audio_guider = MultiModalGuider(
             params=MultiModalGuiderParams(
                 cfg_scale=config.audio_cfg_scale,
                 modality_scale=config.modality_scale,
+                rescale_scale=rescale_scale,
             ),
         )
 
