@@ -22,8 +22,6 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 
-from LTX_2_MLX.kernels import silu_mul
-
 # Gemma3 layer type pattern: every 6th layer (5, 11, 17, 23, 29, 35, 41, 47) is full attention
 GEMMA3_LAYER_TYPES = [
     "sliding_attention" if (i % 6 != 5) else "full_attention"
@@ -257,8 +255,9 @@ class Gemma3MLP(nn.Module):
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
 
     def __call__(self, x: mx.array) -> mx.array:
-        # SiLU gated activation with fused kernel
-        return self.down_proj(silu_mul(self.gate_proj(x), self.up_proj(x)))
+        # GELU-tanh gated activation: Gemma uses gelu_pytorch_tanh (matches the
+        # transformers Gemma3 reference and mlx-lm), not SiLU.
+        return self.down_proj(nn.gelu_approx(self.gate_proj(x)) * self.up_proj(x))
 
 
 class Gemma3DecoderLayer(nn.Module):
