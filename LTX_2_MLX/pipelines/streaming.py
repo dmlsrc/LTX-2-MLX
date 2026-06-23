@@ -139,7 +139,6 @@ def iter_decoded_chunks(
     *,
     tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
-    compute_dtype: Any = mx.bfloat16,
     single_pass: bool = False,
 ) -> Iterator[list[mx.array]]:
     """Yield decoded chunks as per-frame MLX-array lists.
@@ -173,8 +172,7 @@ def iter_decoded_chunks(
     # decode_streaming handles tiling=None by running the native-Conv3d auto logic
     # (one decode if the clip fits the memory budget + the int32 boundary, else
     # memory/int32-bounded tiles), so the no-tiling path streams without ever
-    # accumulating the whole video. (compute_dtype is vestigial here -- the
-    # per-chunk converter owns the final dtype, as the tiled path already did.)
+    # accumulating the whole video.
     for chunk in decode_streaming(latent, decoder, tiling, show_progress=False):
         out = convert(chunk)
         del chunk
@@ -193,7 +191,6 @@ def iter_decoded_frames(
     *,
     tiling: TilingConfig | None,
     output_format: str = "fp16_rgba",
-    compute_dtype: Any = mx.bfloat16,
     single_pass: bool = False,
 ) -> Iterator[mx.array]:
     """Flat per-frame iterator over the chunked decode.
@@ -213,7 +210,6 @@ def iter_decoded_frames(
         latent, decoder,
         tiling=tiling,
         output_format=output_format,
-        compute_dtype=compute_dtype,
         single_pass=single_pass,
     ):
         # Null each slot as its frame is handed off: the decoded frame frees on
