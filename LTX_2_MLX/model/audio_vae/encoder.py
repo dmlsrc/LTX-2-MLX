@@ -14,6 +14,7 @@ from .decoder import (
     LATENT_DOWNSAMPLE_FACTOR,
     CausalConv2d,
     PerChannelStatistics,
+    PixelNorm,
     SimpleResBlock2d,
 )
 
@@ -120,6 +121,10 @@ class AudioEncoder(nn.Module):
 
         # Output conv: base_channels -> z_channels*2 (if double_z) or z_channels
         out_channels = z_channels * 2 if double_z else z_channels
+        # Final norm before the output activation+conv. Reference _finalize_output
+        # is norm_out -> SiLU -> conv_out; PixelNorm is parameterless (no weights to
+        # load), matching the decoder's convention and the reference's per-pixel RMS.
+        self.norm_out = PixelNorm(dim=1, eps=1e-6)
         self.conv_out = CausalConv2d(base_block_channels, out_channels, kernel_size=3)
 
     def __call__(self, spectrogram: mx.array) -> mx.array:
@@ -154,7 +159,8 @@ class AudioEncoder(nn.Module):
         h = self.mid_block_2(h)
         mx.eval(h)
 
-        # Output (with activation before conv)
+        # Output: norm_out -> SiLU -> conv_out (reference _finalize_output)
+        h = self.norm_out(h)
         h = nn.silu(h)
         h = self.conv_out(h)
 

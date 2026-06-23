@@ -125,9 +125,24 @@ class MultiModalGuider:
         uncond_perturbed: mx.array,
         uncond_modality: mx.array,
     ) -> mx.array:
-        """Combine all guidance terms into the final prediction."""
+        """Combine all guidance terms into the final prediction.
+
+        The combine and the std-ratio rescale run in float32, matching the
+        reference: the (cfg_scale-1)*(cond-uncond) term amplifies bf16 rounding
+        at cfg_scale 3-7, so the reference upcasts every operand, accumulates in
+        fp32, and casts the result back to the input dtype.
+        """
         # uncond_text/uncond_perturbed/uncond_modality may be 0.0 (float)
         # when the corresponding pass was not needed
+        dtype = cond.dtype
+        cond = cond.astype(mx.float32)
+        if isinstance(uncond_text, mx.array):
+            uncond_text = uncond_text.astype(mx.float32)
+        if isinstance(uncond_perturbed, mx.array):
+            uncond_perturbed = uncond_perturbed.astype(mx.float32)
+        if isinstance(uncond_modality, mx.array):
+            uncond_modality = uncond_modality.astype(mx.float32)
+
         pred = cond
 
         if isinstance(uncond_text, mx.array):
@@ -147,7 +162,7 @@ class MultiModalGuider:
             factor = self.params.rescale_scale * factor + (1 - self.params.rescale_scale)
             pred = pred * factor
 
-        return pred
+        return pred.astype(dtype)
 
     def do_unconditional_generation(self) -> bool:
         return not math.isclose(self.params.cfg_scale, 1.0)
