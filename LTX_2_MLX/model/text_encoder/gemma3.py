@@ -40,6 +40,9 @@ class Gemma3Config:
     num_attention_heads: int = 16
     num_key_value_heads: int = 8
     head_dim: int = 256
+    # Query pre-attention scale base. Equals head_dim for 1B/4B/12B (256), but
+    # the 27B uses 168 against head_dim 128, so the scale must follow this field.
+    query_pre_attn_scalar: int = 256
     rms_norm_eps: float = 1e-6
     max_position_embeddings: int = 131072
     sliding_window: int = 1024
@@ -184,10 +187,11 @@ class Gemma3Attention(nn.Module):
         # Sliding window size (only used for sliding_attention layers)
         self.sliding_window = config.sliding_window if layer_type == "sliding_attention" else None
 
-        # Attention scale. Gemma 3 scales queries by query_pre_attn_scalar**-0.5;
-        # for the 12B checkpoint query_pre_attn_scalar == head_dim == 256, so
-        # head_dim**-0.5 is exact here (would diverge for a variant where they differ).
-        self.scale = self.head_dim ** -0.5
+        # Attention scale: Gemma 3 scales queries by query_pre_attn_scalar**-0.5
+        # (matches the HF reference). Equals head_dim**-0.5 for the 12B
+        # (query_pre_attn_scalar == head_dim == 256); follows the field so a
+        # variant where they differ (27B: 168 vs 128) stays correct.
+        self.scale = config.query_pre_attn_scalar ** -0.5
 
     def __call__(
         self,
