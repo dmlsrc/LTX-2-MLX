@@ -1350,7 +1350,6 @@ machine, direct 1024x576x481 auto-selects `128/8`.
 Custom controls for middle-ground tests:
 
 ```bash
---vae-decoder native \
 --vae-tiling custom \
 --vae-temporal-tile-frames 128 \
 --vae-temporal-overlap-frames 8
@@ -1462,7 +1461,7 @@ results on bakery 512x288x481:
 | No tiling               | 23.5-26.2s / 32.1 GB | 29.4-36.4s / 10.4 GB |
 
 End-to-end bakery AV smoke with warm caches, `r16` resident-group compile,
-FF pretranspose, attn pretranspose, `--vae-decoder native`,
+FF pretranspose, attn pretranspose,
 `--vae-tiling single`: denoise RUN 7m08s avg 53.4 s/it; total 8m07s.  Native
 Conv3d at 512x288 with no tiling is the fastest decode mode measured.
 

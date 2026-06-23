@@ -131,7 +131,7 @@ lengths in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 - **Use default BF16 compute** - override with `--dtype float16` or `--dtype float32` only for experiments
 - **Audio follows compute dtype where safe** - LTX-2.3 Vocoder+BWE keeps a scoped FP32 island matching Lightricks' precision caution
-- **VAE decode uses native Conv3d + zero padding** - `--vae-tiling auto` picks a RAM-aware native tile plan.  `--vae-decoder` and `--vae-tiling` remain user knobs; `--vae-spatial-padding` was retired 2026-05-23 (only `zero` is supported; `reflect` lost in every A/B and was dropped)
+- **VAE decode uses native Conv3d + zero padding** - `--vae-tiling auto` picks a RAM-aware native tile plan.  `--vae-tiling` remains a user knob (the `--vae-decoder` flag was removed -- native Conv3d is the only decoder); `--vae-spatial-padding` was retired 2026-05-23 (only `zero` is supported; `reflect` lost in every A/B and was dropped)
 - **Default canvas is 512x288** - pass `--height`/`--width` only when you want to leave the fast 16:9 preview size
 - **Default outputs are timestamped** - without `--output`, runs save to `DIFFUSERS_OUTPUT_DIR`, then `OUTPUT_DIR`, then `outputs/` as `ltx_YYYYmmdd_HHMMSS.mp4`; use `--output-prefix` to name a run family
 - **Pick the encode tier by destination** - `--encode-tier {web,default,hq,export,reference}` (default: `default`) selects codec/container/audio together. `web` is libx264 + AAC for universal browser compat; `default` is hardware HEVC + ALAC for Apple/modern browsers; `hq` is software HEVC 4:4:4; `export` and `reference` are ProRes (.mov) for NLE / mastering workflows

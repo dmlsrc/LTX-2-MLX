@@ -264,7 +264,8 @@ nothing extra to use the production default.
 Historical retirements (2026-05-23):
 - The `SimpleVideoDecoder` (PyTorch-layout slice-conv decoder) was
   removed from the working tree and remains available in git history; the
-  `--vae-decoder` CLI flag now only accepts `native`.
+  `--vae-decoder` CLI flag was later removed entirely (native Conv3d is the
+  only decoder).
 - The `SimpleVideoEncoder` was removed from the working tree and replaced by
   `NativeConv3dVideoEncoder` (parity verified at cos sim 0.99965 FP32; ~2-3x
   faster).

@@ -180,7 +180,6 @@ ltx2mlx "Your prompt" \
 | `--mlx-cache-limit-gb` | MLX in-memory allocator cache limit in decimal GB | 1 |
 | `--stream-transformer` | Recommended block-streaming preset: r16, compile, 4-block groups | False |
 | `--dtype` | Compute dtype: `bfloat16`, `float16`, or `float32` | bfloat16 |
-| `--vae-decoder` | VAE decoder backend.  Only `native` (MLX-native Conv3d) is supported; the historical `legacy` `SimpleVideoDecoder` was removed 2026-05-23 and remains available in git history. | native |
 | `--vae-tiling` | VAE decode policy: RAM-aware `auto`, `single` (force one decode), or `custom` | auto |
 | `--video-ff-layout` | Same-math video FF pretranspose layout, or `off` for baseline A/B | project_in/project_out pretranspose |
 | `--video-attn-layout` | Same-math video attention output pretranspose layout, or `off` for baseline A/B | to_out pretranspose |
