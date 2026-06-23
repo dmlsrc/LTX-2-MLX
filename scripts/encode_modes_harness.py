@@ -65,8 +65,6 @@ from scripts.decode_latent_debug import (
 def make_video_decoder(
     weights_path: str,
     compute_dtype: Any,
-    *,
-    backend: str = "native",
 ):
     """Build a VAE decoder matching LTX_2_MLX/generate.py's happy-path defaults."""
     from LTX_2_MLX.generate import get_vae_config
@@ -81,23 +79,18 @@ def make_video_decoder(
     timestep_conditioning = cfg.get("timestep_conditioning", True)
 
     print(
-        f"VAE backend: {backend}, "
+        f"VAE decoder: native Conv3d, "
         f"blocks={len(decoder_blocks) if decoder_blocks else 'default'}, "
         f"base_ch={base_channels}, timestep={timestep_conditioning}"
     )
 
-    if backend == "native":
-        decoder = NativeConv3dVideoDecoder(
-            decoder_blocks=decoder_blocks,
-            base_channels=base_channels,
-            timestep_conditioning=timestep_conditioning,
-            compute_dtype=compute_dtype,
-        )
-        load_native_vae_decoder_weights(decoder, weights_path)
-    else:
-        raise ValueError(
-            f"Unsupported VAE decoder backend: {backend!r}. Only 'native' is supported."
-        )
+    decoder = NativeConv3dVideoDecoder(
+        decoder_blocks=decoder_blocks,
+        base_channels=base_channels,
+        timestep_conditioning=timestep_conditioning,
+        compute_dtype=compute_dtype,
+    )
+    load_native_vae_decoder_weights(decoder, weights_path)
 
     import gc as _gc
     _gc.collect()
@@ -305,17 +298,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         default="auto",
     )
     parser.add_argument(
-        "--vae-decoder-backend",
-        choices=["native", "legacy"],
-        default="native",
-        help=(
-            "VAE decoder backend. Both do 3D convolution. "
-            "native (default, matches LTX_2_MLX/generate.py's happy path) uses "
-            "MLX-native nn.Conv3d. legacy is the older slice-based Conv3d "
-            "emulation, kept as the A/B baseline."
-        ),
-    )
-    parser.add_argument(
         "--modes",
         nargs="+",
         default=None,
@@ -366,7 +348,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         decoder = make_video_decoder(
             args.weights,
             compute_dtype,
-            backend=args.vae_decoder_backend,
         )
 
     # Output dims derived from latent shape (same formula as decode_latent_debug).
@@ -418,7 +399,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     from LTX_2_MLX.model.video_vae.tiling import TilingConfig, decode_streaming
     tiling_cfg = TilingConfig.auto(
         height=height, width=width, num_frames=n_frames,
-        decoder_backend=args.vae_decoder_backend,
     )
     if tiling_cfg is None:
         print("VAE tiling: off (no spatial tiling; default temporal chunking)")

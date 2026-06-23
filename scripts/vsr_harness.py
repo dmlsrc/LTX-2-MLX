@@ -166,11 +166,11 @@ def chunk_to_rgba_fp16(chunk: Any, mx_mod: Any):
 
 
 def make_video_decoder_default(
-    weights_path: str, compute_dtype: Any, *, backend: str,
+    weights_path: str, compute_dtype: Any,
 ):
     """generate.py's happy-path defaults via encode_modes_harness."""
     from scripts.encode_modes_harness import make_video_decoder
-    return make_video_decoder(weights_path, compute_dtype, backend=backend)
+    return make_video_decoder(weights_path, compute_dtype)
 
 
 def latent_dims(latent: Any) -> tuple[int, int, int]:
@@ -181,7 +181,7 @@ def latent_dims(latent: Any) -> tuple[int, int, int]:
     return n_frames, height, width
 
 
-def plan_vae_tiling(latent: Any, backend: str) -> tuple[Any, int, str]:
+def plan_vae_tiling(latent: Any) -> tuple[Any, int, str]:
     """Decide the tiling cfg + chunk count up front.
 
     Returns (cfg, n_chunks, human_description). `cfg` is the TilingConfig
@@ -194,7 +194,6 @@ def plan_vae_tiling(latent: Any, backend: str) -> tuple[Any, int, str]:
     n_frames, height, width = latent_dims(latent)
     cfg = TilingConfig.auto(
         height=height, width=width, num_frames=n_frames,
-        decoder_backend=backend,
     )
     if cfg is None:
         return cfg, 1, f"off (single-shot decode of {n_frames} frames)"
@@ -416,7 +415,6 @@ def run(args: argparse.Namespace) -> None:
         t = time.perf_counter()
         decoder = make_video_decoder_default(
             args.weights, compute_dtype,
-            backend=args.vae_decoder_backend,
         )
         print(f"[setup] video VAE loaded in {time.perf_counter() - t:.2f}s")
         total_frames, in_h, in_w = latent_dims(latent)
@@ -425,7 +423,7 @@ def run(args: argparse.Namespace) -> None:
         if args.vae_tiling == "single":
             vae_cfg, n_vae_chunks, vae_tiling_desc = None, 1, "single (one decode)"
         else:
-            vae_cfg, n_vae_chunks, vae_tiling_desc = plan_vae_tiling(latent, args.vae_decoder_backend)
+            vae_cfg, n_vae_chunks, vae_tiling_desc = plan_vae_tiling(latent)
         print(
             f"VAE tiling: {vae_tiling_desc} "
             f"({n_vae_chunks} chunk{'s' if n_vae_chunks != 1 else ''})"
@@ -749,14 +747,6 @@ def main() -> None:
     parser.add_argument("--weights", help="LTX-2 .safetensors path (required with --latent).")
     parser.add_argument(
         "--vae-dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16",
-    )
-    parser.add_argument(
-        "--vae-decoder-backend", choices=["native", "legacy"], default="native",
-        help=(
-            "VAE decoder backend.  Both do 3D convolution. "
-            "native (default, matches generate.py) uses MLX-native nn.Conv3d. "
-            "legacy is the older slice-based Conv3d emulation, kept for A/B comparison."
-        ),
     )
     parser.add_argument(
         "--vae-tiling", choices=["auto", "single"], default="auto",

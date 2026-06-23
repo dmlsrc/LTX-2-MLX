@@ -296,12 +296,6 @@ def parse_args() -> argparse.Namespace:
         help="Compute dtype.",
     )
     parser.add_argument(
-        "--vae-decoder",
-        choices=["native"],
-        default="native",
-        help="Video VAE decoder backend (MLX-native Conv3d).",
-    )
-    parser.add_argument(
         "--vae-tiling",
         choices=["auto", "single", "custom"],
         default="auto",
@@ -637,7 +631,6 @@ def main() -> None:
         height=height,
         width=width,
         num_frames=inferred_frames,
-        decoder_backend=args.vae_decoder,
         force_tiled=args.tiled_vae,
         temporal_tile_frames=args.vae_temporal_tile_frames,
         temporal_overlap_frames=args.vae_temporal_overlap_frames,

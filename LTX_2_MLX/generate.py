@@ -499,7 +499,6 @@ def build_vae_tiling_config(
     height: int,
     width: int,
     num_frames: int,
-    decoder_backend: str = "legacy",
     force_tiled: bool = False,
     temporal_tile_frames: int | None = None,
     temporal_overlap_frames: int = 24,
@@ -518,7 +517,6 @@ def build_vae_tiling_config(
                 height,
                 width,
                 num_frames,
-                decoder_backend=decoder_backend,
             ),
             True,
         )
@@ -2026,7 +2024,6 @@ def generate_video(
     use_gemma: bool = True,
     dtype: str | mx.Dtype = "bfloat16",
     transformer_dtype: str | mx.Dtype | None = None,
-    vae_decoder_backend: str = "native",
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
     spatial_upscaler_weights: str = None,
@@ -2324,7 +2321,6 @@ def generate_video(
         height=height,
         width=width,
         num_frames=num_frames,
-        decoder_backend=vae_decoder_backend,
         force_tiled=tiled_vae,
         temporal_tile_frames=vae_temporal_tile_frames,
         temporal_overlap_frames=vae_temporal_overlap_frames,
@@ -2372,7 +2368,6 @@ def generate_video(
                 "dtype": dtype if isinstance(dtype, str) else str(dtype),
                 "compute_dtype": compute_dtype_name(compute_dtype),
                 "transformer_dtype": compute_dtype_name(transformer_compute_dtype),
-                "vae_decoder_backend": vae_decoder_backend,
                 "vae_tiling_mode": vae_tiling_mode,
                 "tiled_vae": tiled_vae,
                 "vae_auto_tiling": vae_auto_tiling,
@@ -2490,10 +2485,8 @@ def generate_video(
         print(f"VAE tiling: {describe_vae_tiling_config(vae_tiling_config, vae_auto_tiling, single_pass=decode_single_pass)}")
     if skip_vae:
         print("VAE decoding: SKIPPED")
-    elif vae_decoder_backend == "native":
-        print("VAE decoder: native Conv3d")
     else:
-        raise ValueError(f"Unsupported VAE decoder backend: {vae_decoder_backend}")
+        print("VAE decoder: native Conv3d")
     if not skip_vae:
         print("VAE spatial padding: zero (boundary-flicker mitigation)")
     if upscale_spatial:
@@ -2996,18 +2989,12 @@ def generate_video(
         if decoder_blocks:
             print(f"  VAE config: {len(decoder_blocks)} blocks, base_ch={base_channels}, timestep={timestep_cond}")
 
-        if vae_decoder_backend == "native":
-            decoder = NativeConv3dVideoDecoder(
-                decoder_blocks=decoder_blocks,
-                base_channels=base_channels,
-                timestep_conditioning=timestep_cond,
-                compute_dtype=compute_dtype,
-            )
-        else:
-            raise ValueError(
-                f"Unsupported VAE decoder backend: {vae_decoder_backend!r}. "
-                f"Only 'native' is supported."
-            )
+        decoder = NativeConv3dVideoDecoder(
+            decoder_blocks=decoder_blocks,
+            base_channels=base_channels,
+            timestep_conditioning=timestep_cond,
+            compute_dtype=compute_dtype,
+        )
         if video_vae_load_path and not use_placeholder:
             load_native_vae_decoder_weights(decoder, video_vae_load_path)
         elif use_placeholder:
@@ -4220,12 +4207,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--vae-decoder",
-        choices=["native"],
-        default="native",
-        help="Video VAE decoder backend (MLX-native Conv3d).",
-    )
-    parser.add_argument(
         "--model-variant",
         type=str,
         choices=["distilled", "dev"],
@@ -4951,7 +4932,6 @@ def main():
         use_gemma=not args.no_gemma,
         dtype=args.dtype,
         transformer_dtype=args.transformer_dtype,
-        vae_decoder_backend=args.vae_decoder,
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
         spatial_upscaler_weights=args.spatial_upscaler_weights,

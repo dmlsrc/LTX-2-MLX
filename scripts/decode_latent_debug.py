@@ -430,7 +430,6 @@ def tiling_config_for_mode(mode: str, latent: Any | None = None):
             height=latent_height * 32,
             width=latent_width * 32,
             num_frames=1 + (latent_frames - 1) * 8,
-            decoder_backend="native",
         )
     if mode == "default":
         return TilingConfig.default()

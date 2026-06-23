@@ -187,40 +187,17 @@ class TilingConfig:
         height: int,
         width: int,
         num_frames: int,
-        spatial_threshold: int = 512,
-        temporal_threshold: int = 65,
-        decoder_backend: str = "legacy",
         total_memory_gb: float | None = None,
         memory_budget_gb: float | None = None,
     ) -> TilingConfig | None:
-        """Auto-select VAE tiling for the requested decode shape."""
-        if decoder_backend == "native":
-            return cls.auto_native_conv3d(
-                height,
-                width,
-                num_frames,
-                total_memory_gb=total_memory_gb,
-                memory_budget_gb=memory_budget_gb,
-            )
-
-        # Match mlx-video's legacy auto tiling policy for the legacy slice-Conv3d decoder.
-        needs_spatial = height > spatial_threshold or width > spatial_threshold
-        needs_temporal = num_frames > temporal_threshold
-
-        if not needs_spatial and not needs_temporal:
-            return None
-
-        return cls(
-            spatial_config=(
-                SpatialTilingConfig(tile_size_in_pixels=512, tile_overlap_in_pixels=64)
-                if needs_spatial
-                else None
-            ),
-            temporal_config=(
-                TemporalChunkConfig(chunk_size_in_frames=64, chunk_overlap_in_frames=24)
-                if needs_temporal
-                else None
-            ),
+        """Auto-select VAE tiling for the native Conv3d decoder (the only backend):
+        a plan sized to the memory budget + the int32 Conv3d boundary."""
+        return cls.auto_native_conv3d(
+            height,
+            width,
+            num_frames,
+            total_memory_gb=total_memory_gb,
+            memory_budget_gb=memory_budget_gb,
         )
 
     @classmethod
