@@ -34,12 +34,6 @@ def _probe(name: str) -> None:
         _PROBE_COUNTS[name] += 1
 
 
-def get_dispatch_counts() -> dict[str, int]:
-    """Return a copy of the dispatch counters (only nonzero when
-    ``LTX_FUSED_PROBE=1`` was set when this module was first imported)."""
-    return dict(_PROBE_COUNTS)
-
-
 def _print_dispatch_summary() -> None:
     """atexit hook: print the dispatch counter summary if any kernel was
     invoked.  No-op when the probe wasn't enabled or no calls happened."""
@@ -103,27 +97,6 @@ _silu_mul_kernel = mx.fast.metal_kernel(
     """,
 )
 
-# Fused GELU-Multiply kernel: gelu_approx(a) * b
-# Used in some gated architectures
-_gelu_mul_kernel = mx.fast.metal_kernel(
-    name="gelu_mul",
-    input_names=["a", "b"],
-    output_names=["out"],
-    source="""
-        uint idx = thread_position_in_grid.x;
-        if (idx < a_shape[0] * a_shape[1] * a_shape[2]) {
-            T val_a = a[idx];
-            T val_b = b[idx];
-            // GELU approx: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-            const T sqrt_2_over_pi = T(0.7978845608028654);
-            const T coeff = T(0.044715);
-            T inner = sqrt_2_over_pi * (val_a + coeff * val_a * val_a * val_a);
-            T gelu_a = T(0.5) * val_a * (T(1.0) + tanh(inner));
-            out[idx] = gelu_a * val_b;
-        }
-    """,
-)
-
 
 def silu_mul(a: mx.array, b: mx.array) -> mx.array:
     """
@@ -159,45 +132,6 @@ def silu_mul(a: mx.array, b: mx.array) -> mx.array:
     b_3d = b_flat.reshape(kernel_shape)
 
     outputs = _silu_mul_kernel(
-        inputs=[a_3d, b_3d],
-        template=[("T", a.dtype)],
-        output_shapes=[kernel_shape],
-        output_dtypes=[a.dtype],
-        grid=(n, 1, 1),
-        threadgroup=(min(256, n), 1, 1),
-    )
-
-    return outputs[0].reshape(original_shape)
-
-
-def gelu_mul(a: mx.array, b: mx.array) -> mx.array:
-    """
-    Fused GELU activation (tanh approx) with element-wise multiply: gelu(a) * b
-
-    Args:
-        a: Input to GELU activation
-        b: Input to multiply with GELU output
-
-    Returns:
-        gelu_approx(a) * b
-    """
-    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
-
-    # Ensure contiguous for kernel
-    a = mx.contiguous(a)
-    b = mx.contiguous(b)
-
-    # Flatten for simple 1D indexing
-    original_shape = a.shape
-    a_flat = a.reshape(-1)
-    b_flat = b.reshape(-1)
-
-    n = a_flat.size
-    kernel_shape = (n, 1, 1)
-    a_3d = a_flat.reshape(kernel_shape)
-    b_3d = b_flat.reshape(kernel_shape)
-
-    outputs = _gelu_mul_kernel(
         inputs=[a_3d, b_3d],
         template=[("T", a.dtype)],
         output_shapes=[kernel_shape],

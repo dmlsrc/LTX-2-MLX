@@ -476,27 +476,3 @@ class KeyframeInterpolationPipeline:
         return final_latent
 
 
-def create_keyframe_pipeline(
-    transformer: LTXModel,
-    video_encoder: NativeConv3dVideoEncoder,
-    video_decoder: NativeConv3dVideoDecoder,
-    spatial_upscaler: SpatialUpscaler | None = None,
-) -> KeyframeInterpolationPipeline:
-    """
-    Create a keyframe interpolation pipeline.
-
-    Args:
-        transformer: LTX transformer model.
-        video_encoder: VAE encoder.
-        video_decoder: VAE decoder.
-        spatial_upscaler: Optional 2x spatial upscaler.
-
-    Returns:
-        Configured KeyframeInterpolationPipeline.
-    """
-    return KeyframeInterpolationPipeline(
-        transformer=transformer,
-        video_encoder=video_encoder,
-        video_decoder=video_decoder,
-        spatial_upscaler=spatial_upscaler,
-    )

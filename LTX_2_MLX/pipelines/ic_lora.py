@@ -754,33 +754,3 @@ class ICLoraPipeline:
         return final_latent
 
 
-def create_ic_lora_pipeline(
-    transformer: LTXModel,
-    video_encoder: NativeConv3dVideoEncoder,
-    video_decoder: NativeConv3dVideoDecoder,
-    spatial_upscaler: SpatialUpscaler,
-    transformer_cache_restore_state: Any,
-    lora_configs: list[LoRAConfig] | None = None,
-) -> ICLoraPipeline:
-    """
-    Create an IC-LoRA pipeline.
-
-    Args:
-        transformer: LTX transformer model.
-        video_encoder: VAE encoder.
-        video_decoder: VAE decoder.
-        spatial_upscaler: 2x spatial upscaler.
-        transformer_cache_restore_state: Cache state for restoring the base transformer.
-        lora_configs: IC-LoRA configurations.
-
-    Returns:
-        Configured ICLoraPipeline.
-    """
-    return ICLoraPipeline(
-        transformer=transformer,
-        video_encoder=video_encoder,
-        video_decoder=video_decoder,
-        spatial_upscaler=spatial_upscaler,
-        transformer_cache_restore_state=transformer_cache_restore_state,
-        lora_configs=lora_configs,
-    )

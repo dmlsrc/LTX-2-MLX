@@ -11,8 +11,6 @@ from .native_encoder import (
 from .ops import (
     PerChannelStatistics,
     patchify,
-    pixel_shuffle_3d,
-    pixel_unshuffle_3d,
     unpatchify,
 )
 from .tiling import (
@@ -29,8 +27,6 @@ __all__ = [
     "patchify",
     "unpatchify",
     "PerChannelStatistics",
-    "pixel_shuffle_3d",
-    "pixel_unshuffle_3d",
     # Decoder: single-pass (whole clip, one call) + chunked-streaming
     "decode_single_pass",
     "NativeConv3dVideoDecoder",

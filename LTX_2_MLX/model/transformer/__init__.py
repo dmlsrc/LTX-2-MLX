@@ -6,7 +6,7 @@ from .attention import (
     rms_norm,
     scaled_dot_product_attention,
 )
-from .feed_forward import FeedForward, GELUApprox, SwiGLU
+from .feed_forward import FeedForward, GELUApprox
 from .model import (
     LTXAVModel,
     LTXModel,
@@ -14,13 +14,11 @@ from .model import (
     Modality,
     MultiModalTransformerArgsPreprocessor,
     TransformerArgsPreprocessor,
-    X0AVModel,
     X0Model,
 )
 from .rope import (
     LTXRopeType,
     apply_rotary_emb,
-    create_position_grid,
     precompute_freqs_cis,
 )
 from .timestep_embedding import (
@@ -45,12 +43,10 @@ __all__ = [
     # Feed-forward
     "FeedForward",
     "GELUApprox",
-    "SwiGLU",
     # RoPE
     "LTXRopeType",
     "apply_rotary_emb",
     "precompute_freqs_cis",
-    "create_position_grid",
     # Timestep embeddings
     "get_timestep_embedding",
     "Timesteps",
@@ -67,7 +63,6 @@ __all__ = [
     "X0Model",
     "TransformerArgsPreprocessor",
     "LTXAVModel",
-    "X0AVModel",
     "MultiModalTransformerArgsPreprocessor",
     # Shared
     "Modality",

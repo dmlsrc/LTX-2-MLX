@@ -299,18 +299,3 @@ def _load_resblock_weights(block: SimpleResBlock2d, weights: dict, prefix: str) 
         _load_conv_weights(block.skip, weights, f"{prefix}.nin_shortcut.conv")
 
 
-def encode_audio(
-    spectrogram: mx.array,
-    encoder: AudioEncoder,
-) -> mx.array:
-    """
-    Encode audio spectrogram to latent representation.
-
-    Args:
-        spectrogram: Mel spectrogram (B, 2, time, mel_bins)
-        encoder: AudioEncoder model.
-
-    Returns:
-        Latent representation (B, z_channels, frames, mel_bins/4)
-    """
-    return encoder(spectrogram)

@@ -874,33 +874,3 @@ class TwoStagePipeline:
         return final_video_latent, audio_waveform
 
 
-def create_two_stage_pipeline(
-    transformer: LTXModel,
-    video_encoder: NativeConv3dVideoEncoder,
-    video_decoder: NativeConv3dVideoDecoder,
-    spatial_upscaler: SpatialUpscaler,
-    audio_decoder: AudioDecoder | None = None,
-    vocoder: Vocoder | None = None,
-) -> TwoStagePipeline:
-    """
-    Create a two-stage CFG pipeline.
-
-    Args:
-        transformer: LTX transformer model.
-        video_encoder: VAE encoder.
-        video_decoder: VAE decoder.
-        spatial_upscaler: 2x spatial upscaler.
-        audio_decoder: Optional audio VAE decoder (required for audio generation).
-        vocoder: Optional vocoder (required for audio generation).
-
-    Returns:
-        Configured TwoStagePipeline.
-    """
-    return TwoStagePipeline(
-        transformer=transformer,
-        video_encoder=video_encoder,
-        video_decoder=video_decoder,
-        spatial_upscaler=spatial_upscaler,
-        audio_decoder=audio_decoder,
-        vocoder=vocoder,
-    )

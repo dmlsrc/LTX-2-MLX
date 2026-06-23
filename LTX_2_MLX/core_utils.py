@@ -52,32 +52,3 @@ def to_velocity(
     return (sample_f32 - denoised_f32) / sigma_val
 
 
-def to_denoised(
-    sample: mx.array,
-    velocity: mx.array,
-    sigma: float | mx.array,
-) -> mx.array:
-    """
-    Convert the sample and its denoising velocity to denoised sample.
-
-    Args:
-        sample: The noisy sample.
-        velocity: The velocity prediction.
-        sigma: The noise level (sigma).
-
-    Returns:
-        Denoised sample prediction.
-    """
-    # Convert sigma to scalar if needed for computation
-    if isinstance(sigma, mx.array):
-        sigma_val = sigma.astype(mx.float32)
-    else:
-        sigma_val = sigma
-
-    # Compute in float32 for stability
-    sample_f32 = sample.astype(mx.float32)
-    velocity_f32 = velocity.astype(mx.float32)
-
-    denoised = sample_f32 - velocity_f32 * sigma_val
-
-    return denoised.astype(sample.dtype)

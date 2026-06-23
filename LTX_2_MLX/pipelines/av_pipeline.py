@@ -2572,39 +2572,3 @@ class AVPipeline:
         return video, audio_waveform
 
 
-def create_av_pipeline(
-    transformer: LTXModel,
-    video_encoder: NativeConv3dVideoEncoder | None,
-    video_decoder: NativeConv3dVideoDecoder | None,
-    audio_decoder: AudioDecoder | None = None,
-    vocoder: Vocoder | None = None,
-    video_decoder_loader: Callable[[], NativeConv3dVideoDecoder] | None = None,
-    audio_decoder_loader: Callable[[], tuple[AudioDecoder, object, int]] | None = None,
-    audio_sample_rate: int = 24000,
-) -> AVPipeline:
-    """
-    Create a single-stage CFG pipeline.
-
-    Args:
-        transformer: LTX transformer model (LTXModel or LTXAVModel).
-        video_encoder: Optional VAE encoder.
-        video_decoder: Optional VAE decoder.
-        audio_decoder: Optional audio VAE decoder (required for audio generation).
-        vocoder: Optional vocoder (required for audio generation).
-        video_decoder_loader: Optional lazy VAE decoder loader.
-        audio_decoder_loader: Optional lazy audio decode stack loader.
-        audio_sample_rate: Output sample rate before lazy audio decode stack load.
-
-    Returns:
-        Configured AVPipeline.
-    """
-    return AVPipeline(
-        transformer=transformer,
-        video_encoder=video_encoder,
-        video_decoder=video_decoder,
-        audio_decoder=audio_decoder,
-        vocoder=vocoder,
-        video_decoder_loader=video_decoder_loader,
-        audio_decoder_loader=audio_decoder_loader,
-        audio_sample_rate=audio_sample_rate,
-    )

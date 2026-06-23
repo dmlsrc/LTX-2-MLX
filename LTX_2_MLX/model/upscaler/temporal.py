@@ -306,54 +306,6 @@ class TemporalUpscaler(nn.Module):
         return x
 
 
-def load_temporal_upscaler_weights(upscaler: TemporalUpscaler, weights_path: str) -> None:
-    """
-    Load temporal upscaler weights from safetensors file.
-
-    Args:
-        upscaler: TemporalUpscaler instance
-        weights_path: Path to safetensors file
-    """
-    print(f"Loading Temporal Upscaler weights from {weights_path}...")
-    loaded_count = 0
-    weights = mx.load(weights_path)
-
-    for key, value in weights.items():
-        # Map weights to model
-        if key == "initial_conv.weight":
-            upscaler.initial_conv_weight = value
-            loaded_count += 1
-        elif key == "initial_conv.bias":
-            upscaler.initial_conv_bias = value
-            loaded_count += 1
-        elif key == "initial_norm.weight":
-            upscaler.initial_norm.weight = value
-            loaded_count += 1
-        elif key == "initial_norm.bias":
-            upscaler.initial_norm.bias = value
-            loaded_count += 1
-        elif key == "final_conv.weight":
-            upscaler.final_conv_weight = value
-            loaded_count += 1
-        elif key == "final_conv.bias":
-            upscaler.final_conv_bias = value
-            loaded_count += 1
-        elif key.startswith("res_blocks."):
-            loaded_count += _load_res_block_weight(upscaler.res_blocks, key, value, "res_blocks.")
-        elif key.startswith("post_upsample_res_blocks."):
-            loaded_count += _load_res_block_weight(
-                upscaler.post_upsample_res_blocks, key, value, "post_upsample_res_blocks."
-            )
-        elif key.startswith("upsampler."):
-            # upsampler.0.weight, upsampler.0.bias (Conv3d in Sequential)
-            if "weight" in key:
-                upscaler.upsampler.conv_weight = value
-                loaded_count += 1
-            elif "bias" in key:
-                upscaler.upsampler.conv_bias = value
-                loaded_count += 1
-
-    print(f"  Loaded {loaded_count} weight tensors")
 
 
 def _load_res_block_weight(blocks: list, key: str, value: mx.array, prefix: str) -> int:

@@ -1544,4 +1544,3 @@ class X0Model(nn.Module):
 
 # Aliases for backward compatibility
 LTXAVModel = LTXModel
-X0AVModel = X0Model

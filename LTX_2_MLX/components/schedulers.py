@@ -91,67 +91,6 @@ class LTX2Scheduler:
         return sigmas.astype(mx.float32)
 
 
-class LinearQuadraticScheduler:
-    """
-    Scheduler with linear steps followed by quadratic steps.
-
-    Produces a sigma schedule that transitions linearly up to a threshold,
-    then follows a quadratic curve for the remaining steps.
-    """
-
-    def execute(
-        self,
-        steps: int,
-        threshold_noise: float = 0.025,
-        linear_steps: int | None = None,
-        **_kwargs,
-    ) -> mx.array:
-        """
-        Generate sigma schedule with linear-quadratic transition.
-
-        Args:
-            steps: Number of denoising steps.
-            threshold_noise: Noise threshold for transition.
-            linear_steps: Number of linear steps (defaults to steps // 2).
-
-        Returns:
-            Sigma schedule as an MLX array.
-        """
-        if steps == 1:
-            return mx.array([1.0, 0.0], dtype=mx.float32)
-
-        if linear_steps is None:
-            linear_steps = steps // 2
-
-        # Linear part
-        linear_sigma_schedule = [
-            i * threshold_noise / linear_steps for i in range(linear_steps)
-        ]
-
-        # Quadratic part
-        threshold_noise_step_diff = linear_steps - threshold_noise * steps
-        quadratic_steps = steps - linear_steps
-        quadratic_sigma_schedule = []
-
-        if quadratic_steps > 0:
-            quadratic_coef = threshold_noise_step_diff / (
-                linear_steps * quadratic_steps**2
-            )
-            linear_coef = (
-                threshold_noise / linear_steps
-                - 2 * threshold_noise_step_diff / (quadratic_steps**2)
-            )
-            const = quadratic_coef * (linear_steps**2)
-            quadratic_sigma_schedule = [
-                quadratic_coef * (i**2) + linear_coef * i + const
-                for i in range(linear_steps, steps)
-            ]
-
-        # Combine and transform
-        sigma_schedule = linear_sigma_schedule + quadratic_sigma_schedule + [1.0]
-        sigma_schedule = [1.0 - x for x in sigma_schedule]
-
-        return mx.array(sigma_schedule, dtype=mx.float32)
 
 
 # Predefined sigma values for distilled models
