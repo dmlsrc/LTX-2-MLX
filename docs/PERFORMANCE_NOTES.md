@@ -673,8 +673,10 @@ dimension as N smaller MLX GEMMs with output-tensor accumulation
    copies of `_project_*_weight_t` slices; originals are not freed.
 4. **Silent correctness hole for non-GELU FFNs** -- the sketch
    hardcoded `nn.gelu_approx` but didn't check whether the target
-   `FeedForward` was the GELU variant or `SwiGLU` (which exists in the
-   codebase and is the activation for SwiGLU FFN variants).
+   `FeedForward` was the GELU variant or `SwiGLU`.  (Moot as of
+   2026-06-23: the `SwiGLU` class was dead code and has been removed --
+   the `FeedForward` is always GELU.  Separately, Gemma's `silu_mul` was
+   a bug, not a SwiGLU FFN -- Gemma uses GELU-tanh too -- since fixed/removed.)
 
 A real fused Metal kernel could in principle save the +1.3 % to +2.6 %
 ceiling above, but the engineering cost (multi-day Metal work, riskier
