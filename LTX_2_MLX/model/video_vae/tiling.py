@@ -615,11 +615,15 @@ def decode_streaming(
                 t0, t1, t_tiles.left_ramps[ti], t_tiles.right_ramps[ti], scale_t
             )
             chunk_t = out_t_slice.stop - out_t_slice.start
-            chunk = mx.zeros((b, 3, chunk_t, out_h, out_w), dtype=mx.float32)
-            weights_h = 1 if spatial_off else out_h
-            weights_w = 1 if spatial_off else out_w
-            chunk_weights = mx.zeros((1, 1, chunk_t, weights_h, weights_w), dtype=mx.float32)
-            mx.eval(chunk, chunk_weights)
+            if spatial_off:
+                # Single spatial tile: build chunk/chunk_weights directly from the
+                # one decode below -- no zero buffer, no full-chunk copy.
+                chunk = None
+                chunk_weights = None
+            else:
+                chunk = mx.zeros((b, 3, chunk_t, out_h, out_w), dtype=mx.float32)
+                chunk_weights = mx.zeros((1, 1, chunk_t, out_h, out_w), dtype=mx.float32)
+                mx.eval(chunk, chunk_weights)
 
             for hi in range(len(h_tiles.starts)):
                 h0, h1 = h_tiles.starts[hi], h_tiles.ends[hi]
@@ -659,14 +663,22 @@ def decode_streaming(
                     actual_w_slice = slice(out_w_slice.start, out_w_slice.start + actual_w)
 
                     if spatial_off:
-                        # All-ones spatial masks: weight by the temporal ramp
-                        # only, and assign directly into the freshly-zeroed chunk
-                        # (single spatial tile, so there is no overlap to add).
+                        # Single spatial tile, all-ones spatial mask: weight by the
+                        # temporal ramp only. When the decode filled the whole chunk
+                        # (actual_t == chunk_t, the common case) build it directly --
+                        # no zero buffer, no full-chunk copy. The rare short decode
+                        # (causal boundary returns < chunk_t frames) keeps the
+                        # zero-padded buffer so downstream frame counts are unchanged.
                         mask = mask_t[:actual_t].reshape(1, 1, actual_t, 1, 1).astype(mx.float32)
-                        chunk[:, :, actual_t_slice, actual_h_slice, actual_w_slice] = (
-                            decoded * mask
-                        )
-                        chunk_weights[:, :, actual_t_slice, :, :] = mask
+                        weighted = decoded * mask
+                        if actual_t == chunk_t:
+                            chunk = weighted
+                            chunk_weights = mask
+                        else:
+                            chunk = mx.zeros((b, 3, chunk_t, out_h, out_w), dtype=mx.float32)
+                            chunk[:, :, actual_t_slice, actual_h_slice, actual_w_slice] = weighted
+                            chunk_weights = mx.zeros((1, 1, chunk_t, 1, 1), dtype=mx.float32)
+                            chunk_weights[:, :, actual_t_slice, :, :] = mask
                     else:
                         mask = (
                             mask_t[:actual_t].reshape(1, 1, actual_t, 1, 1)

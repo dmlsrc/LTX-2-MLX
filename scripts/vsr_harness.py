@@ -108,8 +108,8 @@ NATIVE_FPS = 24.0
 # Measured A/B (721-frame latent, bare `time`, no instrumentation):
 #   --vae-tiling auto  list   wall 142.2s  VAE 109.3s  5.07 fps
 #   --vae-tiling auto  array  wall 142.3s  VAE 109.3s  5.07 fps
-#   --vae-tiling off   list   wall 151.1s  VAE  58.3s  4.77 fps
-#   --vae-tiling off   array  wall 165.5s  VAE  70.2s  4.36 fps
+#   --vae-tiling single list  wall 151.1s  VAE  58.3s  4.77 fps
+#   --vae-tiling single array wall 165.5s  VAE  70.2s  4.36 fps
 # Tiled mode: list/array indistinguishable - chunks are small enough that
 # list-vs-array allocation overhead is in the noise. Single-shot: list is
 # ~10% faster wall and ~17% faster through the VAE itself. So this env var

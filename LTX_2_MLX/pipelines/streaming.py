@@ -244,16 +244,17 @@ def plan_vae_tiling(
     to size a progress bar (or print a status line) before any chunk
     decode runs.
 
-    `tiling=None` is the single-shot path; n_chunks=1, description
-    notes the frame count.  Spatial-only / temporal-only / both
-    spatial+temporal tilings are all handled.
+    `tiling=None` is a single decode (the native-Conv3d auto plan decided the
+    clip fits, or single mode forced it); n_chunks=1, description notes the
+    frame count.  Spatial-only / temporal-only / both spatial+temporal tilings
+    are all handled.
 
     Mirrors `vsr_harness.plan_vae_tiling` so generate.py's streaming
     output can match the vsr_harness UX line-for-line.
     """
     n_frames, _height, _width = latent_dims(latent)
     if tiling is None:
-        return 1, f"off (single-shot decode of {n_frames} frames)"
+        return 1, f"single decode of {n_frames} frames"
 
     sp = tiling.spatial_config
     tp = tiling.temporal_config
