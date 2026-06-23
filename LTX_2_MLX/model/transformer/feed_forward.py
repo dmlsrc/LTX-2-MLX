@@ -168,20 +168,6 @@ class FeedForward(nn.Module):
             else:
                 raise ValueError(f"Unsupported FF layout spec: {target}:{layout}")
 
-    def restore_linear_projections(
-        self,
-        targets: tuple[str, ...] = ("project_in", "project_out"),
-    ) -> None:
-        """Restore projection modules after in-place quantization experiments."""
-        if "project_in" in targets:
-            self._project_in_weight_t = None
-            if not isinstance(self.project_in.proj, nn.Linear):
-                self.project_in.proj = _empty_linear()
-        if "project_out" in targets:
-            self._project_out_weight_t = None
-            if not isinstance(self.project_out, nn.Linear):
-                self.project_out = _empty_linear()
-
     def _quantized_linear_arrays(self, linear: nn.QuantizedLinear) -> list[mx.array]:
         arrays = [linear.weight, linear.scales]
         biases = linear.get("biases")

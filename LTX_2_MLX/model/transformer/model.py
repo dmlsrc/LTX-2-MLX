@@ -987,41 +987,6 @@ class LTXModel(nn.Module):
 
         return count
 
-    def apply_adaln_pretranspose(self) -> int:
-        """Pretranspose every AdaLayerNormSingle.linear in the model.
-
-        Walks self.adaln_single, self.prompt_adaln_single, audio counterparts,
-        and the four av_ca_*_adaln_single modules.  Each holds a single Linear
-        whose weight matmul runs once per denoise step - pretransposing the
-        weight saves the implicit ``weight.T`` op on every call.
-
-        Not currently persisted to the on-disk transformer cache (the win is
-        small per-call and applied-at-load is cheap; we can promote it later
-        if it proves worthwhile).
-        """
-        count = 0
-        # Names of all AdaLayerNormSingle attrs the model may carry.
-        candidates = (
-            "adaln_single",
-            "audio_adaln_single",
-            "prompt_adaln_single",
-            "audio_prompt_adaln_single",
-            "av_ca_video_scale_shift_adaln_single",
-            "av_ca_audio_scale_shift_adaln_single",
-            "av_ca_a2v_gate_adaln_single",
-            "av_ca_v2a_gate_adaln_single",
-        )
-        arrays: list[mx.array] = []
-        for name in candidates:
-            module = getattr(self, name, None)
-            if module is None or not isinstance(module, AdaLayerNormSingle):
-                continue
-            arrays.extend(module.pretranspose_linear())
-            count += 1
-        if arrays:
-            mx.eval(*arrays)
-        return count
-
     # Audio layer debug: set to a directory path to capture per-layer audio states
     _audio_layer_debug_dir: str | None = None
     _audio_layer_debug_done: bool = False

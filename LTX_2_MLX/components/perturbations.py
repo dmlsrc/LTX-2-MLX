@@ -129,45 +129,6 @@ class BatchedPerturbationConfig:
 
         return mx.array(mask_values, dtype=dtype)
 
-    def mask_like(
-        self,
-        perturbation_type: PerturbationType,
-        block: int,
-        values: mx.array,
-    ) -> mx.array:
-        """
-        Generate a mask tensor broadcastable to the given values tensor.
-
-        Args:
-            perturbation_type: The attention type to create a mask for.
-            block: The block index.
-            values: Tensor to match shape for broadcasting.
-
-        Returns:
-            Mask tensor broadcastable to values shape.
-        """
-        mask = self.mask(perturbation_type, block, values.dtype)
-        # Reshape for broadcasting: (batch,) -> (batch, 1, 1, ...)
-        for _ in range(len(values.shape) - 1):
-            mask = mask[:, None]
-        return mask
-
-    def any_in_batch(self, perturbation_type: PerturbationType, block: int) -> bool:
-        """
-        Check if any sample in the batch has this perturbation.
-
-        Args:
-            perturbation_type: The attention type to check.
-            block: The block index.
-
-        Returns:
-            True if any sample has this perturbation.
-        """
-        return any(
-            perturbation.is_perturbed(perturbation_type, block)
-            for perturbation in self.perturbations
-        )
-
     def all_in_batch(self, perturbation_type: PerturbationType, block: int) -> bool:
         """
         Check if all samples in the batch have this perturbation.

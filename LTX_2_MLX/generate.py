@@ -21,7 +21,6 @@ from LTX_2_MLX.components import (
     DISTILLED_SIGMA_VALUES,
     STAGE_2_DISTILLED_SIGMA_VALUES,
 )
-from LTX_2_MLX.core_utils import to_velocity
 from LTX_2_MLX.ffmpeg_encoder import TIERS, encode_video_ffmpeg
 from LTX_2_MLX.loader import (
     TRANSFORMER_CACHE_QUANTIZE_MODES,
@@ -1918,49 +1917,6 @@ def load_av_transformer(
             f"loaded from transformer cache, specs={spec_str}, layers={layer_str}"
         )
     return model
-
-
-def euler_step(
-    latent: mx.array,
-    velocity: mx.array,
-    sigma: float,
-    sigma_next: float,
-) -> mx.array:
-    """
-    Simple Euler step with direct velocity (for placeholder/testing only).
-
-    NOTE: For proper inference, use euler_step_x0 with denoised prediction.
-    """
-    dt = sigma_next - sigma
-    return latent + dt * velocity
-
-
-def euler_step_x0(
-    sample: mx.array,
-    denoised: mx.array,
-    sigma: float,
-    sigma_next: float,
-) -> mx.array:
-    """
-    Perform one Euler diffusion step using X0 (denoised) prediction.
-
-    This matches the PyTorch EulerDiffusionStep.step() which:
-    1. Takes denoised sample (not velocity)
-    2. Converts to velocity: v = (sample - denoised) / sigma
-    3. Applies Euler: x_next = x + dt * v
-
-    Args:
-        sample: Current noisy sample
-        denoised: Predicted denoised sample (x0)
-        sigma: Current noise level
-        sigma_next: Next noise level
-    """
-    # Convert denoised to velocity (matches PyTorch reference)
-    velocity = to_velocity(sample, sigma, denoised)
-
-    # Euler step
-    dt = sigma_next - sigma
-    return sample.astype(mx.float32) + velocity.astype(mx.float32) * dt
 
 
 def next_valid_frame_count(frame_count: int) -> int:

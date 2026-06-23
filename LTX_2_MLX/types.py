@@ -89,16 +89,6 @@ class VideoLatentShape(NamedTuple):
             width=width,
         )
 
-    def upscale(
-        self, scale_factors: SpatioTemporalScaleFactors = VIDEO_SCALE_FACTORS
-    ) -> VideoLatentShape:
-        return self._replace(
-            channels=3,
-            frames=(self.frames - 1) * scale_factors.time + 1,
-            height=self.height * scale_factors.height,
-            width=self.width * scale_factors.width,
-        )
-
 
 class AudioLatentShape(NamedTuple):
     """

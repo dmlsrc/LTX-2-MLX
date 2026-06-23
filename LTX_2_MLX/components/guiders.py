@@ -201,7 +201,6 @@ class MultiModalGuiderParams:
     stg_blocks: list | None = field(default_factory=list)
     rescale_scale: float = 0.0
     modality_scale: float = 1.0
-    skip_step: int = 0
 
 
 @dataclass(frozen=True)
@@ -255,16 +254,8 @@ class MultiModalGuider:
     def do_unconditional_generation(self) -> bool:
         return not math.isclose(self.params.cfg_scale, 1.0)
 
-    def do_perturbed_generation(self) -> bool:
-        return not math.isclose(self.params.stg_scale, 0.0)
-
     def do_isolated_modality_generation(self) -> bool:
         return not math.isclose(self.params.modality_scale, 1.0)
-
-    def should_skip_step(self, step: int) -> bool:
-        if self.params.skip_step == 0:
-            return False
-        return step % (self.params.skip_step + 1) != 0
 
 
 def projection_coef(to_project: mx.array, project_onto: mx.array) -> mx.array:

@@ -185,31 +185,6 @@ class PerChannelStatistics(nn.Module):
         mean = self.mean_of_means.reshape(1, -1, 1, 1, 1)
         return (x - mean) / std
 
-    def load_from_dict(self, state_dict: dict, prefix: str = "") -> None:
-        """
-        Load statistics from a state dict.
-
-        Handles the hyphenated keys from PyTorch checkpoints.
-
-        Args:
-            state_dict: State dictionary containing the statistics.
-            prefix: Prefix for the keys in the state dict.
-        """
-        # Map hyphenated PyTorch names to our underscore names
-        key_map = {
-            "std-of-means": "std_of_means",
-            "mean-of-means": "mean_of_means",
-            "mean-of-stds": "mean_of_stds",
-            "mean-of-stds_over_std-of-means": "mean_of_stds_over_std_of_means",
-            "channel": "channel",
-        }
-
-        for pt_key, mlx_attr in key_map.items():
-            full_key = f"{prefix}{pt_key}" if prefix else pt_key
-            if full_key in state_dict:
-                setattr(self, mlx_attr, mx.array(state_dict[full_key]))
-
-
 # Compiled pixel shuffle for better performance
 @mx.compile
 def pixel_shuffle_3d(x: mx.array, upscale_factor: int) -> mx.array:

@@ -276,16 +276,6 @@ class TilingConfig:
         )
 
     @classmethod
-    def spatial_only(cls, tile_size: int = 512, overlap: int = 64) -> TilingConfig:
-        return cls(
-            spatial_config=SpatialTilingConfig(
-                tile_size_in_pixels=tile_size,
-                tile_overlap_in_pixels=overlap,
-            ),
-            temporal_config=None,
-        )
-
-    @classmethod
     def temporal_only(cls, tile_size: int = 64, overlap: int = 24) -> TilingConfig:
         return cls(
             spatial_config=None,
@@ -293,26 +283,6 @@ class TilingConfig:
                 chunk_size_in_frames=tile_size,
                 chunk_overlap_in_frames=overlap,
             ),
-        )
-
-    @classmethod
-    def aggressive(cls) -> TilingConfig:
-        return cls(
-            spatial_config=SpatialTilingConfig(
-                tile_size_in_pixels=256,
-                tile_overlap_in_pixels=64,
-            ),
-            temporal_config=None,
-        )
-
-    @classmethod
-    def conservative(cls) -> TilingConfig:
-        return cls(
-            spatial_config=SpatialTilingConfig(
-                tile_size_in_pixels=768,
-                tile_overlap_in_pixels=64,
-            ),
-            temporal_config=None,
         )
 
     @classmethod
