@@ -2136,7 +2136,6 @@ class AVPipeline:
         guider_override=None,
         ge_gamma: float = 0.0,
         sampler: str = "euler",
-        temporal_upscaler=None,
         cross_attn_scale: float = 1.0,
         cross_attn_start_block: int = 40,
         latent_save_path: str | None = None,
@@ -2442,30 +2441,6 @@ class AVPipeline:
 
         final_video_latent = video_state.latent
         final_audio_latent = None
-
-        # Apply temporal upscaler (2x frame interpolation) if provided
-        if temporal_upscaler is not None:
-            if self.video_decoder is None:
-                raise ValueError("Video decoder required for temporal upscaling.")
-            input_frames = final_video_latent.shape[2]
-            emit_progress_message(
-                f"  Temporal upscaling: {input_frames} -> {input_frames * 2 - 1} latent frames..."
-            )
-            # Un-normalize latent (upscaler trained on raw latents)
-            std = self.video_decoder.std_of_means.reshape(1, -1, 1, 1, 1)
-            mean = self.video_decoder.mean_of_means.reshape(1, -1, 1, 1, 1)
-            latent_unnorm = final_video_latent * std + mean
-            # Upscale
-            latent_upscaled = temporal_upscaler(latent_unnorm)
-            mx.eval(latent_upscaled)
-            # Re-normalize
-            final_video_latent = (latent_upscaled - mean) / std
-            mx.eval(final_video_latent)
-            del latent_unnorm, latent_upscaled
-            output_frames = final_video_latent.shape[2]
-            emit_progress_message(
-                f"  Temporal upscale complete: {output_frames} latent frames"
-            )
 
         # Prepare final audio latent before unloading transformer and decoding.
         if config.audio_enabled and audio_state is not None and audio_tools is not None:

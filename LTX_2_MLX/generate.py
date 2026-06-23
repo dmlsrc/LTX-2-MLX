@@ -1983,8 +1983,6 @@ def generate_video(
     model_variant: str = "distilled",
     upscale_spatial: bool = False,
     spatial_upscaler_weights: str = None,
-    upscale_temporal: bool = False,
-    temporal_upscaler_weights: str = None,
     generate_audio: bool = False,
     internal_audio: str = "auto",
     low_memory: bool = False,
@@ -2380,7 +2378,6 @@ def generate_video(
                 "lora_path": lora_path,
                 "lora_strength": lora_strength,
                 "upscale_spatial": upscale_spatial,
-                "upscale_temporal": upscale_temporal,
                 "stg_scale": stg_scale,
                 "stg_mode": stg_mode,
                 "apg_scale": apg_scale,
@@ -2447,8 +2444,6 @@ def generate_video(
         print("VAE spatial padding: zero (boundary-flicker mitigation)")
     if upscale_spatial:
         print(f"Spatial upscaling: 2x (output will be {width*2}x{height*2})")
-    if upscale_temporal:
-        print(f"Temporal upscaling: 2x (frames will be ~{num_frames*2})")
     if generate_audio:
         print("Audio generation: ENABLED (stereo 24kHz)")
 
@@ -3909,8 +3904,7 @@ def main():
             "different from --fps, VTFrameRateConversion interpolates "
             "between source frames at the requested rate (e.g. 24->48 "
             "for 2x slow-mo, 24->60 for high-refresh playback).  "
-            "Engaging this forces --output-backend=videotoolbox.  "
-            "Independent from --upscale-temporal (model-based)."
+            "Engaging this forces --output-backend=videotoolbox."
         ),
     )
     parser.add_argument(
@@ -4210,17 +4204,6 @@ def main():
             "Path to spatial upscaler weights. Default resolves the cached "
             "LTX-2.3 x2 upscaler beside --weights or from HF_HOME/HF_HUB_CACHE."
         ),
-    )
-    parser.add_argument(
-        "--upscale-temporal",
-        action="store_true",
-        help="Apply 2x temporal upscaling to output (17->33 frames, etc.)"
-    )
-    parser.add_argument(
-        "--temporal-upscaler-weights",
-        type=str,
-        default="weights/ltx-2/ltx-2-temporal-upscaler-x2-1.0.safetensors",
-        help="Path to temporal upscaler weights"
     )
     parser.add_argument(
         "--generate-audio",
@@ -4891,8 +4874,6 @@ def main():
         model_variant=args.model_variant,
         upscale_spatial=args.upscale_spatial,
         spatial_upscaler_weights=args.spatial_upscaler_weights,
-        upscale_temporal=args.upscale_temporal,
-        temporal_upscaler_weights=args.temporal_upscaler_weights,
         generate_audio=args.generate_audio,
         internal_audio=args.internal_audio,
         low_memory=args.low_memory,
