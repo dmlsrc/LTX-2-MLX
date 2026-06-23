@@ -184,7 +184,9 @@ class Gemma3Attention(nn.Module):
         # Sliding window size (only used for sliding_attention layers)
         self.sliding_window = config.sliding_window if layer_type == "sliding_attention" else None
 
-        # Attention scale
+        # Attention scale. Gemma 3 scales queries by query_pre_attn_scalar**-0.5;
+        # for the 12B checkpoint query_pre_attn_scalar == head_dim == 256, so
+        # head_dim**-0.5 is exact here (would diverge for a variant where they differ).
         self.scale = self.head_dim ** -0.5
 
     def __call__(
@@ -313,8 +315,11 @@ class Gemma3Model(nn.Module):
         # Token embeddings
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
 
-        # Embedding scale factor (Gemma multiplies embeddings by sqrt(hidden_size))
-        self.embed_scale = config.hidden_size ** 0.5
+        # Embedding scale: Gemma multiplies embeddings by sqrt(hidden_size), but
+        # bf16-rounds the scalar first -- Gemma3 intentionally downcasts it, so
+        # sqrt(3840)=61.9677 becomes 62.0 (matches the HF reference + mlx-lm). Kept a
+        # Python float so it stays out of the module parameters.
+        self.embed_scale = float(mx.array(config.hidden_size ** 0.5, mx.bfloat16))
 
         # Transformer layers - each with its own layer type (sliding or full attention)
         self.layers = [
