@@ -566,6 +566,11 @@ class TwoStagePipeline:
         # a std-ratio rescale (rescale_scale=0.7 regular distilled / 0.45 HQ). Set
         # LTX_RESCALE_SCALE=0.7 to A/B the reference rescale against the default.
         rescale_scale = float(os.environ.get("LTX_RESCALE_SCALE", "0") or "0")
+        if rescale_scale != 0:
+            print(
+                f"  MultiModalGuider std-ratio rescale: rescale_scale={rescale_scale} "
+                "(via LTX_RESCALE_SCALE; overrides the distilled default of 0.0)"
+            )
         video_guider = MultiModalGuider(
             params=MultiModalGuiderParams(
                 cfg_scale=config.cfg_scale,
