@@ -7,8 +7,6 @@ from .diffusion_steps import (
 from .guiders import (
     CFGGuider,
     CFGStarRescalingGuider,
-    LegacyStatefulAPGGuider,
-    LtxAPGGuider,
     MultiModalGuider,
     MultiModalGuiderParams,
     STGGuider,
@@ -47,8 +45,6 @@ __all__ = [
     "CFGGuider",
     "CFGStarRescalingGuider",
     "STGGuider",
-    "LtxAPGGuider",
-    "LegacyStatefulAPGGuider",
     "projection_coef",
     # Noisers
     "GaussianNoiser",
