@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import gc
 import logging
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -28,15 +27,17 @@ _NATIVE_CONV3D_FINAL_CHANNELS = 512
 
 
 def detect_system_memory_gb() -> float | None:
-    """Best-effort physical RAM detection without adding a runtime dependency."""
+    """Total unified memory in GB, read from MLX device info.
+
+    On Apple Silicon this equals physical RAM (device_info["memory_size"] matches
+    sysconf SC_PHYS_PAGES * SC_PAGE_SIZE). MLX is already a hard dependency of
+    this module, so reading it here is more obvious than a separate stdlib
+    syscall path.
+    """
     try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-    except (AttributeError, OSError, ValueError):
+        return mx.device_info()["memory_size"] / (1000**3)
+    except (AttributeError, KeyError, RuntimeError):
         return None
-    if pages <= 0 or page_size <= 0:
-        return None
-    return (pages * page_size) / (1000**3)
 
 
 def default_vae_decode_budget_gb(total_memory_gb: float | None = None) -> float:
