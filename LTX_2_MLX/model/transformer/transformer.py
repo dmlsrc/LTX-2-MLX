@@ -481,10 +481,6 @@ class BasicAVTransformerBlock(nn.Module):
                     profile_name="video text-attn" if profile_events is not None else None,
                     mark_profile=mark_profile if profile_events is not None else None,
                 )
-                # Optional per-block cross-attention scaling (set externally)
-                ca_scale = getattr(self, '_cross_attn_scale', None)
-                if ca_scale is not None:
-                    cross_out = cross_out * ca_scale
                 vx = vx + cross_out
                 mark_profile("video text-attn residual", vx)
                 _sp_barrier(vx)

@@ -1524,7 +1524,7 @@ most of the cost was Terminal.app's Metal repaint, not syscall overhead.
 
 - `LTX_DISABLE_BLOCK_OVERHEAD=1` — stripped-down `_fast_call` in
   `BasicAVTransformerBlock` (removed `mark_profile` closure, perturbation
-  checks, asserts, `_cross_attn_scale` getattr, `TransformerArgs.replace()`
+  checks, asserts, `TransformerArgs.replace()`
   kwargs.get loop).  Measured zero change.  Python overhead between blocks
   isn't the bottleneck.
 - Packed attention layouts (`self_qkv:pack`, `kv:pack`) — reached

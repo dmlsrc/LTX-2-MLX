@@ -2022,7 +2022,6 @@ def generate_video(
     vae_spatial_overlap_pixels: int = 64,
     pipeline_type: str = "text-to-video",
     enhance_prompt_flag: bool = False,
-    cross_attn_scale: float = 1.0,
     video_ff_dtype: str | None = None,
     audio_ff_dtype: str | None = None,
     distilled_lora: str = None,
@@ -4683,14 +4682,6 @@ def main():
         help="Use Gemma to expand short prompts into detailed descriptions before encoding. "
              "This matches the official LTX-2 pipeline behavior and improves text differentiation."
     )
-    parser.add_argument(
-        "--cross-attn-scale",
-        type=float,
-        default=1.0,
-        help="Scale factor for cross-attention in late transformer layers (40-47). "
-             "Values 5-10 improve text conditioning for semantic content generation. "
-             "Default 1.0 preserves original behavior."
-    )
 
     args = parser.parse_args()
 
@@ -4918,7 +4909,6 @@ def main():
         vae_spatial_overlap_pixels=args.vae_spatial_overlap_pixels,
         pipeline_type=args.pipeline,
         enhance_prompt_flag=args.enhance_prompt,
-        cross_attn_scale=args.cross_attn_scale,
         video_ff_dtype=args.video_ff_dtype,
         audio_ff_dtype=args.audio_ff_dtype,
         # Two-stage pipeline parameters

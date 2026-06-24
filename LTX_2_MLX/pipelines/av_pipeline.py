@@ -407,23 +407,6 @@ class AVPipeline:
 
         return waveform
 
-    def _apply_cross_attn_scales(self, scale: float, start_block: int):
-        """Set cross-attention scale on late transformer blocks."""
-        model = self.transformer.model if hasattr(self.transformer, 'model') else self.transformer
-        blocks = getattr(model, 'transformer_blocks', [])
-        for i, block in enumerate(blocks):
-            if i >= start_block:
-                block._cross_attn_scale = scale
-            else:
-                block._cross_attn_scale = None
-
-    def _clear_cross_attn_scales(self):
-        """Remove cross-attention scaling from all blocks."""
-        model = self.transformer.model if hasattr(self.transformer, 'model') else self.transformer
-        blocks = getattr(model, 'transformer_blocks', [])
-        for block in blocks:
-            block._cross_attn_scale = None
-
     def _denoise_loop_cfg(
         self,
         video_state: LatentState,
@@ -436,10 +419,7 @@ class AVPipeline:
         stg_guider: STGGuider | None = None,
         stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
-        ge_gamma: float = 0.0,
-        cross_attn_scale: float = 1.0,
-        cross_attn_start_block: int = 40,
-    ) -> LatentState:
+        ge_gamma: float = 0.0,    ) -> LatentState:
         """
         Run the denoising loop with guidance and optional STG + GE.
 
@@ -461,11 +441,6 @@ class AVPipeline:
         """
         num_steps = len(sigmas) - 1
         prev_velocity = None  # GE velocity tracking
-
-        # Apply cross-attention scaling if non-default
-        if cross_attn_scale != 1.0:
-            self._apply_cross_attn_scales(cross_attn_scale, cross_attn_start_block)
-            print(f"  Cross-attn scaling: {cross_attn_scale}x on blocks {cross_attn_start_block}-47")
 
         for step_idx in range(num_steps):
             sigma = float(sigmas[step_idx])
@@ -526,10 +501,6 @@ class AVPipeline:
             if callback:
                 callback(step_idx + 1, num_steps)
 
-        # Clean up cross-attention scaling
-        if cross_attn_scale != 1.0:
-            self._clear_cross_attn_scales()
-
         return video_state
 
     def _denoise_loop_heun(
@@ -544,10 +515,7 @@ class AVPipeline:
         stg_guider: STGGuider | None = None,
         stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
-        ge_gamma: float = 0.0,
-        cross_attn_scale: float = 1.0,
-        cross_attn_start_block: int = 40,
-    ) -> LatentState:
+        ge_gamma: float = 0.0,    ) -> LatentState:
         """
         Run the denoising loop with Heun (predictor-corrector) stepping.
 
@@ -560,9 +528,6 @@ class AVPipeline:
         """
         num_steps = len(sigmas) - 1
         prev_velocity = None
-
-        if cross_attn_scale != 1.0:
-            self._apply_cross_attn_scales(cross_attn_scale, cross_attn_start_block)
 
         for step_idx in range(num_steps):
             sigma = float(sigmas[step_idx])
@@ -655,9 +620,6 @@ class AVPipeline:
             if callback:
                 callback(step_idx + 1, num_steps)
 
-        if cross_attn_scale != 1.0:
-            self._clear_cross_attn_scales()
-
         return video_state
 
     def _denoise_loop_cfg_av(
@@ -676,10 +638,7 @@ class AVPipeline:
         stg_guider: STGGuider | None = None,
         stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
-        ge_gamma: float = 0.0,
-        cross_attn_scale: float = 1.0,
-        cross_attn_start_block: int = 40,
-        profile_steps: tuple[int, ...] = (),
+        ge_gamma: float = 0.0,        profile_steps: tuple[int, ...] = (),
         profile_blocks: tuple[int, ...] = (),
     ) -> tuple[LatentState, LatentState]:
         """Run joint audio-video denoising loop with separate guidance per modality."""
@@ -695,10 +654,6 @@ class AVPipeline:
                 pct = (seconds / total * 100.0) if total > 0 else 0.0
                 print(f"    {name:<24} {seconds:7.2f}s  {pct:5.1f}%")
             print(f"    {'profiled total':<24} {total:7.2f}s")
-
-        if cross_attn_scale != 1.0:
-            self._apply_cross_attn_scales(cross_attn_scale, cross_attn_start_block)
-            print(f"  Cross-attn scaling: {cross_attn_scale}x on blocks {cross_attn_start_block}-47")
 
         for step_idx in range(num_steps):
             profile_step = step_idx + 1
@@ -798,9 +753,6 @@ class AVPipeline:
             if callback:
                 callback(step_idx + 1, num_steps)
 
-        if cross_attn_scale != 1.0:
-            self._clear_cross_attn_scales()
-
         return video_state, audio_state
 
     def _denoise_loop_heun_av(
@@ -819,19 +771,13 @@ class AVPipeline:
         stg_guider: STGGuider | None = None,
         stg_perturbations: BatchedPerturbationConfig | None = None,
         stg_cutoff: float = 1.0,
-        ge_gamma: float = 0.0,
-        cross_attn_scale: float = 1.0,
-        cross_attn_start_block: int = 40,
-    ) -> tuple[LatentState, LatentState]:
+        ge_gamma: float = 0.0,    ) -> tuple[LatentState, LatentState]:
         """Run joint audio-video denoising loop with Heun stepping."""
         from ..core_utils import to_velocity
 
         num_steps = len(sigmas) - 1
         need_cfg = video_guider.enabled() or audio_guider.enabled()
         prev_velocity = None
-
-        if cross_attn_scale != 1.0:
-            self._apply_cross_attn_scales(cross_attn_scale, cross_attn_start_block)
 
         for step_idx in range(num_steps):
             sigma = float(sigmas[step_idx])
@@ -947,9 +893,6 @@ class AVPipeline:
 
             if callback:
                 callback(step_idx + 1, num_steps)
-
-        if cross_attn_scale != 1.0:
-            self._clear_cross_attn_scales()
 
         return video_state, audio_state
 
@@ -2135,10 +2078,7 @@ class AVPipeline:
         stg_cutoff: float = 1.0,
         guider_override=None,
         ge_gamma: float = 0.0,
-        sampler: str = "euler",
-        cross_attn_scale: float = 1.0,
-        cross_attn_start_block: int = 40,
-        latent_save_path: str | None = None,
+        sampler: str = "euler",        latent_save_path: str | None = None,
         decode_video: bool = True,
     ) -> tuple[mx.array, mx.array | None]:
         """
@@ -2355,10 +2295,7 @@ class AVPipeline:
                     stg_guider=_stg_guider,
                     stg_perturbations=_stg_perturbations,
                     stg_cutoff=stg_cutoff,
-                    ge_gamma=ge_gamma,
-                    cross_attn_scale=cross_attn_scale,
-                    cross_attn_start_block=cross_attn_start_block,
-                )
+                    ge_gamma=ge_gamma,                )
             else:
                 video_state, audio_state = self._denoise_loop_cfg_av(
                     video_state=video_state,
@@ -2375,10 +2312,7 @@ class AVPipeline:
                     stg_guider=_stg_guider,
                     stg_perturbations=_stg_perturbations,
                     stg_cutoff=stg_cutoff,
-                    ge_gamma=ge_gamma,
-                    cross_attn_scale=cross_attn_scale,
-                    cross_attn_start_block=cross_attn_start_block,
-                    profile_steps=tuple(sorted(profile_steps)),
+                    ge_gamma=ge_gamma,                    profile_steps=tuple(sorted(profile_steps)),
                     profile_blocks=profile_blocks,
                 )
         else:
@@ -2412,10 +2346,7 @@ class AVPipeline:
                     stg_guider=_stg_guider,
                     stg_perturbations=_stg_perturbations,
                     stg_cutoff=stg_cutoff,
-                    ge_gamma=ge_gamma,
-                    cross_attn_scale=cross_attn_scale,
-                    cross_attn_start_block=cross_attn_start_block,
-                )
+                    ge_gamma=ge_gamma,                )
             else:
                 video_state = self._denoise_loop_cfg(
                     video_state=video_state,
@@ -2428,10 +2359,7 @@ class AVPipeline:
                     stg_guider=_stg_guider,
                     stg_perturbations=_stg_perturbations,
                     stg_cutoff=stg_cutoff,
-                    ge_gamma=ge_gamma,
-                    cross_attn_scale=cross_attn_scale,
-                    cross_attn_start_block=cross_attn_start_block,
-            )
+                    ge_gamma=ge_gamma,            )
         denoise_elapsed = time.perf_counter() - denoise_start
         post_denoise_start = time.perf_counter()
 

@@ -41,7 +41,6 @@ class FakeBlock:
         self.idx = idx
         self.norm_eps = 1e-6
         self.cross_attention_adaln = True
-        # _cross_attn_scale intentionally NOT set, so getattr returns None.
 
     def _apply_text_cross_attention(
         self,
@@ -97,9 +96,6 @@ class FakeBlock:
                 vx, video.context, None, None, None, video.timesteps, None, None,
                 profile_name=None, mark_profile=None,
             )
-            ca_scale = getattr(self, "_cross_attn_scale", None)
-            if ca_scale is not None:
-                vx = vx * ca_scale
             mark_profile("video text-attn residual", vx)
 
         if run_ax:
