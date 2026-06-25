@@ -423,10 +423,18 @@ def load_gemma3_weights(
 
     Args:
         model: Gemma3Model instance.
-        weights_dir: Directory containing model-0000X-of-00005.safetensors files.
+        weights_dir: Directory of Gemma 3 safetensors -- either sharded
+            (model-NNNNN-of-NNNNN.safetensors) or a single model.safetensors.
     """
     weights_path = Path(weights_dir)
     shard_files = sorted(weights_path.glob("model-*.safetensors"))
+
+    if not shard_files:
+        # Non-sharded checkpoint: a single model.safetensors has no
+        # -NNNNN-of-NNNNN infix, so it does not match the sharded glob above.
+        single = weights_path / "model.safetensors"
+        if single.exists():
+            shard_files = [single]
 
     if not shard_files:
         raise FileNotFoundError(f"No safetensors files found in {weights_dir}")
