@@ -37,6 +37,32 @@ def _first_video_track(asset: Any) -> Any:
     return tracks[0]
 
 
+def _video_codec_fourcc(track: Any) -> str:
+    """The track's codec as a 4-char tag ('hvc1', 'hev1', 'avc1', ...), or ''."""
+    fmts = track.formatDescriptions()
+    if not fmts or len(fmts) == 0:
+        return ""
+    code = CoreMedia.CMFormatDescriptionGetMediaSubType(fmts[0])
+    return bytes((code >> s) & 0xFF for s in (24, 16, 8, 0)).decode("latin-1")
+
+
+def _assert_decodable(track: Any, path: Path) -> None:
+    """Reject 'hev1'-tagged HEVC up front with an actionable message.
+
+    ffmpeg muxes HEVC into MP4 as 'hev1' by default, but AVFoundation can only
+    decode 'hvc1' (parameter sets carried out of band in the hvcC box). An hev1
+    track otherwise fails deep in the reader with a cryptic -11833 'Cannot
+    Decode'; the fix is a lossless container re-tag, no re-encode."""
+    if _video_codec_fourcc(track) == "hev1":
+        out = path.with_name(f"{path.stem}_hvc1.mp4")
+        raise RuntimeError(
+            f"{path.name}: HEVC video is tagged 'hev1', which AVFoundation cannot "
+            f"decode - it requires 'hvc1' (parameter sets out of band). Re-tag it "
+            f"losslessly (no re-encode), then use the result:\n"
+            f"    ffmpeg -i '{path}' -c copy -tag:v hvc1 '{out}'"
+        )
+
+
 def probe_video(path: Path) -> tuple[int, int, float, int, Any]:
     """(width, height, fps, n_frames, transform) for the first video track.
 
@@ -50,6 +76,7 @@ def probe_video(path: Path) -> tuple[int, int, float, int, Any]:
     url = Foundation.NSURL.fileURLWithPath_(str(path))
     asset = av.AVURLAsset.alloc().initWithURL_options_(url, None)
     track = _first_video_track(asset)
+    _assert_decodable(track, path)
     size = track.naturalSize()
     w, h = int(round(size.width)), int(round(size.height))
     fps = float(track.nominalFrameRate())
@@ -87,6 +114,7 @@ def iter_video_buffer_chunks(
     url = Foundation.NSURL.fileURLWithPath_(str(path))
     asset = av.AVURLAsset.alloc().initWithURL_options_(url, None)
     track = _first_video_track(asset)
+    _assert_decodable(track, path)
     fps = float(track.nominalFrameRate())
 
     reader, err = av.AVAssetReader.alloc().initWithAsset_error_(asset, None)
