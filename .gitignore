@@ -42,16 +42,16 @@ env/
 .AppleDouble
 .LSOverride
 
-# Weights and models (large files)
-weights/
+# Weights and models - ignored by extension (small bundled model weights are
+# re-included individually below).
 *.safetensors
 *.gguf
 *.bin
 *.pt
 *.pth
-# Exception: the FastDVDnet denoiser weights are small (~10MB each) and bundled
-# with the package so --denoise fastdvd works with no external path/env.
-!LTX_2_MLX/videotoolbox/fastdvdnet_weights/*.safetensors
+# Bundled model weights (small, ship with the package, package/weights/ layout).
+!LTX_2_MLX/videotoolbox/fastdvdnet/weights/*.safetensors
+!LTX_2_MLX/videotoolbox/basicvsrpp/weights/*.safetensors
 *.ckpt
 
 # Output files

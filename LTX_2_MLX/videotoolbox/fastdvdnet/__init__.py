@@ -181,7 +181,7 @@ def _strength_to_sigma(strength: float) -> float:
 
 
 # Weights ship inside the package (~10MB each), so no path/env is needed.
-_WEIGHTS_DIR = Path(__file__).resolve().parent / "fastdvdnet_weights"
+_WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _VARIANTS = {
     # Trained with clipped noise; stays clean on real footage at moderate sigma.
     "clipped": "model_clipped_noise.safetensors",
