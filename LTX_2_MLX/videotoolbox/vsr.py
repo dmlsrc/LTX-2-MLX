@@ -9,11 +9,41 @@ ready to feed straight into AVAssetWriter.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
+from contextlib import contextmanager
 from typing import Any
 
 from . import pixel_buffers as _pb
-from ._compat import require_pyobjc, vt
+from ._compat import Quartz, require_pyobjc, vt
+
+
+@contextmanager
+def _suppress_native_stderr():
+    """Swallow OS-level stderr (fd 2) for the duration of the block.
+
+    VideoToolbox compiles the super-resolution Metal pipeline when the frame
+    processor session starts and logs 'Resolved compile flags ...
+    SpatialSplitGenericDAG' straight to fd 2 via NSLog - bypassing Python's
+    sys.stderr, so contextlib.redirect_stderr can't catch it. This redirects the
+    file descriptor itself for the brief compile. VideoToolbox reports real
+    failures through API return values (the ok/err tuple), not stderr, so
+    nothing important is hidden. Set LTX_VSR_VERBOSE=1 to keep the native logs.
+    """
+    if os.environ.get("LTX_VSR_VERBOSE"):
+        yield
+        return
+    sys.stderr.flush()
+    saved_fd = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        os.dup2(saved_fd, 2)
+        os.close(devnull_fd)
+        os.close(saved_fd)
 
 
 def scale_for_mode(mode: str) -> int:
@@ -27,6 +57,30 @@ def scale_for_mode(mode: str) -> int:
         return 2
     if mode in ("balanced", "image"):
         return 4
+    raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
+
+
+# The HighQuality (balanced/image) scaler exposes NO dimension-query API -
+# unlike LowLatency's minimumDimensions/maximumDimensions - so these practical
+# input caps are determined empirically (config init fails with "Invalid input
+# height/width" above them). The cap is per-dimension, not total pixels, and at
+# 4x it bounds output to 7680x4320 (8K). Re-probe if a future OS raises it.
+HQ_MAX_INPUT_W = 1920
+HQ_MAX_INPUT_H = 1080
+
+
+def source_format_for_mode(mode: str) -> int:
+    """The CVPixelBuffer format VSR consumes as its source for this mode.
+
+    fast (LowLatency) takes NV12 ('420v'); balanced/image (HighQuality) take
+    RGBAHalf ('RGhA'). Exposed so an external decoder can produce frames
+    already in VSR's source format - avoiding an intermediate RGB array and
+    its re-quantization - and feed them via `upscale_buffer_to_buffer`.
+    """
+    if mode == "fast":
+        return _pb.PIX_NV12
+    if mode in ("balanced", "image"):
+        return _pb.PIX_RGBAHALF
     raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
 
 
@@ -64,6 +118,21 @@ def _validate_combination(width: int, height: int, scale: int, mode: str) -> Non
             raise SystemExit(
                 f"--spatial-mode {mode} supports scale={ok}, requested scale={scale}. "
                 f"Use --spatial-mode fast for 2x."
+            )
+        # The HQ scaler has no dimension-query API; check the empirical caps so
+        # an oversized input fails with a clear message (and before the model
+        # download wait) instead of an opaque "config init returned nil".
+        if width > HQ_MAX_INPUT_W or height > HQ_MAX_INPUT_H:
+            fits_fast = width <= 960 and height <= 960
+            hint = (
+                "Use --spatial-mode fast for a 2x upscale (input must be <= 960x960)."
+                if fits_fast else
+                f"This input is larger than any VSR mode supports; downscale it to "
+                f"<= {HQ_MAX_INPUT_W}x{HQ_MAX_INPUT_H} (balanced/image) or <= 960x960 (fast) first."
+            )
+            raise SystemExit(
+                f"--spatial-mode {mode} (4x) does not support {width}x{height} input "
+                f"(max {HQ_MAX_INPUT_W}x{HQ_MAX_INPUT_H}; a 4x output would exceed 8K). {hint}"
             )
 
 
@@ -146,11 +215,18 @@ class VsrSession:
                 cls.defaultRevision(),
             )
             if self.config is None:
-                raise RuntimeError("High-quality VSR config init returned nil")
+                raise RuntimeError(
+                    f"High-quality VSR config init returned nil for {in_w}x{in_h} "
+                    f"input at {scale}x. The HQ scaler accepts up to "
+                    f"{HQ_MAX_INPUT_W}x{HQ_MAX_INPUT_H}; check the input dimensions."
+                )
             _wait_for_model_download(self.config)
 
         self.processor = vt.VTFrameProcessor.alloc().init()
-        ok, err = self.processor.startSessionWithConfiguration_error_(self.config, None)
+        # startSession compiles the VSR Metal pipeline, which NSLogs compile
+        # chatter to fd 2; suppress just that call (errors come back via `err`).
+        with _suppress_native_stderr():
+            ok, err = self.processor.startSessionWithConfiguration_error_(self.config, None)
         if not ok:
             raise RuntimeError(
                 f"VTFrameProcessor.startSessionWithConfiguration_error_ failed: {err}"
@@ -174,6 +250,9 @@ class VsrSession:
         # Dst pool: typically set by the caller to the AVAssetWriter adaptor's
         # pool for zero-copy from VSR output to encoder.
         self._dst_pool: Any = None
+        # Lazily-created pixel-transfer session, used by upscale_buffer_to_buffer
+        # to normalize externally-decoded buffers (see there).
+        self._xfer: Any = None
 
     def use_dst_pool(self, pool: Any) -> None:
         """Wire the writer's adaptor pixelBufferPool() as VSR's dst source -
@@ -201,6 +280,9 @@ class VsrSession:
         if self.processor is not None:
             self.processor.endSession()
             self.processor = None
+        if self._xfer is not None:
+            vt.VTPixelTransferSessionInvalidate(self._xfer)
+            self._xfer = None
 
     # ------------------------------------------------------------------------
     # Internal: buffer factories
@@ -225,11 +307,72 @@ class VsrSession:
     # ------------------------------------------------------------------------
 
     def upscale_to_buffer(self, frame: Any, frame_index: int) -> Any:
-        """Upscale one frame. Returns the dst CVPixelBuffer (RGBAHalf for HQ,
-        NV12 for LL) ready to append to AVWriter.
+        """Upscale one frame from an MLX/numpy array. Returns the dst
+        CVPixelBuffer (RGBAHalf for HQ, NV12 for LL) ready to append to AVWriter.
+
+        The array is uploaded into a pooled source buffer in VSR's source
+        format (uint8 RGB and fp16 RGBA inputs are both accepted; see
+        `pixel_buffers.upload_frame_to_buffer`). For frames that already exist
+        as a CVPixelBuffer in the source format - e.g. straight from a native
+        decoder - use `upscale_buffer_to_buffer` to skip the upload entirely.
         """
         src_pb = self._make_src_buffer()
         _pb.upload_frame_to_buffer(frame, src_pb)
+        return self._process(src_pb, frame_index)
+
+    def upscale_buffer_to_buffer(self, src_pb: Any, frame_index: int) -> Any:
+        """Upscale one frame whose source CVPixelBuffer comes from an external
+        decoder (already in VSR's source format; see `source_format_for_mode`).
+
+        The buffer is normalized into a clean VSR pool buffer via
+        VTPixelTransferSession before processing, rather than fed raw. A raw
+        decoder buffer can carry IOSurface/attribute quirks - e.g. for input
+        whose coded size is padded to a macroblock multiple (a 544x408 clip is
+        coded at 544x416) - that the VSR processor rejects with -19730, even
+        though the identical pixels in a VSR pool buffer upscale fine. The
+        transfer also normalizes color to BT.709, so untagged / BT.601 /
+        full-range sources match the BT.709 encoder output.
+        """
+        clean = self._normalize_src_buffer(src_pb)
+        return self._process(clean, frame_index)
+
+    def _normalize_src_buffer(self, src_pb: Any) -> Any:
+        """Copy `src_pb` into a clean VSR-source pool buffer (BT.709), via a
+        lazily-created VTPixelTransferSession. See upscale_buffer_to_buffer.
+        """
+        if self._xfer is None:
+            err, xfer = vt.VTPixelTransferSessionCreate(None, None)
+            if err != 0 or xfer is None:
+                raise RuntimeError(f"VTPixelTransferSessionCreate failed: {err}")
+            # Normalize destination color to BT.709 (matches the encoder), so an
+            # untagged / BT.601 / full-range source is converted consistently
+            # instead of carrying its native attributes into the BT.709 output.
+            for key, val in (
+                (vt.kVTPixelTransferPropertyKey_DestinationColorPrimaries,
+                 Quartz.kCVImageBufferColorPrimaries_ITU_R_709_2),
+                (vt.kVTPixelTransferPropertyKey_DestinationTransferFunction,
+                 Quartz.kCVImageBufferTransferFunction_ITU_R_709_2),
+                (vt.kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
+                 Quartz.kCVImageBufferYCbCrMatrix_ITU_R_709_2),
+            ):
+                vt.VTSessionSetProperty(xfer, key, val)
+            self._xfer = xfer
+        clean = self._make_src_buffer()
+        err = vt.VTPixelTransferSessionTransferImage(self._xfer, src_pb, clean)
+        if err != 0:
+            raise RuntimeError(f"VTPixelTransferSessionTransferImage failed: {err}")
+        return clean
+
+    def _process(self, src_pb: Any, frame_index: int) -> Any:
+        """Run VSR on a ready source CVPixelBuffer; return the dst buffer.
+
+        Shared tail of both upscale entry points: allocates the dst buffer,
+        wraps src/dst as VTFrameProcessorFrames, builds the mode-appropriate
+        parameters (threading the prev-frame chain for balanced), and advances
+        that chain. The prev VTFrameProcessorFrame retains its CVPixelBuffer,
+        so an externally-supplied src buffer stays valid across the one
+        iteration balanced mode references it.
+        """
         dst_pb = self._make_dst_buffer()
         pts = _pb.frame_pts(frame_index, self.fps)
         src_frame = vt.VTFrameProcessorFrame.alloc().initWithBuffer_presentationTimeStamp_(

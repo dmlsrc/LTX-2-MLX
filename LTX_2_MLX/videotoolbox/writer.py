@@ -72,6 +72,8 @@ class AVWriter:
         label: str = "video",
         audio_track: AudioTrack | None = None,
         audio_codec: str = "alac",
+        transform: Any = None,
+        source_attrs: dict | None = None,
     ):
         require_pyobjc()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +91,11 @@ class AVWriter:
             av.AVMediaTypeVideo, hevc_video_settings(width, height, quality, profile),
         )
         video_input.setExpectsMediaDataInRealTime_(False)
+        # Carry the source track's rotation/flip as output metadata. The pixels
+        # stay in stored orientation through VSR and the encoder; the container
+        # transform makes players display them upright - lossless, no rotate.
+        if transform is not None:
+            video_input.setTransform_(transform)
 
         src_attrs = {
             Quartz.kCVPixelBufferPixelFormatTypeKey: source_pixel_format,
@@ -96,6 +103,22 @@ class AVWriter:
             Quartz.kCVPixelBufferHeightKey: height,
             Quartz.kCVPixelBufferIOSurfacePropertiesKey: {},
         }
+        # Carry over the extended-pixel padding the producer (VSR / temporal
+        # session) requires of the buffers it writes into - its dst attrs. When
+        # this pool feeds VSR's output directly (use_dst_pool, zero-copy), an
+        # unpadded buffer makes VTFrameProcessor fail -19730 for output
+        # geometries that need a padded destination (e.g. a 1088x816 output
+        # wants 16 extended bottom rows). The encoder still reads the clean
+        # width x height region, so the padding is transparent to it.
+        if source_attrs is not None:
+            for k in (
+                Quartz.kCVPixelBufferExtendedPixelsLeftKey,
+                Quartz.kCVPixelBufferExtendedPixelsRightKey,
+                Quartz.kCVPixelBufferExtendedPixelsTopKey,
+                Quartz.kCVPixelBufferExtendedPixelsBottomKey,
+            ):
+                if k in source_attrs:
+                    src_attrs[k] = source_attrs[k]
         adaptor = av.AVAssetWriterInputPixelBufferAdaptor.assetWriterInputPixelBufferAdaptorWithAssetWriterInput_sourcePixelBufferAttributes_(
             video_input, src_attrs,
         )

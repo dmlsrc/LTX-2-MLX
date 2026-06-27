@@ -92,6 +92,12 @@ def frame_pts(frame_index: int, fps: float) -> Any:
 # Pixel format inspection
 # ---------------------------------------------------------------------------
 
+def buffer_dims(pb: Any) -> tuple[int, int]:
+    """(width, height) of a CVPixelBuffer, in pixels."""
+    require_pyobjc()
+    return int(Quartz.CVPixelBufferGetWidth(pb)), int(Quartz.CVPixelBufferGetHeight(pb))
+
+
 def resolve_pixel_format(attrs: dict) -> int:
     """Extract the PixelFormatType from a VT config's attributes dict.
 

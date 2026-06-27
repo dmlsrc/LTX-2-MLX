@@ -13,9 +13,16 @@ Usage
     scripts/vsr_harness.py --latent run.npz --weights ... \
         --output-dir outputs/vsr/run1 --audio --target-fps 48
 
-    # Video path: skip VAE; VSR an existing clip.
+    # Video path: skip VAE; VSR an existing clip. Add --audio to carry the
+    # source file's audio track through to the upscaled MP4.
     scripts/vsr_harness.py --video clip.mp4 \
-        --output-dir outputs/vsr/run2 --spatial-mode balanced
+        --output-dir outputs/vsr/run2 --spatial-mode balanced --audio
+
+    # Process only the middle: upscale the [5s, 8s) window of a long clip.
+    # --start/--end (and --max-frames) accept frames (120), seconds (5s / 1.5),
+    # or a clock string (0:05, 1:02:03). --video seeks natively to the window.
+    scripts/vsr_harness.py --video clip.mp4 \
+        --output-dir outputs/vsr/run3 --start 0:05 --end 0:08 --audio
 
 Spatial modes (VideoToolbox-imposed; scale is implied by the mode)
 ------------------------------------------------------------------
@@ -62,8 +69,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import json
-import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -86,6 +91,7 @@ from LTX_2_MLX.videotoolbox import (
     require_pyobjc,
 )
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
+from LTX_2_MLX.videotoolbox import video_reader as _vr
 from LTX_2_MLX.videotoolbox.comparison import render_comparison
 from LTX_2_MLX.videotoolbox.images import save_image
 from LTX_2_MLX.videotoolbox.writer import (
@@ -94,6 +100,75 @@ from LTX_2_MLX.videotoolbox.writer import (
 )
 
 NATIVE_FPS = 24.0
+
+
+def parse_time_or_frames(spec: str, fps: float) -> int:
+    """Convert a position/duration spec to a frame count at `fps`.
+
+    Accepted forms (case-insensitive):
+        "120"         bare integer  -> 120 frames
+        "120f"        explicit f    -> 120 frames
+        "5s", "2.5s"  seconds       -> round(seconds * fps) frames
+        "1.5"         bare decimal  -> seconds (a fractional frame is meaningless)
+        "1:30"        mm:ss         -> seconds -> frames
+        "1:02:03"     hh:mm:ss      -> seconds -> frames
+        "0:04.5"      mm:ss.frac    -> seconds -> frames
+
+    The bare-integer-is-frames / bare-decimal-is-seconds split keeps existing
+    integer `--max-frames N` invocations meaning frames, while letting any
+    time be given as seconds or a clock string. Returns a non-negative int.
+    """
+    s = str(spec).strip().lower()
+    if not s:
+        raise ValueError("empty time/frame spec")
+    if ":" in s:
+        parts = s.split(":")
+        if len(parts) == 2:
+            hh, (mm, ss) = "0", parts
+        elif len(parts) == 3:
+            hh, mm, ss = parts
+        else:
+            raise ValueError(f"bad time spec {spec!r} (use mm:ss or hh:mm:ss)")
+        seconds = int(hh) * 3600 + int(mm) * 60 + float(ss)
+        frames = round(seconds * fps)
+    elif s.endswith("f"):
+        frames = int(s[:-1])
+    elif s.endswith("s"):
+        frames = round(float(s[:-1]) * fps)
+    elif "." in s:
+        frames = round(float(s) * fps)
+    else:
+        frames = int(s)
+    if frames < 0:
+        raise ValueError(f"time/frame spec {spec!r} is negative")
+    return int(frames)
+
+
+def resolve_trim(
+    start_spec: str | None, end_spec: str | None, fps: float, total_frames: int,
+) -> tuple[int, int | None]:
+    """Resolve --start/--end specs to a half-open frame window [start, end).
+
+    `end` is None for an open-ended window. Clamps end to the input length and
+    rejects an empty or out-of-range window with a clean SystemExit.
+    """
+    try:
+        start_frame = parse_time_or_frames(start_spec, fps) if start_spec else 0
+        end_frame = parse_time_or_frames(end_spec, fps) if end_spec else None
+    except ValueError as e:
+        raise SystemExit(f"bad --start/--end value: {e}") from None
+    if end_frame is not None and end_frame <= start_frame:
+        raise SystemExit(
+            f"--end ({end_frame}f) must be greater than --start ({start_frame}f)"
+        )
+    if total_frames and start_frame >= total_frames:
+        raise SystemExit(
+            f"--start ({start_frame}f) is at or past the input length "
+            f"({total_frames} frames)"
+        )
+    if total_frames and end_frame is not None:
+        end_frame = min(end_frame, total_frames)
+    return start_frame, end_frame
 
 
 # ---------------------------------------------------------------------------
@@ -266,55 +341,6 @@ def iter_latent_chunks(
 
 
 # ---------------------------------------------------------------------------
-# --video path: stream frames from ffmpeg
-# ---------------------------------------------------------------------------
-
-def probe_video(mp4_path: Path) -> tuple[int, int, float, int]:
-    probe = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate,nb_frames",
-            "-of", "json", str(mp4_path),
-        ],
-        check=True, capture_output=True, text=True,
-    )
-    info = json.loads(probe.stdout)["streams"][0]
-    w, h = int(info["width"]), int(info["height"])
-    num, den = info["r_frame_rate"].split("/")
-    fps = float(num) / float(den) if float(den) else float(num)
-    n = int(info.get("nb_frames", 0)) or 0
-    return w, h, fps, n
-
-
-def iter_video_chunks(
-    mp4_path: Path, w: int, h: int, chunk_size: int = 32,
-) -> Iterator[mx.array]:
-    """Stream rgb24 frames from ffmpeg stdout in fixed-size chunks."""
-    proc = subprocess.Popen(
-        [
-            "ffmpeg", "-v", "error", "-i", str(mp4_path),
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
-        ],
-        stdout=subprocess.PIPE,
-    )
-    frame_bytes = h * w * 3
-    chunk_bytes = chunk_size * frame_bytes
-    try:
-        while True:
-            buf = proc.stdout.read(chunk_bytes)
-            if not buf:
-                break
-            n = len(buf) // frame_bytes
-            if n == 0:
-                break
-            arr = mx.array(memoryview(buf[: n * frame_bytes]), dtype=mx.uint8).reshape(n, h, w, 3)
-            yield arr
-    finally:
-        proc.stdout.close()
-        proc.wait()
-
-
-# ---------------------------------------------------------------------------
 # Audio decode (latent only)
 # ---------------------------------------------------------------------------
 
@@ -340,6 +366,28 @@ def _decode_audio_track(audio_latent: Any, weights: str, compute_dtype: Any) -> 
         mx.clear_cache()
     except Exception:
         pass
+    return track
+
+
+def _read_audio_track_from_video(mp4_path: Path) -> AudioTrack | None:
+    """Read the audio track of an MP4/MOV into an in-memory AudioTrack.
+
+    Uses AVFoundation's AVAudioFile (via videotoolbox.audio.read_wav), which
+    decodes the container's audio stream straight into a (channels, frames)
+    float32 MLX array - no ffmpeg, no disk WAV. Returns None if the file has
+    no audio track.
+    """
+    from LTX_2_MLX.videotoolbox.audio import read_wav
+
+    print(f"[setup] reading audio track from {mp4_path}")
+    try:
+        sample_rate, samples = read_wav(mp4_path)
+    except Exception as e:
+        # No audio track (or an unsupported audio format) - carry on silent.
+        print(f"[setup] no usable audio track ({type(e).__name__}: {e}); output will be silent")
+        return None
+    track = AudioTrack(samples, sample_rate=int(sample_rate))
+    print(f"  audio: {track.channels}ch, {track.sample_rate} Hz, {track.n_samples} samples")
     return track
 
 
@@ -375,11 +423,16 @@ def run(args: argparse.Namespace) -> None:
     print(f"[setup] output stem: {stem}")
 
     audio_track: AudioTrack | None = None
+    src_transform: Any = None  # source rotation/flip (set on the --video path)
+    # Input frame window [loop_win_start, loop_win_end). The --video reader
+    # trims at decode time (efficient seek), so for that path these stay
+    # (0, None) and the trim happens upstream; the --latent path enforces the
+    # window in the main loop instead.
+    loop_win_start, loop_win_end = 0, None
+    win_start, win_end = 0, None  # resolved input window (both paths set these)
 
     # ---- Input source ------------------------------------------------------
     if args.latent:
-        import mlx.core as mx
-
         from scripts.decode_latent_debug import load_latents, parse_dtype
 
         print(f"[setup] VAE-decoding latent: {args.latent}")
@@ -399,10 +452,6 @@ def run(args: argparse.Namespace) -> None:
             t = time.perf_counter()
             audio_track = _decode_audio_track(audio_latent, args.weights, compute_dtype)
             print(f"[setup] audio decode in {time.perf_counter() - t:.2f}s")
-            if args.save_audio_sidecar:
-                sidecar = out_root / f"{stem}_audio.wav"
-                audio_track.save_wav(sidecar)
-                print(f"[setup] audio sidecar: {sidecar}")
         # The audio latent is consumed at this point; free it (and any other
         # post-audio state) so the Metal heap is clean before VAE decode.
         del audio_latent
@@ -419,6 +468,16 @@ def run(args: argparse.Namespace) -> None:
         print(f"[setup] video VAE loaded in {time.perf_counter() - t:.2f}s")
         total_frames, in_h, in_w = latent_dims(latent)
         source_fps = args.source_fps
+
+        # --start/--end trim the decoded frames. The VAE still decodes the whole
+        # latent (it is temporally tiled, not seekable), so the window is
+        # enforced in the main loop rather than at the reader.
+        win_start, win_end = resolve_trim(args.start, args.end, source_fps, total_frames)
+        if win_start or win_end is not None:
+            loop_win_start, loop_win_end = win_start, win_end
+            total_frames = (win_end if win_end is not None else total_frames) - win_start
+            print(f"[setup] input trim: frames [{win_start}, "
+                  f"{win_end if win_end is not None else 'end'}) -> {total_frames} frames")
 
         if args.vae_tiling == "single":
             vae_cfg, n_vae_chunks, vae_tiling_desc = None, 1, "single (one decode)"
@@ -440,10 +499,57 @@ def run(args: argparse.Namespace) -> None:
             single_pass=args.vae_tiling == "single",
         )
     else:
+        from LTX_2_MLX.videotoolbox.vsr import source_format_for_mode
+
         print(f"Reading video: {args.video}")
-        in_w, in_h, source_fps, total_frames = probe_video(Path(args.video))
-        chunks = iter_video_chunks(Path(args.video), in_w, in_h, chunk_size=args.video_chunk_size)
+        in_w, in_h, source_fps, total_frames, src_transform = _vr.probe_video(
+            Path(args.video),
+        )
+        # Decode straight into VSR's source format (NV12 for fast, RGBAHalf for
+        # balanced/image) and feed the buffers directly to VSR - no RGB
+        # intermediate, no MLX round-trip, no re-quantization. Size the decode
+        # chunk to a ~64 MiB budget so peak resident decoded frames stay bounded
+        # regardless of resolution (1 frame for 4K RGBAHalf, more for small SD).
+        vsr_src_fmt = source_format_for_mode(args.spatial_mode)
+        bytes_per_px = 8 if vsr_src_fmt == _pb.PIX_RGBAHALF else 2
+        frame_bytes = max(1, in_w * in_h * bytes_per_px)
+        buf_chunk = max(1, min(args.video_chunk_size, (64 * 1024 * 1024) // frame_bytes))
+        # --start/--end trim the input. The reader seeks to the window so the
+        # head of a long clip is never decoded (frame-exact, see video_reader).
+        win_start, win_end = resolve_trim(args.start, args.end, source_fps, total_frames)
+        if win_start or win_end is not None:
+            total_frames = (win_end if win_end is not None else total_frames) - win_start
+            print(f"[setup] input trim: frames [{win_start}, "
+                  f"{win_end if win_end is not None else 'end'}) -> {total_frames} frames")
+        chunks = _vr.iter_video_buffer_chunks(
+            Path(args.video), vsr_src_fmt, chunk_size=buf_chunk,
+            start_frame=win_start, end_frame=win_end,
+        )
         n_vae_chunks = None  # no VAE on --video path
+
+        # Carry the source file's audio through to the output MP4 (native
+        # AVFoundation read; no ffmpeg). Latents decode audio from a latent
+        # instead - see _decode_audio_track above. Trim + sidecar happen below,
+        # uniformly for both paths.
+        if args.audio:
+            audio_track = _read_audio_track_from_video(Path(args.video))
+
+    # ---- Audio trim + sidecar (uniform for both paths) ---------------------
+    # When --start/--end trim the video, trim the audio to the same window so
+    # the muxed track stays in sync (otherwise a short clip carries full-length
+    # audio). The sidecar, if requested, reflects the trimmed audio.
+    if audio_track is not None and (win_start or win_end is not None):
+        a_start = win_start / source_fps
+        a_end = (win_end / source_fps) if win_end is not None else None
+        audio_track = audio_track.trimmed(a_start, a_end)
+        print(
+            f"[setup] audio trimmed to [{a_start:.3f}s, "
+            f"{'end' if a_end is None else f'{a_end:.3f}s'})"
+        )
+    if audio_track is not None and args.save_audio_sidecar:
+        sidecar = out_root / f"{stem}_audio.wav"
+        audio_track.save_wav(sidecar)
+        print(f"[setup] audio sidecar: {sidecar}")
 
     # ---- Output geometry + encoder settings --------------------------------
     from LTX_2_MLX.videotoolbox.vsr import scale_for_mode
@@ -452,6 +558,15 @@ def run(args: argparse.Namespace) -> None:
     profile = _pick_hevc_profile(args.spatial_mode, args.encode_chroma)
     target_fps = args.target_fps if args.target_fps is not None else source_fps
     do_temporal = abs(target_fps - source_fps) > 1e-6
+    # --max-frames caps OUTPUT frames; a time spec here is output duration at
+    # the target fps. Parsed now that target_fps is known.
+    try:
+        max_frames = (
+            parse_time_or_frames(args.max_frames, target_fps)
+            if args.max_frames is not None else None
+        )
+    except ValueError as e:
+        raise SystemExit(f"bad --max-frames value: {e}") from None
 
     print(
         f"Source: {in_w}x{in_h}, "
@@ -503,15 +618,20 @@ def run(args: argparse.Namespace) -> None:
 
         pw: AVWriter | None = None
         if not args.skip_post_mp4:
+            # The producer feeding this writer's pool is the temporal session
+            # if present, else VSR. Pass its dst attrs so the pool's buffers
+            # carry the extended-pixel padding that producer requires (else
+            # VTFrameProcessor rejects them with -19730 for some geometries).
+            producer_attrs = v.dst_attrs if v is not None else s.dst_attrs
             pw = AVWriter(
                 out_root / f"{stem}_post.mp4",
                 width=out_w, height=out_h, fps=target_fps,
-                source_pixel_format=_pb.resolve_pixel_format(
-                    v.dst_attrs if v is not None else s.dst_attrs
-                ),
+                source_pixel_format=_pb.resolve_pixel_format(producer_attrs),
                 profile=profile,
                 quality=args.encode_quality,
                 label="post",
+                transform=src_transform,
+                source_attrs=producer_attrs,
                 **audio_kwargs,
             )
             # Zero-copy from VSR (or VtfrcSession's output) into encoder.
@@ -555,9 +675,9 @@ def run(args: argparse.Namespace) -> None:
     if target_frame_total and do_temporal:
         target_frame_total = int(round(total_frames * (target_fps / source_fps)))
     pbar_total = (
-        min(target_frame_total, args.max_frames)
-        if (target_frame_total and args.max_frames is not None) else
-        (args.max_frames or target_frame_total or None)
+        min(target_frame_total, max_frames)
+        if (target_frame_total and max_frames is not None) else
+        (max_frames or target_frame_total or None)
     )
     bars = StackedPhaseBars()
     vae_pbar = (
@@ -571,21 +691,22 @@ def run(args: argparse.Namespace) -> None:
     )
 
     # ---- Pipeline loop -----------------------------------------------------
-    processed = 0          # source frames consumed
+    processed = 0          # source frames upscaled
     appended = 0           # output frames written (= processed when no temporal)
+    in_idx = 0             # input frame index (counts skipped pre-window frames)
+    window_done = False    # set once the input window [loop_win_*) is exhausted
     t_total = time.perf_counter()
     try:
         for chunk in chunks:
-            # Latent path yields list[ndarray] (per-frame, freed as consumed);
-            # video path yields one ndarray (low per-chunk memory anyway).
-            chunk_is_list = isinstance(chunk, list)
-            if chunk_is_list:
-                chunk_len = len(chunk)
-                # Dim check on the first frame.
-                t_h, t_w = chunk[0].shape[0], chunk[0].shape[1]
+            # Both paths yield a list, freed per-frame as consumed: the latent
+            # path a list of MLX arrays (fp16 RGBA), the --video path a list of
+            # decoded CVPixelBuffers in VSR's source format (fed to VSR direct).
+            chunk_len = len(chunk)
+            frames_are_buffers = not isinstance(chunk[0], mx.array)
+            if frames_are_buffers:
+                t_w, t_h = _pb.buffer_dims(chunk[0])
             else:
-                chunk_len = chunk.shape[0]
-                t_h, t_w = chunk.shape[1], chunk.shape[2]
+                t_h, t_w = int(chunk[0].shape[0]), int(chunk[0].shape[1])
             if (t_w, t_h) != (in_w, in_h):
                 raise RuntimeError(
                     f"chunk dims {t_w}x{t_h} don't match VSR config {in_w}x{in_h}"
@@ -610,7 +731,17 @@ def run(args: argparse.Namespace) -> None:
                 if msg:
                     bars.write(msg)
             for i in range(chunk_len):
-                if args.max_frames is not None and appended >= args.max_frames:
+                if max_frames is not None and appended >= max_frames:
+                    break
+                # Input-frame window (latent path; --video already trimmed at
+                # the reader, where these bounds are 0/None). Skip frames before
+                # the window, and stop once past it.
+                if in_idx < loop_win_start:
+                    chunk[i] = None
+                    in_idx += 1
+                    continue
+                if loop_win_end is not None and in_idx >= loop_win_end:
+                    window_done = True
                     break
                 # Wrap the per-frame body in a fresh ObjC autorelease pool so
                 # transient autoreleased objects (NSData, CIImage, CIImage
@@ -624,24 +755,44 @@ def run(args: argparse.Namespace) -> None:
                 with autorelease_pool():
                     src_frame = chunk[i]
 
-                    if cut_detector is not None and cut_detector.is_cut(src_frame):
+                    # The upscale itself never needs an MLX array on the buffer
+                    # path - the decoded buffer feeds VSR directly. Only
+                    # materialize a uint8 RGB array when a feature consumes the
+                    # source pixels: cut detection, --save-pre-frames, or the
+                    # --comparison composite. For the latent path src_frame is
+                    # already the array.
+                    src_arr = None
+                    if (
+                        cut_detector is not None
+                        or args.save_pre_frames
+                        or comparison_writer is not None
+                    ):
+                        src_arr = (
+                            _pb.read_pixel_buffer_rgb(src_frame)
+                            if frames_are_buffers else src_frame
+                        )
+
+                    if cut_detector is not None and cut_detector.is_cut(src_arr):
                         session.reset_temporal_context()
                         if cut_log is not None:
                             cut_log.write(f"{processed}\n")
                             cut_log.flush()
 
-                    vsr_pb = session.upscale_to_buffer(src_frame, processed)
+                    if frames_are_buffers:
+                        vsr_pb = session.upscale_buffer_to_buffer(src_frame, processed)
+                    else:
+                        vsr_pb = session.upscale_to_buffer(src_frame, processed)
 
                     # PNG sidecars (opt-in via --save-*-frames). Done BEFORE
                     # the writer-append loop so vsr_pb is still in scope; the
                     # readback uses CIContext.
                     if args.save_pre_frames:
-                        if src_frame.dtype != mx.uint8:
-                            pre_rgb_u8 = mx.clip(src_frame[..., :3] * 255.0, 0, 255).astype(mx.uint8)
+                        if src_arr.dtype != mx.uint8:
+                            pre_rgb_u8 = mx.clip(src_arr[..., :3] * 255.0, 0, 255).astype(mx.uint8)
                         else:
                             pre_rgb_u8 = (
-                                src_frame if src_frame.shape[-1] == 3
-                                else src_frame[..., :3]
+                                src_arr if src_arr.shape[-1] == 3
+                                else src_arr[..., :3]
                             )
                         save_image(pre_rgb_u8, pre_dir / f"frame_{processed:05d}.png")
                     if args.save_post_frames:
@@ -658,7 +809,7 @@ def run(args: argparse.Namespace) -> None:
                         else vtfrc.feed(vsr_pb, processed)
                     )
                     for out_pb in out_iter:
-                        if args.max_frames is not None and appended >= args.max_frames:
+                        if max_frames is not None and appended >= max_frames:
                             break
                         if post_writer is not None:
                             post_writer.append(out_pb)
@@ -668,7 +819,7 @@ def run(args: argparse.Namespace) -> None:
                             )
                             # Pre half uses the source frame (not temporal-
                             # interpolated post) so before/after is honest.
-                            render_comparison(src_frame, out_pb, spatial_scale, comp_pb)
+                            render_comparison(src_arr, out_pb, spatial_scale, comp_pb)
                             comparison_writer.append(comp_pb)
                             del comp_pb
                         del out_pb
@@ -677,13 +828,13 @@ def run(args: argparse.Namespace) -> None:
                     del vsr_pb, out_iter
 
                     processed += 1
-                    # Drop this frame's reference so its ~1.2 MB numpy buffer
-                    # can be freed by Python's allocator. Without this, the
-                    # whole chunk's worth of frames stays resident until the
-                    # outer `del chunk` at chunk-end.
-                    if chunk_is_list:
-                        chunk[i] = None
-                    del src_frame
+                    in_idx += 1
+                    # Drop this frame's reference so its memory (the MLX array,
+                    # or the decoded CVPixelBuffer on the --video path) can be
+                    # freed now instead of staying resident until the outer
+                    # `del chunk` at chunk-end.
+                    chunk[i] = None
+                    del src_frame, src_arr
                 # autorelease pool drains here; PyObjC objects created in
                 # this iteration are released back to the system.
 
@@ -694,7 +845,7 @@ def run(args: argparse.Namespace) -> None:
                     _pb.clear_ci_caches()
                     session.flush_pools()
 
-            if args.max_frames is not None and appended >= args.max_frames:
+            if window_done or (max_frames is not None and appended >= max_frames):
                 break
             del chunk
             gc.collect()
@@ -820,7 +971,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--audio", action="store_true",
-        help="Mux audio (decoded from final_audio_latent) into both MP4s.",
+        help=(
+            "Mux audio into both MP4s. For --latent the audio is decoded from "
+            "final_audio_latent (audio VAE + vocoder); for --video the source "
+            "file's audio track is read natively (AVFoundation) and carried "
+            "through. A --video input with no audio track stays silent."
+        ),
     )
     parser.add_argument(
         "--audio-codec", choices=["alac", "aac"], default="alac",
@@ -828,7 +984,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--save-audio-sidecar", action="store_true",
-        help="Also write the decoded audio as <stem>_audio.wav next to the MP4s.",
+        help="Also write the muxed audio as <stem>_audio.wav next to the MP4s.",
     )
     parser.add_argument(
         "--cut-detect", choices=["off", "simple", "hist"], default="off",
@@ -846,9 +1002,39 @@ def main() -> None:
     )
     parser.add_argument(
         "--video-chunk-size", type=int, default=32,
-        help="Frames per chunk for --video input streaming.",
+        help=(
+            "Upper bound on decoded frames held in flight for --video input. "
+            "The actual chunk is further capped to a ~64 MiB memory budget "
+            "based on resolution, so peak resident decode memory stays bounded "
+            "(often 1 frame at 4K, this many at SD)."
+        ),
     )
-    parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument(
+        "--start", default=None,
+        help=(
+            "Trim the input to start at this position (process the middle of a "
+            "clip). Accepts frames or time: bare integer = frames (e.g. 120), "
+            "Nf = frames (120f), Ns / decimal = seconds (5s, 1.5), or a clock "
+            "string mm:ss / hh:mm:ss (0:05, 1:02:03). --video seeks here "
+            "natively (the head is not decoded); --latent windows the decode."
+        ),
+    )
+    parser.add_argument(
+        "--end", default=None,
+        help=(
+            "Trim the input to stop before this position (exclusive), same "
+            "frames-or-time forms as --start. Output is a fresh clip starting "
+            "at PTS 0 spanning [--start, --end)."
+        ),
+    )
+    parser.add_argument(
+        "--max-frames", default=None,
+        help=(
+            "Cap the number of OUTPUT frames. Same frames-or-time forms as "
+            "--start (a time here is output duration, measured at the target "
+            "fps). Composes with --start/--end, which trim the input."
+        ),
+    )
     parser.add_argument("--save-pre-frames", action="store_true")
     parser.add_argument("--save-post-frames", action="store_true")
     parser.add_argument(

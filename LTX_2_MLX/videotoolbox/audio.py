@@ -63,6 +63,24 @@ class AudioTrack:
             raise RuntimeError(f"CMAudioFormatDescriptionCreate failed: status={err}")
         self.format_desc = fmt
 
+    def trimmed(self, start_sec: float, end_sec: float | None) -> AudioTrack:
+        """Return a new AudioTrack covering [start_sec, end_sec) of this one.
+
+        Keeps muxed audio in sync when the video is trimmed with --start/--end.
+        end_sec=None means to the end. Clamps to the available range.
+        """
+        s0 = max(0, int(round(start_sec * self.sample_rate)))
+        s1 = (
+            self.n_samples if end_sec is None
+            else min(self.n_samples, int(round(end_sec * self.sample_rate)))
+        )
+        # Reconstruct (channels, samples) from the interleaved bytes, then slice.
+        samples = mx.array(memoryview(self._bytes).cast("f")).reshape(
+            self.n_samples, self.channels,
+        )
+        window = mx.transpose(samples)[:, s0:s1]
+        return AudioTrack(window, sample_rate=self.sample_rate)
+
     def save_wav(self, path: Path) -> None:
         """Write the in-memory PCM out as a float32 WAV (for --save-audio-sidecar)."""
         samples = mx.array(memoryview(self._bytes).cast("f")).reshape(
