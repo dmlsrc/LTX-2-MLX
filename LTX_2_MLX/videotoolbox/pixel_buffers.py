@@ -330,3 +330,41 @@ def read_pixel_buffer_rgb(pb: Any) -> Any:
     )
     rgba = mx.array(memoryview(buf)).reshape(h, w, 4)
     return mx.contiguous(rgba[..., :3])
+
+
+def read_rgbahalf_rgb(pb: Any) -> Any:
+    """Read a RGBAHalf ('RGhA') CVPixelBuffer into (H,W,3) float32 RGB, direct.
+
+    Memcpy of the fp16 plane (no CoreImage, no 8-bit quantization, no colorspace
+    re-render), so the decoder's full half-float precision survives. Values are
+    whatever the buffer holds - gamma-encoded RGB in roughly [0, 1] for SDR.
+    The round trip is byte-exact against write_fp16_rgba.
+    """
+    require_pyobjc()
+    w = Quartz.CVPixelBufferGetWidth(pb)
+    h = Quartz.CVPixelBufferGetHeight(pb)
+    Quartz.CVPixelBufferLockBaseAddress(pb, 1)
+    try:
+        bpr = Quartz.CVPixelBufferGetBytesPerRow(pb)
+        base = Quartz.CVPixelBufferGetBaseAddress(pb)
+        raw = mx.array(memoryview(base.as_buffer(h * bpr)))
+        half = raw.view(mx.float16).reshape(h, bpr // 2)[:, : w * 4].reshape(h, w, 4)
+        rgb = mx.contiguous(half[..., :3]).astype(mx.float32)
+        mx.eval(rgb)
+    finally:
+        Quartz.CVPixelBufferUnlockBaseAddress(pb, 1)
+    return rgb
+
+
+def read_buffer_rgb_f32(pb: Any) -> Any:
+    """Read any CVPixelBuffer into (H,W,3) float32 RGB in [0, 1].
+
+    RGBAHalf is read direct (fp16-preserving; see read_rgbahalf_rgb); other
+    formats (NV12, BGRA, ...) go through CoreImage and are 8-bit. Lets the
+    denoise path keep 10-bit precision when the decode is RGBAHalf
+    (balanced/image/none) and degrade gracefully to 8-bit for NV12 (fast).
+    """
+    require_pyobjc()
+    if Quartz.CVPixelBufferGetPixelFormatType(pb) == PIX_RGBAHALF:
+        return read_rgbahalf_rgb(pb)
+    return read_pixel_buffer_rgb(pb).astype(mx.float32) / 255.0

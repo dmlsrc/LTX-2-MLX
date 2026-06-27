@@ -93,7 +93,9 @@ from LTX_2_MLX.videotoolbox import (
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
 from LTX_2_MLX.videotoolbox import video_reader as _vr
 from LTX_2_MLX.videotoolbox.comparison import render_comparison
+from LTX_2_MLX.videotoolbox.denoise import McTemporalDenoiser, SpatialDenoiser
 from LTX_2_MLX.videotoolbox.images import save_image
+from LTX_2_MLX.videotoolbox.vsr import NativePassthrough
 from LTX_2_MLX.videotoolbox.writer import (
     HEVC_PROFILE_MAIN10,
     HEVC_PROFILE_MAIN422_10,
@@ -401,7 +403,8 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
         return HEVC_PROFILE_MAIN10
     if encode_chroma == "422":
         return HEVC_PROFILE_MAIN422_10
-    return HEVC_PROFILE_MAIN422_10 if spatial_mode in ("balanced", "image") else HEVC_PROFILE_MAIN10
+    # balanced/image/none carry RGBAHalf (4:4:4 chroma) into the encoder -> 4:2:2.
+    return HEVC_PROFILE_MAIN422_10 if spatial_mode in ("balanced", "image", "none") else HEVC_PROFILE_MAIN10
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +513,10 @@ def run(args: argparse.Namespace) -> None:
         # intermediate, no MLX round-trip, no re-quantization. Size the decode
         # chunk to a ~64 MiB budget so peak resident decoded frames stay bounded
         # regardless of resolution (1 frame for 4K RGBAHalf, more for small SD).
-        vsr_src_fmt = source_format_for_mode(args.spatial_mode)
+        vsr_src_fmt = (
+            _pb.PIX_RGBAHALF if args.spatial_mode == "none"
+            else source_format_for_mode(args.spatial_mode)
+        )
         bytes_per_px = 8 if vsr_src_fmt == _pb.PIX_RGBAHALF else 2
         frame_bytes = max(1, in_w * in_h * bytes_per_px)
         buf_chunk = max(1, min(args.video_chunk_size, (64 * 1024 * 1024) // frame_bytes))
@@ -553,7 +559,7 @@ def run(args: argparse.Namespace) -> None:
 
     # ---- Output geometry + encoder settings --------------------------------
     from LTX_2_MLX.videotoolbox.vsr import scale_for_mode
-    spatial_scale = scale_for_mode(args.spatial_mode)
+    spatial_scale = 1 if args.spatial_mode == "none" else scale_for_mode(args.spatial_mode)
     out_w, out_h = in_w * spatial_scale, in_h * spatial_scale
     profile = _pick_hevc_profile(args.spatial_mode, args.encode_chroma)
     target_fps = args.target_fps if args.target_fps is not None else source_fps
@@ -594,9 +600,10 @@ def run(args: argparse.Namespace) -> None:
     vtfrc: VtfrcSession | None = None
     post_writer: AVWriter | None = None
     comparison_writer: AVWriter | None = None
+    denoiser: Any = None  # SpatialDenoiser / McTemporalDenoiser when --denoise set
 
     def _build_post_pipeline() -> tuple[
-        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None
+        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any
     ]:
         """Materialize VSR + temporal + writer sessions just-in-time.
 
@@ -604,7 +611,11 @@ def run(args: argparse.Namespace) -> None:
         itself.  Returns (session, vtfrc, post_writer, comparison_writer);
         the dst-pool wiring for zero-copy is set up before returning.
         """
-        s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
+        s: Any = (
+            NativePassthrough(in_w, in_h, fps=source_fps)
+            if args.spatial_mode == "none"
+            else VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
+        )
         v: VtfrcSession | None = None
         if do_temporal:
             v = VtfrcSession(
@@ -651,7 +662,17 @@ def run(args: argparse.Namespace) -> None:
                 label="comparison",
                 **audio_kwargs,
             )
-        return s, v, pw, cw
+
+        den: Any = None
+        if args.denoise == "spatial":
+            den = SpatialDenoiser(strength=args.denoise_strength)
+        elif args.denoise == "mc":
+            den = McTemporalDenoiser(
+                in_w, in_h, strength=args.denoise_strength,
+                window=args.mc_window, clamp=args.mc_clamp,
+                occlusion=args.mc_occlusion, confidence=args.mc_confidence,
+            )
+        return s, v, pw, cw, den
 
     # ---- Cut detector ------------------------------------------------------
     cut_detector: CutDetector | None = None
@@ -726,7 +747,7 @@ def run(args: argparse.Namespace) -> None:
                 import io as _io
                 _buf = _io.StringIO()
                 with contextlib.redirect_stdout(_buf):
-                    session, vtfrc, post_writer, comparison_writer = _build_post_pipeline()
+                    session, vtfrc, post_writer, comparison_writer, denoiser = _build_post_pipeline()
                 msg = _buf.getvalue().rstrip("\n")
                 if msg:
                     bars.write(msg)
@@ -774,11 +795,30 @@ def run(args: argparse.Namespace) -> None:
 
                     if cut_detector is not None and cut_detector.is_cut(src_arr):
                         session.reset_temporal_context()
+                        if denoiser is not None:
+                            denoiser.reset()
                         if cut_log is not None:
                             cut_log.write(f"{processed}\n")
                             cut_log.flush()
 
-                    if frames_are_buffers:
+                    if denoiser is not None:
+                        # Denoise at native resolution before VSR, then feed the
+                        # cleaned frame through VSR's upload path (not the direct
+                        # buffer feed). f32 RGB [0,1] in, f32 RGB out.
+                        if frames_are_buffers:
+                            # fp16-preserving for RGBAHalf (balanced/image/none);
+                            # 8-bit CoreImage fallback for NV12 (fast).
+                            base_rgb = _pb.read_buffer_rgb_f32(src_frame)
+                        else:
+                            base_rgb = src_frame[..., :3].astype(mx.float32)
+                        den_rgb = denoiser.denoise(base_rgb)
+                        den_rgba = mx.concatenate(
+                            [den_rgb.astype(mx.float16),
+                             mx.ones((den_rgb.shape[0], den_rgb.shape[1], 1), mx.float16)],
+                            axis=-1,
+                        )
+                        vsr_pb = session.upscale_to_buffer(den_rgba, processed)
+                    elif frames_are_buffers:
                         vsr_pb = session.upscale_buffer_to_buffer(src_frame, processed)
                     else:
                         vsr_pb = session.upscale_to_buffer(src_frame, processed)
@@ -855,6 +895,8 @@ def run(args: argparse.Namespace) -> None:
             vtfrc.close()
         if session is not None:
             session.close()
+        if denoiser is not None:
+            denoiser.close()
         for writer in (post_writer, comparison_writer):
             if writer is not None:
                 writer.finish()
@@ -941,10 +983,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--spatial-mode", choices=["fast", "balanced", "image"], default="balanced",
+        "--spatial-mode", choices=["fast", "balanced", "image", "none"], default="balanced",
         help=(
             "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
-            "balanced=4x, image=4x). "
+            "balanced=4x, image=4x, none=1x). "
+            "none = no super-resolution; output stays at native resolution. Use "
+            "it with --denoise to denoise-only, or alone for a plain transcode. "
             "balanced (default) = HQ Video mode; uses prev source + prev output "
             "frames to inform the upscale.  Tends to produce crisper motion edges "
             "at the cost of slightly more frame-to-frame variation in detail. "
@@ -985,6 +1029,49 @@ def main() -> None:
     parser.add_argument(
         "--save-audio-sidecar", action="store_true",
         help="Also write the muxed audio as <stem>_audio.wav next to the MP4s.",
+    )
+    parser.add_argument(
+        "--denoise", choices=["off", "spatial", "mc"], default="off",
+        help=(
+            "Pre-upscale denoise, applied at native resolution before VSR (the "
+            "correct order - SR amplifies noise). off (default); spatial = "
+            "per-frame CoreImage CINoiseReduction (cheap, no temporal state); "
+            "mc = motion-compensated temporal denoise via VideoToolbox optical "
+            "flow (recursive, GPU; averages static regions over time without "
+            "ghosting moving edges). Enabling denoise routes frames through the "
+            "MLX upload path instead of the zero-copy direct feed."
+        ),
+    )
+    parser.add_argument(
+        "--denoise-strength", type=float, default=0.5,
+        help=(
+            "Denoise strength 0..1 (default 0.5). For mc, the max temporal blend "
+            "toward motion-compensated history; for spatial, the noise level."
+        ),
+    )
+    parser.add_argument(
+        "--mc-window", type=int, default=0, metavar="N",
+        help=(
+            "mc temporal structure (mutually exclusive). 0 (default) = recursive "
+            "IIR (blends the previous output; strongest denoise, longest ghosts). "
+            "N>=1 = causal FIR over the last N input frames (bounded ghost "
+            "lifetime, ~N optical-flow computes per frame)."
+        ),
+    )
+    parser.add_argument(
+        "--mc-clamp", action="store_true",
+        help="mc: clamp warped history to the current frame's local color box "
+             "(TAA variance-clip). The strongest single anti-ghost. Combinable.",
+    )
+    parser.add_argument(
+        "--mc-occlusion", action="store_true",
+        help="mc: reject history via forward-backward flow consistency "
+             "(occlusion / bad-flow detection). Combinable.",
+    )
+    parser.add_argument(
+        "--mc-confidence", action="store_true",
+        help="mc: down-weight history where flow magnitude is large (fast "
+             "motion). Combinable.",
     )
     parser.add_argument(
         "--cut-detect", choices=["off", "simple", "hist"], default="off",

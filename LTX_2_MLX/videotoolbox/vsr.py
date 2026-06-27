@@ -405,3 +405,63 @@ class VsrSession:
         self._prev_src_frame = src_frame
         self._prev_dst_frame = dst_frame
         return dst_pb
+
+
+class NativePassthrough:
+    """No-op stand-in for VsrSession used by --spatial-mode none.
+
+    Packs a frame into a native-resolution RGBAHalf CVPixelBuffer with no
+    super-resolution, exposing the same surface the harness loop drives on
+    VsrSession (upscale_to_buffer / upscale_buffer_to_buffer / use_dst_pool /
+    reset_temporal_context / flush_pools / close, plus out_w/out_h/dst_attrs).
+    Lets the pipeline run denoise -> encode (or a plain transcode) at native
+    resolution without special-casing the loop.
+    """
+
+    def __init__(self, in_w: int, in_h: int, fps: float = 24.0):
+        require_pyobjc()
+        self.in_w, self.in_h = int(in_w), int(in_h)
+        self.scale = 1
+        self.out_w, self.out_h = self.in_w, self.in_h
+        self.mode = "none"
+        self.fps = float(fps)
+        self.dst_attrs = {
+            Quartz.kCVPixelBufferPixelFormatTypeKey: _pb.PIX_RGBAHALF,
+            Quartz.kCVPixelBufferWidthKey: self.in_w,
+            Quartz.kCVPixelBufferHeightKey: self.in_h,
+            Quartz.kCVPixelBufferIOSurfacePropertiesKey: {},
+        }
+        self.src_attrs = dict(self.dst_attrs)
+        self._pool = _pb.make_pool_from_attrs(self.dst_attrs)
+        print(f"Native passthrough (no upscale) ready ({self.in_w}x{self.in_h}, RGBAHalf)")
+
+    def use_dst_pool(self, pool: Any) -> None:
+        self._pool = pool
+
+    def reset_temporal_context(self) -> None:
+        pass
+
+    def flush_pools(self) -> None:
+        _pb.flush_pool(self._pool)
+
+    def close(self) -> None:
+        pass
+
+    def _make_buffer(self) -> Any:
+        if self._pool is not None:
+            pb = _pb.pool_create_buffer(self._pool)
+            if pb is not None:
+                return pb
+        return _pb.make_pixel_buffer_from_attrs(self.out_w, self.out_h, self.dst_attrs)
+
+    def upscale_to_buffer(self, frame: Any, frame_index: int) -> Any:
+        """Pack an MLX/numpy frame into a native-res RGBAHalf buffer (no scale)."""
+        pb = self._make_buffer()
+        _pb.upload_frame_to_buffer(frame, pb)
+        return pb
+
+    def upscale_buffer_to_buffer(self, src_pb: Any, frame_index: int) -> Any:
+        """Pass an already-decoded RGBAHalf buffer straight through (transcode
+        with no denoise). The harness decodes --spatial-mode none to RGBAHalf,
+        so the buffer already matches the output format."""
+        return src_pb
