@@ -27,22 +27,27 @@ def default_weights_path() -> Path:
     return _WEIGHTS_DIR / "basicvsrpp_reds4.safetensors"
 
 
-def load_params(path: str | Path | None = None) -> dict:
+def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict:
     """Load + lay out the checkpoint: conv weights -> NHWC, DCN weight kept NCHW,
-    SPyNet mean/std -> NHWC, step_counter dropped."""
+    SPyNet mean/std -> NHWC, step_counter dropped, all cast to `dtype`.
+
+    Default fp16 halves activation memory and is ~1.5x faster; the deformable
+    conv still runs its im2col/GEMM in fp32 internally for safety. Pass
+    dtype=mx.float32 to match the bit-exact validation reference."""
     w = mx.load(str(path or default_weights_path()))
     p: dict = {}
     for k, v in w.items():
         if k == "step_counter":
             continue
         if k in ("spynet.mean", "spynet.std"):
-            p[k] = v.reshape(1, 1, 1, 3)
+            a = v.reshape(1, 1, 1, 3)
         elif v.ndim == 4 and not (
             k.startswith("deform_align.") and k.endswith(".weight") and "conv_offset" not in k
         ):
-            p[k] = mx.transpose(v, (0, 2, 3, 1))   # (O,I,kH,kW) torch -> (O,kH,kW,I) MLX
+            a = mx.transpose(v, (0, 2, 3, 1))   # (O,I,kH,kW) torch -> (O,kH,kW,I) MLX
         else:
-            p[k] = v
+            a = v
+        p[k] = a.astype(dtype)
     return p
 
 
@@ -86,7 +91,8 @@ def _bilinear(x: Any, sy: Any, sx: Any, pad: str = "border") -> Any:
     v01 = g(y0i, x0i + 1)
     v10 = g(y0i + 1, x0i)
     v11 = g(y0i + 1, x0i + 1)
-    return (1 - ly) * (1 - lx) * v00 + (1 - ly) * lx * v01 + ly * (1 - lx) * v10 + ly * lx * v11
+    out = (1 - ly) * (1 - lx) * v00 + (1 - ly) * lx * v01 + ly * (1 - lx) * v10 + ly * lx * v11
+    return out.astype(x.dtype)   # fp32 grid weights would otherwise upcast features
 
 
 def flow_warp(x: Any, flow: Any, pad: str = "zeros") -> Any:
@@ -144,7 +150,7 @@ def spynet_flow(p: dict, ref: Any, supp: Any) -> Any:
         supps.append(_avgpool2(supps[-1]))
     refs = refs[::-1]
     supps = supps[::-1]
-    flow = mx.zeros((n, h_up // 32, w_up // 32, 2))
+    flow = mx.zeros((n, h_up // 32, w_up // 32, 2), dtype=ref.dtype)   # keep flow in the feature dtype
     for lvl in range(6):
         flow_up = flow if lvl == 0 else resize(flow, flow.shape[1] * 2, flow.shape[2] * 2, True) * 2.0
         warped = flow_warp(supps[lvl], flow_up, "border")
@@ -209,14 +215,23 @@ def _deform_align(feat_cat: Any, cond: Any, flow1: Any, flow2: Any, p: dict,
         p[f"{key}.weight"], p.get(f"{key}.bias"), mx.transpose(mask, (0, 3, 1, 2)),
         stride=1, padding=1, dilation=1, deform_groups=dg,
     )
-    return mx.transpose(out, (0, 2, 3, 1))
+    return mx.transpose(out, (0, 2, 3, 1)).astype(feat_cat.dtype)   # DCN runs fp32 inside
 
 
 # ---- recurrent forward -----------------------------------------------------
 def _compute_flows(frames: list, p: dict) -> tuple:
-    """flows_forward[i] = flow(i+1 -> i); flows_backward[i] = flow(i -> i+1)."""
-    fb = [spynet_flow(p, frames[i], frames[i + 1]) for i in range(len(frames) - 1)]
-    ff = [spynet_flow(p, frames[i + 1], frames[i]) for i in range(len(frames) - 1)]
+    """flows_forward[i] = flow(i+1 -> i); flows_backward[i] = flow(i -> i+1).
+
+    Each flow is materialized as computed: SPyNet upsizes to a multiple of 32 and
+    builds a 6-level pyramid, so holding all 2*(T-1) of them as one lazy graph
+    spikes memory; per-flow eval keeps only the small (H,W,2) results alive."""
+    fb, ff = [], []
+    for i in range(len(frames) - 1):
+        b = spynet_flow(p, frames[i], frames[i + 1])
+        f = spynet_flow(p, frames[i + 1], frames[i])
+        mx.eval(b, f)
+        fb.append(b)
+        ff.append(f)
     return ff, fb
 
 
@@ -228,7 +243,7 @@ def _propagate(feats: dict, flows: list, module: str, p: dict) -> dict:
         frame_idx = frame_idx[::-1]
         flow_idx = frame_idx
     n, h, w, mid = feats["spatial"][0].shape
-    feat_prop = mx.zeros((n, h, w, mid))
+    feat_prop = mx.zeros((n, h, w, mid), dtype=feats["spatial"][0].dtype)
     out: list = []
     for i, idx in enumerate(frame_idx):
         feat_current = feats["spatial"][idx]
@@ -247,6 +262,10 @@ def _propagate(feats: dict, flows: list, module: str, p: dict) -> dict:
                                       cond, flow_n1, flow_n2, p, f"deform_align.{module}")
         feat = [feat_current] + [feats[k][idx] for k in feats if k not in ("spatial", module)] + [feat_prop]
         feat_prop = feat_prop + _resblocks_with_input(mx.concatenate(feat, axis=-1), p, f"backbone.{module}", 7)
+        # Materialize each step so the recurrent graph (and the large transient
+        # DCN im2col columns) frees per frame instead of accumulating the whole
+        # clip's forward into one lazy graph - that peaks memory catastrophically.
+        mx.eval(feat_prop)
         out.append(feat_prop)
     if "backward" in module:
         out = out[::-1]
@@ -264,18 +283,29 @@ def _upsample(frames: list, feats: dict, p: dict) -> list:
         hr = lrelu(conv(hr, p, "conv_hr"))
         hr = conv(hr, p, "conv_last")
         _, fh, fw, _ = frames[i].shape
-        outs.append(hr + resize(frames[i], fh * 4, fw * 4, False))
+        out_frame = hr + resize(frames[i], fh * 4, fw * 4, False)
+        mx.eval(out_frame)   # free each frame's upsample graph before the next
+        outs.append(out_frame)
     return outs
 
 
 def upscale(frames: list, p: dict) -> list:
     """Upscale an LR clip 4x. frames: list of (N,H,W,3) f32 [0,1]; out: same len,
     each (N,4H,4W,3). Bidirectional + second-order, so the whole clip is needed."""
-    feats: dict = {"spatial": [_resblocks_with_input(f, p, "feat_extract", 5) for f in frames]}
-    ff, fb = _compute_flows(frames, p)
+    dt = p["conv_last.weight"].dtype
+    frames = [f.astype(dt) for f in frames]
+    spatial = []
+    for f in frames:
+        s = _resblocks_with_input(f, p, "feat_extract", 5)
+        mx.eval(s)                       # materialize per frame, not all at once
+        spatial.append(s)
+    feats: dict = {"spatial": spatial}
+    ff, fb = _compute_flows(frames, p)   # evals each flow internally
     for it in (1, 2):
         for direction in ("backward", "forward"):
-            feats = _propagate(feats, fb if direction == "backward" else ff, f"{direction}_{it}", p)
+            mod = f"{direction}_{it}"
+            feats = _propagate(feats, fb if direction == "backward" else ff, mod, p)
+            mx.eval(*feats[mod])
     return _upsample(frames, feats, p)
 
 
