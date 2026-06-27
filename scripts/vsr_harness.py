@@ -726,6 +726,54 @@ def run(args: argparse.Namespace) -> None:
     in_idx = 0             # input frame index (counts skipped pre-window frames)
     window_done = False    # set once the input window [loop_win_*) is exhausted
     t_total = time.perf_counter()
+
+    def _emit(den_rgb: Any, src_frame: Any, src_arr: Any) -> None:
+        """Upscale one frame (denoised ``den_rgb``, or raw ``src_frame`` when
+        ``den_rgb`` is None) and write it out, with sidecars / FRC / comparison.
+        Advances the processed and appended counters. Used for every output frame
+        so the no-denoise, per-frame (spatial/mc), and lookahead (fastdvd) paths
+        share one emit path."""
+        nonlocal processed, appended
+        if den_rgb is not None:
+            den_rgba = mx.concatenate(
+                [den_rgb.astype(mx.float16),
+                 mx.ones((den_rgb.shape[0], den_rgb.shape[1], 1), mx.float16)],
+                axis=-1,
+            )
+            vsr_pb = session.upscale_to_buffer(den_rgba, processed)
+        elif frames_are_buffers:
+            vsr_pb = session.upscale_buffer_to_buffer(src_frame, processed)
+        else:
+            vsr_pb = session.upscale_to_buffer(src_frame, processed)
+
+        if args.save_pre_frames:
+            if src_arr.dtype != mx.uint8:
+                pre_rgb_u8 = mx.clip(src_arr[..., :3] * 255.0, 0, 255).astype(mx.uint8)
+            else:
+                pre_rgb_u8 = src_arr if src_arr.shape[-1] == 3 else src_arr[..., :3]
+            save_image(pre_rgb_u8, pre_dir / f"frame_{processed:05d}.png")
+        if args.save_post_frames:
+            save_image(
+                _pb.read_pixel_buffer_rgb(vsr_pb), post_dir / f"frame_{processed:05d}.png",
+            )
+
+        out_iter = iter([vsr_pb]) if vtfrc is None else vtfrc.feed(vsr_pb, processed)
+        for out_pb in out_iter:
+            if max_frames is not None and appended >= max_frames:
+                break
+            if post_writer is not None:
+                post_writer.append(out_pb)
+            if comparison_writer is not None:
+                comp_pb = _pb.make_bgra_buffer(comparison_writer.adaptor, 2 * out_w, out_h)
+                render_comparison(src_arr, out_pb, spatial_scale, comp_pb)
+                comparison_writer.append(comp_pb)
+                del comp_pb
+            del out_pb
+            appended += 1
+            out_pbar.update(1)
+        del vsr_pb, out_iter
+        processed += 1
+
     try:
         for chunk in chunks:
             # Both paths yield a list, freed per-frame as consumed: the latent
@@ -803,6 +851,11 @@ def run(args: argparse.Namespace) -> None:
                         )
 
                     if cut_detector is not None and cut_detector.is_cut(src_arr):
+                        # Flush a lookahead denoiser's buffered (pre-cut) frames
+                        # before resetting so its window never bridges the cut.
+                        if denoiser is not None and hasattr(denoiser, "flush"):
+                            for d_rgb, (d_sf, d_sa) in denoiser.flush():
+                                _emit(d_rgb, d_sf, d_sa)
                         session.reset_temporal_context()
                         if denoiser is not None:
                             denoiser.reset()
@@ -810,73 +863,27 @@ def run(args: argparse.Namespace) -> None:
                             cut_log.write(f"{processed}\n")
                             cut_log.flush()
 
+                    # Produce this input's output frame(s). No denoise -> the raw
+                    # frame goes straight to VSR; spatial/mc denoise one frame in
+                    # step; fastdvd buffers and emits centered-window frames once
+                    # their two future neighbours have arrived (feed() may return
+                    # nothing now; the tail drains after the loop). f32 RGB [0,1].
                     if denoiser is not None:
-                        # Denoise at native resolution before VSR, then feed the
-                        # cleaned frame through VSR's upload path (not the direct
-                        # buffer feed). f32 RGB [0,1] in, f32 RGB out.
+                        # fp16-preserving for RGBAHalf (balanced/image/none); 8-bit
+                        # CoreImage fallback for NV12 (fast).
                         if frames_are_buffers:
-                            # fp16-preserving for RGBAHalf (balanced/image/none);
-                            # 8-bit CoreImage fallback for NV12 (fast).
                             base_rgb = _pb.read_buffer_rgb_f32(src_frame)
                         else:
                             base_rgb = src_frame[..., :3].astype(mx.float32)
-                        den_rgb = denoiser.denoise(base_rgb)
-                        den_rgba = mx.concatenate(
-                            [den_rgb.astype(mx.float16),
-                             mx.ones((den_rgb.shape[0], den_rgb.shape[1], 1), mx.float16)],
-                            axis=-1,
-                        )
-                        vsr_pb = session.upscale_to_buffer(den_rgba, processed)
-                    elif frames_are_buffers:
-                        vsr_pb = session.upscale_buffer_to_buffer(src_frame, processed)
-                    else:
-                        vsr_pb = session.upscale_to_buffer(src_frame, processed)
-
-                    # PNG sidecars (opt-in via --save-*-frames). Done BEFORE
-                    # the writer-append loop so vsr_pb is still in scope; the
-                    # readback uses CIContext.
-                    if args.save_pre_frames:
-                        if src_arr.dtype != mx.uint8:
-                            pre_rgb_u8 = mx.clip(src_arr[..., :3] * 255.0, 0, 255).astype(mx.uint8)
+                        if hasattr(denoiser, "feed"):
+                            ready = denoiser.feed(base_rgb, token=(None, src_arr))
                         else:
-                            pre_rgb_u8 = (
-                                src_arr if src_arr.shape[-1] == 3
-                                else src_arr[..., :3]
-                            )
-                        save_image(pre_rgb_u8, pre_dir / f"frame_{processed:05d}.png")
-                    if args.save_post_frames:
-                        save_image(
-                            _pb.read_pixel_buffer_rgb(vsr_pb),
-                            post_dir / f"frame_{processed:05d}.png",
-                        )
+                            ready = [(denoiser.denoise(base_rgb), (None, src_arr))]
+                    else:
+                        ready = [(None, (src_frame, src_arr))]
+                    for d_rgb, (d_sf, d_sa) in ready:
+                        _emit(d_rgb, d_sf, d_sa)
 
-                    # Iterate VSR/temporal output buffers directly - don't
-                    # materialize into a list - so each buffer's local ref
-                    # drops the moment the writer takes it.
-                    out_iter = (
-                        iter([vsr_pb]) if vtfrc is None
-                        else vtfrc.feed(vsr_pb, processed)
-                    )
-                    for out_pb in out_iter:
-                        if max_frames is not None and appended >= max_frames:
-                            break
-                        if post_writer is not None:
-                            post_writer.append(out_pb)
-                        if comparison_writer is not None:
-                            comp_pb = _pb.make_bgra_buffer(
-                                comparison_writer.adaptor, 2 * out_w, out_h,
-                            )
-                            # Pre half uses the source frame (not temporal-
-                            # interpolated post) so before/after is honest.
-                            render_comparison(src_arr, out_pb, spatial_scale, comp_pb)
-                            comparison_writer.append(comp_pb)
-                            del comp_pb
-                        del out_pb
-                        appended += 1
-                        out_pbar.update(1)
-                    del vsr_pb, out_iter
-
-                    processed += 1
                     in_idx += 1
                     # Drop this frame's reference so its memory (the MLX array,
                     # or the decoded CVPixelBuffer on the --video path) can be
@@ -898,6 +905,14 @@ def run(args: argparse.Namespace) -> None:
                 break
             del chunk
             gc.collect()
+        # Drain any frames a lookahead denoiser still holds (the centered-window
+        # tail, with the standard reflected window at the clip's end).
+        if denoiser is not None and hasattr(denoiser, "flush") and session is not None:
+            for d_rgb, (d_sf, d_sa) in denoiser.flush():
+                if max_frames is not None and appended >= max_frames:
+                    break
+                with autorelease_pool():
+                    _emit(d_rgb, d_sf, d_sa)
     finally:
         bars.close()
         if vtfrc is not None:

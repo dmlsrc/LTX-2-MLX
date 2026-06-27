@@ -187,15 +187,24 @@ def default_weights_path() -> Path:
 
 
 class FastDvdDenoiser:
-    """Causal streaming wrapper around FastDVDnet for the VSR harness.
+    """Streaming FastDVDnet with a proper centered 5-frame window.
 
-    FastDVDnet denoises the center of a 5-frame window, but the harness is a
-    1-in-1-out causal stream with no future frames. So the two future slots are
-    reflected from the past: [p2, p1, cur, p1, p2]. Measured ~+29% RMSE vs a true
-    centered window, but still ~13x noise reduction (vs ~3x spatial-only) and no
-    latency. Same (H,W,3) f32 [0,1] in/out interface as the other denoisers;
-    reset() clears history at scene cuts so the window never bridges a cut.
+    FastDVDnet denoises the center of a 5-frame window, so it needs two future
+    frames - a 2-frame lookahead. This is a delay line: feed() buffers a frame and
+    returns any frames whose two future neighbours have now arrived; flush() drains
+    the tail at end of stream. Only the clip's first/last two frames use a
+    reflected window (the standard boundary handling, exactly as the reference);
+    every interior frame uses its real [t-2 .. t+2] neighbours - no reflection
+    hack (that fed the net out-of-distribution symmetric frames and produced a
+    pixel-shuffle moire).
+
+    feed(frame, token) and flush() return lists of (denoised_frame, token). Frames
+    are (H,W,3) f32 in [0,1]; token is opaque - the harness threads its per-frame
+    context (source pixels, ...) through so delayed outputs stay aligned. reset()
+    drops state; call flush() first at a scene cut so the window never bridges it.
     """
+
+    LOOKAHEAD = 2   # (5 - 1) // 2: frames of future context the center needs
 
     def __init__(self, weights_path: str | Path | None = None, strength: float = 0.5,
                  dtype: Any = mx.float16):
@@ -207,20 +216,56 @@ class FastDvdDenoiser:
             )
         self.net = FastDVDnet(wp, dtype=dtype)
         self.sigma = _strength_to_sigma(strength)
-        self._hist: list = []   # up to 2 most recent input frames, oldest first
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        self._buf: list = []    # (frame, token) for absolute indices [_base ..]
+        self._base = 0          # absolute index of _buf[0]
+        self._received = 0
+        self._emitted = 0
 
     def reset(self) -> None:
-        self._hist = []
+        self._reset_state()
 
     def close(self) -> None:
         pass
 
-    def denoise(self, rgb_f32: Any) -> Any:
-        h = self._hist
-        p1 = h[-1] if len(h) >= 1 else rgb_f32
-        p2 = h[-2] if len(h) >= 2 else p1
-        out = self.net.denoise_center([p2, p1, rgb_f32, p1, p2], self.sigma)
-        h.append(rgb_f32)
-        if len(h) > 2:
-            h.pop(0)
+    @staticmethod
+    def _reflect(a: int, last: int) -> int:
+        """Reflect index a into [0, last] (boundary handling at clip ends)."""
+        if a < 0:
+            a = -a
+        if a > last:
+            a = 2 * last - a
+        return max(0, min(last, a))
+
+    def _emit_one(self, last: int) -> tuple:
+        e = self._emitted
+        win = [self._buf[self._reflect(e + d, last) - self._base][0]
+               for d in (-2, -1, 0, 1, 2)]
+        tok = self._buf[e - self._base][1]
+        out = self.net.denoise_center(win, self.sigma)
+        self._emitted += 1
+        while self._base < self._emitted - self.LOOKAHEAD:   # drop no-longer-needed
+            self._buf.pop(0)
+            self._base += 1
+        return out, tok
+
+    def feed(self, frame: Any, token: Any = None) -> list:
+        """Buffer one input frame; return [(denoised, token), ...] now ready."""
+        self._buf.append((frame, token))
+        self._received += 1
+        last = self._received - 1
+        ready = []
+        while last - self._emitted >= self.LOOKAHEAD:
+            ready.append(self._emit_one(last))
+        return ready
+
+    def flush(self) -> list:
+        """Drain remaining frames (end-reflected window) at end of stream / cut."""
+        last = self._received - 1
+        out = []
+        while self._emitted <= last:
+            out.append(self._emit_one(last))
+        self._reset_state()
         return out
