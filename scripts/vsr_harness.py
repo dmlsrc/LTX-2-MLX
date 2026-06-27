@@ -675,10 +675,11 @@ def run(args: argparse.Namespace) -> None:
                 occlusion=args.mc_occlusion, confidence=args.mc_confidence,
             )
         elif args.denoise == "fastdvd":
-            # Weights ship with the package; --fastdvd-weights / $FASTDVD_WEIGHTS
-            # only override (e.g. the bundled model_clipped_noise variant).
+            # Weights ship with the package; --fastdvd-variant picks one, or
+            # --fastdvd-weights / $FASTDVD_WEIGHTS overrides the path entirely.
             den = FastDvdDenoiser(
                 args.fastdvd_weights or os.environ.get("FASTDVD_WEIGHTS"),
+                variant=args.fastdvd_variant,
                 strength=args.denoise_strength,
             )
         return s, v, pw, cw, den
@@ -1080,8 +1081,18 @@ def main() -> None:
         "--fastdvd-weights", default=None, metavar="PATH",
         help=(
             "Override FastDVDnet weights (.safetensors) for --denoise fastdvd. "
-            "Optional - defaults to the weights bundled with the package (or "
+            "Optional - defaults to the bundled --fastdvd-variant weights (or "
             "$FASTDVD_WEIGHTS). Convert a .pth with scripts/pth_to_safetensors.py."
+        ),
+    )
+    parser.add_argument(
+        "--fastdvd-variant", choices=["clipped", "standard"], default="clipped",
+        help=(
+            "Which bundled FastDVDnet model for --denoise fastdvd. clipped "
+            "(default) is trained with clipped noise and stays clean on real "
+            "footage at moderate strength; standard is the plain-AWGN model and "
+            "shows a faint pixel-shuffle grid above ~0.1 strength on clean content. "
+            "Ignored when --fastdvd-weights is given."
         ),
     )
     parser.add_argument(

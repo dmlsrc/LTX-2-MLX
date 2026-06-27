@@ -178,12 +178,19 @@ def _strength_to_sigma(strength: float) -> float:
 
 # Weights ship inside the package (~10MB each), so no path/env is needed.
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "fastdvdnet_weights"
+_VARIANTS = {
+    # Trained with clipped noise; stays clean on real footage at moderate sigma.
+    "clipped": "model_clipped_noise.safetensors",
+    # Plain-AWGN model; over-reconstructs clean content above ~sigma 0.04 and
+    # shows a faint pixel-shuffle grid there, so it needs a low strength.
+    "standard": "model.safetensors",
+}
 
 
-def default_weights_path() -> Path:
-    """Bundled standard FastDVDnet weights. model_clipped_noise.safetensors is
-    also bundled in the same dir for real/clipped-noise footage."""
-    return _WEIGHTS_DIR / "model.safetensors"
+def default_weights_path(variant: str = "clipped") -> Path:
+    """Bundled FastDVDnet weights for the given variant ('clipped' is the default
+    - it is the better behaved model on real footage)."""
+    return _WEIGHTS_DIR / _VARIANTS[variant]
 
 
 class FastDvdDenoiser:
@@ -207,8 +214,8 @@ class FastDvdDenoiser:
     LOOKAHEAD = 2   # (5 - 1) // 2: frames of future context the center needs
 
     def __init__(self, weights_path: str | Path | None = None, strength: float = 0.5,
-                 dtype: Any = mx.float16):
-        wp = Path(weights_path) if weights_path else default_weights_path()
+                 variant: str = "clipped", dtype: Any = mx.float16):
+        wp = Path(weights_path) if weights_path else default_weights_path(variant)
         if not wp.is_file():
             raise FileNotFoundError(
                 f"FastDVDnet weights not found at {wp}; bundled weights should ship "
