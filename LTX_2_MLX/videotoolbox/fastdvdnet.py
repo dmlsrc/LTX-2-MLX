@@ -167,3 +167,60 @@ class FastDVDnet:
         nm = mx.full((1, hp, wp, 1), float(sigma), dtype=self.dtype)
         out = mx.clip(_forward(self.params, padded, nm), 0.0, 1.0)
         return out[0, :h, :w, :].astype(mx.float32)
+
+
+def _strength_to_sigma(strength: float) -> float:
+    """Map a [0,1] denoise strength to FastDVDnet's noise sigma. The network was
+    trained on AWGN with sigma_255 in roughly [5, 55], so span that range."""
+    s = max(0.0, min(1.0, float(strength)))
+    return (5.0 + 50.0 * s) / 255.0
+
+
+# Weights ship inside the package (~10MB each), so no path/env is needed.
+_WEIGHTS_DIR = Path(__file__).resolve().parent / "fastdvdnet_weights"
+
+
+def default_weights_path() -> Path:
+    """Bundled standard FastDVDnet weights. model_clipped_noise.safetensors is
+    also bundled in the same dir for real/clipped-noise footage."""
+    return _WEIGHTS_DIR / "model.safetensors"
+
+
+class FastDvdDenoiser:
+    """Causal streaming wrapper around FastDVDnet for the VSR harness.
+
+    FastDVDnet denoises the center of a 5-frame window, but the harness is a
+    1-in-1-out causal stream with no future frames. So the two future slots are
+    reflected from the past: [p2, p1, cur, p1, p2]. Measured ~+29% RMSE vs a true
+    centered window, but still ~13x noise reduction (vs ~3x spatial-only) and no
+    latency. Same (H,W,3) f32 [0,1] in/out interface as the other denoisers;
+    reset() clears history at scene cuts so the window never bridges a cut.
+    """
+
+    def __init__(self, weights_path: str | Path | None = None, strength: float = 0.5,
+                 dtype: Any = mx.float16):
+        wp = Path(weights_path) if weights_path else default_weights_path()
+        if not wp.is_file():
+            raise FileNotFoundError(
+                f"FastDVDnet weights not found at {wp}; bundled weights should ship "
+                "with the package, or pass an explicit weights_path."
+            )
+        self.net = FastDVDnet(wp, dtype=dtype)
+        self.sigma = _strength_to_sigma(strength)
+        self._hist: list = []   # up to 2 most recent input frames, oldest first
+
+    def reset(self) -> None:
+        self._hist = []
+
+    def close(self) -> None:
+        pass
+
+    def denoise(self, rgb_f32: Any) -> Any:
+        h = self._hist
+        p1 = h[-1] if len(h) >= 1 else rgb_f32
+        p2 = h[-2] if len(h) >= 2 else p1
+        out = self.net.denoise_center([p2, p1, rgb_f32, p1, p2], self.sigma)
+        h.append(rgb_f32)
+        if len(h) > 2:
+            h.pop(0)
+        return out

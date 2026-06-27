@@ -49,6 +49,9 @@ weights/
 *.bin
 *.pt
 *.pth
+# Exception: the FastDVDnet denoiser weights are small (~10MB each) and bundled
+# with the package so --denoise fastdvd works with no external path/env.
+!LTX_2_MLX/videotoolbox/fastdvdnet_weights/*.safetensors
 *.ckpt
 
 # Output files

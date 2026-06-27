@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import os
 import sys
 import time
 from collections.abc import Iterator
@@ -94,6 +95,7 @@ from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
 from LTX_2_MLX.videotoolbox import video_reader as _vr
 from LTX_2_MLX.videotoolbox.comparison import render_comparison
 from LTX_2_MLX.videotoolbox.denoise import McTemporalDenoiser, SpatialDenoiser
+from LTX_2_MLX.videotoolbox.fastdvdnet import FastDvdDenoiser
 from LTX_2_MLX.videotoolbox.images import save_image
 from LTX_2_MLX.videotoolbox.vsr import NativePassthrough
 from LTX_2_MLX.videotoolbox.writer import (
@@ -672,6 +674,13 @@ def run(args: argparse.Namespace) -> None:
                 window=args.mc_window, clamp=args.mc_clamp,
                 occlusion=args.mc_occlusion, confidence=args.mc_confidence,
             )
+        elif args.denoise == "fastdvd":
+            # Weights ship with the package; --fastdvd-weights / $FASTDVD_WEIGHTS
+            # only override (e.g. the bundled model_clipped_noise variant).
+            den = FastDvdDenoiser(
+                args.fastdvd_weights or os.environ.get("FASTDVD_WEIGHTS"),
+                strength=args.denoise_strength,
+            )
         return s, v, pw, cw, den
 
     # ---- Cut detector ------------------------------------------------------
@@ -1031,22 +1040,33 @@ def main() -> None:
         help="Also write the muxed audio as <stem>_audio.wav next to the MP4s.",
     )
     parser.add_argument(
-        "--denoise", choices=["off", "spatial", "mc"], default="off",
+        "--denoise", choices=["off", "spatial", "mc", "fastdvd"], default="off",
         help=(
             "Pre-upscale denoise, applied at native resolution before VSR (the "
             "correct order - SR amplifies noise). off (default); spatial = "
             "per-frame CoreImage CINoiseReduction (cheap, no temporal state); "
             "mc = motion-compensated temporal denoise via VideoToolbox optical "
             "flow (recursive, GPU; averages static regions over time without "
-            "ghosting moving edges). Enabling denoise routes frames through the "
-            "MLX upload path instead of the zero-copy direct feed."
+            "ghosting moving edges); fastdvd = FastDVDnet CNN denoiser (MLX, "
+            "learned; causal 5-frame window, strongest denoise, weights bundled). "
+            "Enabling denoise routes frames through the MLX upload path instead of "
+            "the zero-copy direct feed."
         ),
     )
     parser.add_argument(
         "--denoise-strength", type=float, default=0.5,
         help=(
             "Denoise strength 0..1 (default 0.5). For mc, the max temporal blend "
-            "toward motion-compensated history; for spatial, the noise level."
+            "toward motion-compensated history; for spatial, the noise level; for "
+            "fastdvd, the noise sigma (mapped onto sigma_255 in [5, 55])."
+        ),
+    )
+    parser.add_argument(
+        "--fastdvd-weights", default=None, metavar="PATH",
+        help=(
+            "Override FastDVDnet weights (.safetensors) for --denoise fastdvd. "
+            "Optional - defaults to the weights bundled with the package (or "
+            "$FASTDVD_WEIGHTS). Convert a .pth with scripts/pth_to_safetensors.py."
         ),
     )
     parser.add_argument(
