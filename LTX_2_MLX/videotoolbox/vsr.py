@@ -55,7 +55,7 @@ def scale_for_mode(mode: str) -> int:
     """
     if mode == "fast":
         return 2
-    if mode in ("balanced", "image"):
+    if mode in ("balanced", "image", "basicvsrpp"):
         return 4
     raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
 
@@ -79,7 +79,8 @@ def source_format_for_mode(mode: str) -> int:
     """
     if mode == "fast":
         return _pb.PIX_NV12
-    if mode in ("balanced", "image"):
+    if mode in ("balanced", "image", "basicvsrpp"):
+        # basicvsrpp upscales in MLX, not VideoToolbox, but it also wants RGB in
         return _pb.PIX_RGBAHALF
     raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
 

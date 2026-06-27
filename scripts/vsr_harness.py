@@ -405,8 +405,10 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
         return HEVC_PROFILE_MAIN10
     if encode_chroma == "422":
         return HEVC_PROFILE_MAIN422_10
-    # balanced/image/none carry RGBAHalf (4:4:4 chroma) into the encoder -> 4:2:2.
-    return HEVC_PROFILE_MAIN422_10 if spatial_mode in ("balanced", "image", "none") else HEVC_PROFILE_MAIN10
+    # balanced/image/none/basicvsrpp carry RGB (4:4:4 chroma) to the encoder -> 4:2:2.
+    return (HEVC_PROFILE_MAIN422_10
+            if spatial_mode in ("balanced", "image", "none", "basicvsrpp")
+            else HEVC_PROFILE_MAIN10)
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +604,8 @@ def run(args: argparse.Namespace) -> None:
     vtfrc: VtfrcSession | None = None
     post_writer: AVWriter | None = None
     comparison_writer: AVWriter | None = None
-    denoiser: Any = None  # SpatialDenoiser / McTemporalDenoiser when --denoise set
+    denoiser: Any = None  # SpatialDenoiser / McTemporalDenoiser / FastDvd when --denoise set
+    upscaler: Any = None  # BasicVsrUpscaler when --spatial-mode basicvsrpp
 
     def _build_post_pipeline() -> tuple[
         VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any
@@ -613,11 +616,16 @@ def run(args: argparse.Namespace) -> None:
         itself.  Returns (session, vtfrc, post_writer, comparison_writer);
         the dst-pool wiring for zero-copy is set up before returning.
         """
-        s: Any = (
-            NativePassthrough(in_w, in_h, fps=source_fps)
-            if args.spatial_mode == "none"
-            else VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
-        )
+        s: Any
+        if args.spatial_mode == "none":
+            s = NativePassthrough(in_w, in_h, fps=source_fps)
+        elif args.spatial_mode == "basicvsrpp":
+            # MLX BasicVSR++ does the 4x upscale in the loop (windowed); the
+            # session is a passthrough at the 4x output dims that just packs the
+            # already-upscaled frame for the encoder.
+            s = NativePassthrough(out_w, out_h, fps=source_fps)
+        else:
+            s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
         v: VtfrcSession | None = None
         if do_temporal:
             v = VtfrcSession(
@@ -682,7 +690,15 @@ def run(args: argparse.Namespace) -> None:
                 variant=args.fastdvd_variant,
                 strength=args.denoise_strength,
             )
-        return s, v, pw, cw, den
+
+        up: Any = None
+        if args.spatial_mode == "basicvsrpp":
+            from LTX_2_MLX.videotoolbox.basicvsrpp.upscaler import BasicVsrUpscaler
+            up = BasicVsrUpscaler(
+                args.basicvsrpp_weights or os.environ.get("BASICVSRPP_WEIGHTS"),
+                window=args.basicvsrpp_window, trim=args.basicvsrpp_trim,
+            )
+        return s, v, pw, cw, den, up
 
     # ---- Cut detector ------------------------------------------------------
     cut_detector: CutDetector | None = None
@@ -775,6 +791,23 @@ def run(args: argparse.Namespace) -> None:
         del vsr_pb, out_iter
         processed += 1
 
+    def _emit_scaled(den_rgb: Any, src_frame: Any, src_arr: Any) -> None:
+        """For --spatial-mode basicvsrpp, route the (denoised or raw) LR frame
+        through the windowed BasicVSR++ upscaler and emit each 4x frame it
+        releases; otherwise emit straight through. Preserves denoise -> upscale
+        ordering and keeps one emit path for both the per-frame and flush cases."""
+        if upscaler is None:
+            _emit(den_rgb, src_frame, src_arr)
+            return
+        if den_rgb is not None:
+            lr = den_rgb
+        elif frames_are_buffers:
+            lr = _pb.read_buffer_rgb_f32(src_frame)
+        else:
+            lr = src_frame[..., :3].astype(mx.float32)
+        for up_rgb, (u_sf, u_sa) in upscaler.feed(lr, token=(None, src_arr)):
+            _emit(up_rgb, u_sf, u_sa)
+
     try:
         for chunk in chunks:
             # Both paths yield a list, freed per-frame as consumed: the latent
@@ -805,7 +838,7 @@ def run(args: argparse.Namespace) -> None:
                 import io as _io
                 _buf = _io.StringIO()
                 with contextlib.redirect_stdout(_buf):
-                    session, vtfrc, post_writer, comparison_writer, denoiser = _build_post_pipeline()
+                    session, vtfrc, post_writer, comparison_writer, denoiser, upscaler = _build_post_pipeline()
                 msg = _buf.getvalue().rstrip("\n")
                 if msg:
                     bars.write(msg)
@@ -856,7 +889,10 @@ def run(args: argparse.Namespace) -> None:
                         # before resetting so its window never bridges the cut.
                         if denoiser is not None and hasattr(denoiser, "flush"):
                             for d_rgb, (d_sf, d_sa) in denoiser.flush():
-                                _emit(d_rgb, d_sf, d_sa)
+                                _emit_scaled(d_rgb, d_sf, d_sa)
+                        if upscaler is not None:
+                            for up_rgb, (u_sf, u_sa) in upscaler.flush():
+                                _emit(up_rgb, u_sf, u_sa)
                         session.reset_temporal_context()
                         if denoiser is not None:
                             denoiser.reset()
@@ -883,7 +919,7 @@ def run(args: argparse.Namespace) -> None:
                     else:
                         ready = [(None, (src_frame, src_arr))]
                     for d_rgb, (d_sf, d_sa) in ready:
-                        _emit(d_rgb, d_sf, d_sa)
+                        _emit_scaled(d_rgb, d_sf, d_sa)
 
                     in_idx += 1
                     # Drop this frame's reference so its memory (the MLX array,
@@ -913,7 +949,14 @@ def run(args: argparse.Namespace) -> None:
                 if max_frames is not None and appended >= max_frames:
                     break
                 with autorelease_pool():
-                    _emit(d_rgb, d_sf, d_sa)
+                    _emit_scaled(d_rgb, d_sf, d_sa)
+        # Drain the BasicVSR++ upscaler's final window (the clip-end frames).
+        if upscaler is not None and session is not None:
+            for up_rgb, (u_sf, u_sa) in upscaler.flush():
+                if max_frames is not None and appended >= max_frames:
+                    break
+                with autorelease_pool():
+                    _emit(up_rgb, u_sf, u_sa)
     finally:
         bars.close()
         if vtfrc is not None:
@@ -1008,10 +1051,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--spatial-mode", choices=["fast", "balanced", "image", "none"], default="balanced",
+        "--spatial-mode", choices=["fast", "balanced", "image", "none", "basicvsrpp"],
+        default="balanced",
         help=(
             "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
-            "balanced=4x, image=4x, none=1x). "
+            "balanced=4x, image=4x, none=1x, basicvsrpp=4x). "
+            "basicvsrpp = MLX BasicVSR++ 4x super-resolution (recurrent, learned); "
+            "runs on the GPU via MLX instead of VideoToolbox, processed in sliding "
+            "windows (see --basicvsrpp-window/-trim). Slower than the VT modes but "
+            "recovers markedly more detail. "
             "none = no super-resolution; output stays at native resolution. Use "
             "it with --denoise to denoise-only, or alone for a plain transcode. "
             "balanced (default) = HQ Video mode; uses prev source + prev output "
@@ -1093,6 +1141,31 @@ def main() -> None:
             "footage at moderate strength; standard is the plain-AWGN model and "
             "shows a faint pixel-shuffle grid above ~0.1 strength on clean content. "
             "Ignored when --fastdvd-weights is given."
+        ),
+    )
+    parser.add_argument(
+        "--basicvsrpp-weights", default=None, metavar="PATH",
+        help=(
+            "Override BasicVSR++ weights (.safetensors) for --spatial-mode "
+            "basicvsrpp. Optional - defaults to the bundled REDS4 weights (or "
+            "$BASICVSRPP_WEIGHTS)."
+        ),
+    )
+    parser.add_argument(
+        "--basicvsrpp-window", type=int, default=14, metavar="N",
+        help=(
+            "Sliding-window length (frames) for --spatial-mode basicvsrpp. The "
+            "recurrent net is run per window; larger = closer to whole-clip quality "
+            "but more memory + compute (default 14). Clips shorter than this are "
+            "processed whole."
+        ),
+    )
+    parser.add_argument(
+        "--basicvsrpp-trim", type=int, default=2, metavar="N",
+        help=(
+            "Warm-up frames trimmed at each window join for --spatial-mode "
+            "basicvsrpp (default 2). Trimmed frames are re-emitted by the "
+            "neighbouring window with fuller propagation context."
         ),
     )
     parser.add_argument(
