@@ -50,6 +50,20 @@ def hevc_video_settings(
     }
 
 
+def _color_label(color_props: dict | None) -> str:
+    """Short color name for the setup log, from an AVVideoColorProperties dict."""
+    if not color_props:
+        return "BT.709"
+    prim = str(color_props.get(av.AVVideoColorPrimariesKey, ""))
+    if "2020" in prim:
+        return "BT.2020"
+    if "SMPTE_C" in prim:
+        return "BT.601"
+    if "P3" in prim:
+        return "P3"
+    return "BT.709"
+
+
 class AVWriter:
     """AVAssetWriter wrapping a HEVC video input + optional audio input.
 
@@ -165,7 +179,7 @@ class AVWriter:
         audio_desc = f", audio={audio_codec}" if audio_input is not None else ""
         print(
             f"[{label}] AVAssetWriter -> {output_path} "
-            f"(HEVC {profile} BT.709 q={quality}{audio_desc})"
+            f"(HEVC {profile} {_color_label(color_props)} q={quality}{audio_desc})"
         )
 
         # Audio pump (GCD pull pattern) --------------------------------------
