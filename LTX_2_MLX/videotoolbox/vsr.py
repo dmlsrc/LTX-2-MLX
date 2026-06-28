@@ -189,8 +189,7 @@ class VsrSession:
     `--latent`.
     """
 
-    def __init__(self, in_w: int, in_h: int, mode: str, fps: float = 24.0,
-                 cv_color: tuple | None = None):
+    def __init__(self, in_w: int, in_h: int, mode: str, fps: float = 24.0):
         require_pyobjc()
         if mode not in ("fast", "balanced", "image"):
             raise ValueError(f"VsrSession only supports VideoToolbox modes, got {mode!r}")
@@ -201,14 +200,6 @@ class VsrSession:
         self.out_w, self.out_h = in_w * scale, in_h * scale
         self.mode = mode
         self.fps = float(fps)
-        # (primaries, transfer, matrix) CV constants the source-normalizing
-        # transfer targets; defaults to BT.709, or the source's own tags so a
-        # tagged BT.601/2020 clip isn't shifted to 709 (must match the encoder).
-        self._cv_color = cv_color or (
-            Quartz.kCVImageBufferColorPrimaries_ITU_R_709_2,
-            Quartz.kCVImageBufferTransferFunction_ITU_R_709_2,
-            Quartz.kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-        )
 
         if mode == "fast":
             self.config = vt.VTLowLatencySuperResolutionScalerConfiguration.alloc(
@@ -342,31 +333,22 @@ class VsrSession:
         decoder buffer can carry IOSurface/attribute quirks - e.g. for input
         whose coded size is padded to a macroblock multiple (a 544x408 clip is
         coded at 544x416) - that the VSR processor rejects with -19730, even
-        though the identical pixels in a VSR pool buffer upscale fine. The
-        transfer also normalizes color to BT.709, so untagged / BT.601 /
-        full-range sources match the BT.709 encoder output.
+        though the identical pixels in a VSR pool buffer upscale fine.
+        Colorimetry is owned by the decode (see video_reader) and the encoder
+        tag, not normalized here.
         """
-        clean = self._normalize_src_buffer(src_pb)
+        clean = self._clean_src_buffer(src_pb)
         return self._process(clean, frame_index)
 
-    def _normalize_src_buffer(self, src_pb: Any) -> Any:
-        """Copy `src_pb` into a clean VSR-source pool buffer (BT.709), via a
-        lazily-created VTPixelTransferSession. See upscale_buffer_to_buffer.
+    def _clean_src_buffer(self, src_pb: Any) -> Any:
+        """Copy `src_pb` into a clean VSR-source pool buffer via a lazily-created
+        VTPixelTransferSession, so the VSR processor accepts it (the -19730 fix; see
+        upscale_buffer_to_buffer). Color passes through unchanged.
         """
         if self._xfer is None:
             err, xfer = vt.VTPixelTransferSessionCreate(None, None)
             if err != 0 or xfer is None:
                 raise RuntimeError(f"VTPixelTransferSessionCreate failed: {err}")
-            # Normalize destination color to the resolved source colorimetry
-            # (BT.709 by default, or the source's own tags) so every mode's output
-            # stays consistent with the encoder's color tag.
-            prim, trans, mat = self._cv_color
-            for key, val in (
-                (vt.kVTPixelTransferPropertyKey_DestinationColorPrimaries, prim),
-                (vt.kVTPixelTransferPropertyKey_DestinationTransferFunction, trans),
-                (vt.kVTPixelTransferPropertyKey_DestinationYCbCrMatrix, mat),
-            ):
-                vt.VTSessionSetProperty(xfer, key, val)
             self._xfer = xfer
         clean = self._make_src_buffer()
         err = vt.VTPixelTransferSessionTransferImage(self._xfer, src_pb, clean)

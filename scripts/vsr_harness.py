@@ -654,7 +654,7 @@ def run(args: argparse.Namespace) -> None:
             # already-upscaled frame for the encoder.
             s = NativePassthrough(out_w, out_h, fps=source_fps, label=f"{args.spatial_mode} packer")
         else:
-            s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps, cv_color=cv_color)
+            s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
         v: VtfrcSession | None = None
         if do_temporal:
             v = VtfrcSession(
