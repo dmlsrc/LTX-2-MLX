@@ -441,6 +441,10 @@ def run(args: argparse.Namespace) -> None:
     # window in the main loop instead.
     loop_win_start, loop_win_end = 0, None
     win_start, win_end = 0, None  # resolved input window (both paths set these)
+    # Output color tags: the video path fills these from the source container;
+    # the latent path (no source container) leaves them None -> BT.709 default.
+    color_props: dict | None = None
+    cv_color: tuple | None = None
 
     # ---- Input source ------------------------------------------------------
     if args.latent:
@@ -516,6 +520,13 @@ def run(args: argparse.Namespace) -> None:
         in_w, in_h, source_fps, total_frames, src_transform = _vr.probe_video(
             Path(args.video),
         )
+        from LTX_2_MLX.videotoolbox import color as _color
+        _src_color = _vr.probe_color(Path(args.video))
+        _resolved = _color.resolve(_src_color, args.source_color)
+        color_props = _color.av_color_properties(_resolved)
+        cv_color = _color.cv_triple(_resolved)
+        print(f"Source color: {'tagged' if _src_color['tagged'] else 'untagged'}"
+              f" -> output {_color.describe(_resolved)}")
         # Decode straight into VSR's source format (NV12 for fast, RGBAHalf for
         # balanced/image) and feed the buffers directly to VSR - no RGB
         # intermediate, no MLX round-trip, no re-quantization. Size the decode
@@ -629,7 +640,7 @@ def run(args: argparse.Namespace) -> None:
             # already-upscaled frame for the encoder.
             s = NativePassthrough(out_w, out_h, fps=source_fps, label=f"{args.spatial_mode} packer")
         else:
-            s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
+            s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps, cv_color=cv_color)
         v: VtfrcSession | None = None
         if do_temporal:
             v = VtfrcSession(
@@ -657,6 +668,7 @@ def run(args: argparse.Namespace) -> None:
                 label="post",
                 transform=src_transform,
                 source_attrs=producer_attrs,
+                color_props=color_props,
                 **audio_kwargs,
             )
             # Zero-copy from VSR (or VtfrcSession's output) into encoder.
@@ -674,6 +686,7 @@ def run(args: argparse.Namespace) -> None:
                 profile=profile,
                 quality=args.encode_quality,
                 label="comparison",
+                color_props=color_props,
                 **audio_kwargs,
             )
 
@@ -1113,6 +1126,16 @@ def main() -> None:
     parser.add_argument(
         "--encode-quality", type=float, default=0.65,
         help="AVVideoQualityKey (0..1) for the HEVC encoder. 0.65 matches the default tier.",
+    )
+    parser.add_argument(
+        "--source-color", choices=["auto", "bt709", "bt601", "bt2020"], default="auto",
+        help=(
+            "Source colorimetry handling. auto (default) propagates the "
+            "container's explicit color tags to the output, falling back to "
+            "BT.709 for untagged sources; bt601/bt709/bt2020 force that "
+            "colorimetry for untagged or mistagged sources. The container's "
+            "full-range flag is always honored."
+        ),
     )
     parser.add_argument(
         "--encode-chroma", choices=["auto", "420", "422"], default="auto",

@@ -26,14 +26,19 @@ HEVC_PROFILE_MAIN422_10 = "HEVC_Main42210_AutoLevel"   # 4:2:2 10-bit (Range Ext
 
 def hevc_video_settings(
     width: int, height: int, quality: float, profile: str,
+    color_props: dict | None = None,
 ) -> dict:
-    """AVAssetWriterInput output settings for HEVC at the given size + profile."""
+    """AVAssetWriterInput output settings for HEVC at the given size + profile.
+
+    ``color_props`` is an AVVideoColorPropertiesKey dict (primaries/transfer/
+    matrix) tagging the output to match the source; defaults to BT.709.
+    """
     require_pyobjc()
     return {
         av.AVVideoCodecKey: av.AVVideoCodecTypeHEVC,
         av.AVVideoWidthKey: width,
         av.AVVideoHeightKey: height,
-        av.AVVideoColorPropertiesKey: {
+        av.AVVideoColorPropertiesKey: color_props or {
             av.AVVideoColorPrimariesKey: av.AVVideoColorPrimaries_ITU_R_709_2,
             av.AVVideoTransferFunctionKey: av.AVVideoTransferFunction_ITU_R_709_2,
             av.AVVideoYCbCrMatrixKey: av.AVVideoYCbCrMatrix_ITU_R_709_2,
@@ -74,6 +79,7 @@ class AVWriter:
         audio_codec: str = "alac",
         transform: Any = None,
         source_attrs: dict | None = None,
+        color_props: dict | None = None,
     ):
         require_pyobjc()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +94,7 @@ class AVWriter:
 
         # Video input + pixel buffer adaptor ---------------------------------
         video_input = av.AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_(
-            av.AVMediaTypeVideo, hevc_video_settings(width, height, quality, profile),
+            av.AVMediaTypeVideo, hevc_video_settings(width, height, quality, profile, color_props),
         )
         video_input.setExpectsMediaDataInRealTime_(False)
         # Carry the source track's rotation/flip as output metadata. The pixels

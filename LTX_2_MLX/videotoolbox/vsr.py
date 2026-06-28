@@ -189,7 +189,8 @@ class VsrSession:
     `--latent`.
     """
 
-    def __init__(self, in_w: int, in_h: int, mode: str, fps: float = 24.0):
+    def __init__(self, in_w: int, in_h: int, mode: str, fps: float = 24.0,
+                 cv_color: tuple | None = None):
         require_pyobjc()
         if mode not in ("fast", "balanced", "image"):
             raise ValueError(f"VsrSession only supports VideoToolbox modes, got {mode!r}")
@@ -200,6 +201,14 @@ class VsrSession:
         self.out_w, self.out_h = in_w * scale, in_h * scale
         self.mode = mode
         self.fps = float(fps)
+        # (primaries, transfer, matrix) CV constants the source-normalizing
+        # transfer targets; defaults to BT.709, or the source's own tags so a
+        # tagged BT.601/2020 clip isn't shifted to 709 (must match the encoder).
+        self._cv_color = cv_color or (
+            Quartz.kCVImageBufferColorPrimaries_ITU_R_709_2,
+            Quartz.kCVImageBufferTransferFunction_ITU_R_709_2,
+            Quartz.kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+        )
 
         if mode == "fast":
             self.config = vt.VTLowLatencySuperResolutionScalerConfiguration.alloc(
@@ -348,16 +357,14 @@ class VsrSession:
             err, xfer = vt.VTPixelTransferSessionCreate(None, None)
             if err != 0 or xfer is None:
                 raise RuntimeError(f"VTPixelTransferSessionCreate failed: {err}")
-            # Normalize destination color to BT.709 (matches the encoder), so an
-            # untagged / BT.601 / full-range source is converted consistently
-            # instead of carrying its native attributes into the BT.709 output.
+            # Normalize destination color to the resolved source colorimetry
+            # (BT.709 by default, or the source's own tags) so every mode's output
+            # stays consistent with the encoder's color tag.
+            prim, trans, mat = self._cv_color
             for key, val in (
-                (vt.kVTPixelTransferPropertyKey_DestinationColorPrimaries,
-                 Quartz.kCVImageBufferColorPrimaries_ITU_R_709_2),
-                (vt.kVTPixelTransferPropertyKey_DestinationTransferFunction,
-                 Quartz.kCVImageBufferTransferFunction_ITU_R_709_2),
-                (vt.kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
-                 Quartz.kCVImageBufferYCbCrMatrix_ITU_R_709_2),
+                (vt.kVTPixelTransferPropertyKey_DestinationColorPrimaries, prim),
+                (vt.kVTPixelTransferPropertyKey_DestinationTransferFunction, trans),
+                (vt.kVTPixelTransferPropertyKey_DestinationYCbCrMatrix, mat),
             ):
                 vt.VTSessionSetProperty(xfer, key, val)
             self._xfer = xfer

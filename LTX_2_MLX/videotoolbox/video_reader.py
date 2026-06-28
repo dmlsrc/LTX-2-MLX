@@ -86,6 +86,21 @@ def probe_video(path: Path) -> tuple[int, int, float, int, Any]:
     return w, h, fps, n, transform
 
 
+def probe_color(path: Path) -> dict:
+    """Source color tags from the container, for output color propagation.
+
+    Returns explicit primaries/transfer/matrix + full-range flag (None where
+    untagged) so the encoder can tag the output to match the source instead of a
+    hard-coded BT.709. See videotoolbox/color.py.
+    """
+    from . import color
+    require_pyobjc()
+    url = Foundation.NSURL.fileURLWithPath_(str(path))
+    asset = av.AVURLAsset.alloc().initWithURL_options_(url, None)
+    track = _first_video_track(asset)
+    return color.read_source_color(track.formatDescriptions()[0])
+
+
 def iter_video_buffer_chunks(
     path: Path, src_format: int, chunk_size: int = 8,
     *, start_frame: int = 0, end_frame: int | None = None,
