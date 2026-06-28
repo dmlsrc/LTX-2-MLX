@@ -343,7 +343,17 @@ class VsrSession:
     def _clean_src_buffer(self, src_pb: Any) -> Any:
         """Copy `src_pb` into a clean VSR-source pool buffer via a lazily-created
         VTPixelTransferSession, so the VSR processor accepts it (the -19730 fix; see
-        upscale_buffer_to_buffer). Color passes through unchanged.
+        upscale_buffer_to_buffer).
+
+        Then strip the TransferFunction attachment the transfer propagated from the
+        source. The VSR scaler HONORS that tag: it linearizes the input through the
+        (709) EOTF but never re-encodes, darkening the output by ~2x (measured:
+        709-EOTF(0.39)=0.166, a hard black crush on tagged SD clips). The MLX upload
+        path (upscale_to_buffer) feeds an untagged buffer and is unaffected, which
+        is why fastdvd stays correct -- this makes the native buffer-to-buffer path
+        match it. Only the gamma tag is removed: the YCbCr matrix / range are left
+        intact for the NV12 (fast) path's YUV interpretation, and output
+        colorimetry comes from the encoder tag, not these scaler-input attachments.
         """
         if self._xfer is None:
             err, xfer = vt.VTPixelTransferSessionCreate(None, None)
@@ -354,6 +364,7 @@ class VsrSession:
         err = vt.VTPixelTransferSessionTransferImage(self._xfer, src_pb, clean)
         if err != 0:
             raise RuntimeError(f"VTPixelTransferSessionTransferImage failed: {err}")
+        Quartz.CVBufferRemoveAttachment(clean, Quartz.kCVImageBufferTransferFunctionKey)
         return clean
 
     def _process(self, src_pb: Any, frame_index: int) -> Any:
