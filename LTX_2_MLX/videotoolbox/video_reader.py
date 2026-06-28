@@ -27,7 +27,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from ._compat import CoreMedia, Foundation, Quartz, av, require_pyobjc
+from . import pixel_buffers as _pb
+from ._compat import CoreMedia, Foundation, Quartz, av, require_pyobjc, vt
 
 
 def _first_video_track(asset: Any) -> Any:
@@ -99,6 +100,50 @@ def probe_color(path: Path) -> dict:
     asset = av.AVURLAsset.alloc().initWithURL_options_(url, None)
     track = _first_video_track(asset)
     return color.read_source_color(track.formatDescriptions()[0])
+
+
+# 10-bit 4:2:2 YUV for the forced-decode path: a precision-preserving superset
+# (4:2:0 / 8-bit sources upsample into it losslessly).
+_YUV10_VIDEO = Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+_YUV10_FULL = Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
+
+
+def iter_forced_color_chunks(
+    path: Path, out_format: int, matrix_cv: Any, full_range: bool,
+    chunk_size: int = 8, *, start_frame: int = 0, end_frame: int | None = None,
+) -> Iterator[list]:
+    """Decode the source as raw 10-bit YUV, FORCE the YCbCr matrix (overriding the
+    container tag / VideoToolbox's resolution-based guess), then convert to
+    out_format ourselves.
+
+    This makes --source-color control how the source is READ -- the fix for the
+    untagged SD clips VideoToolbox mis-guesses as BT.601. The 4:2:2/10-bit YUV is a
+    precision-preserving superset of any SDR source; range follows the detected
+    full/video flag (the YUV->RGB scaling the requested format implies).
+    """
+    require_pyobjc()
+    yuv_fmt = _YUV10_FULL if full_range else _YUV10_VIDEO
+    err, xfer = vt.VTPixelTransferSessionCreate(None, None)
+    if err != 0 or xfer is None:
+        raise RuntimeError(f"VTPixelTransferSessionCreate failed: {err}")
+    for chunk in iter_video_buffer_chunks(path, yuv_fmt, chunk_size,
+                                          start_frame=start_frame, end_frame=end_frame):
+        out: list = []
+        for yuv in chunk:
+            Quartz.CVBufferSetAttachment(
+                yuv, Quartz.kCVImageBufferYCbCrMatrixKey, matrix_cv,
+                Quartz.kCVAttachmentMode_ShouldPropagate)
+            w = Quartz.CVPixelBufferGetWidth(yuv)
+            h = Quartz.CVPixelBufferGetHeight(yuv)
+            dst = _pb.make_pixel_buffer_from_attrs(w, h, {
+                Quartz.kCVPixelBufferPixelFormatTypeKey: out_format,
+                Quartz.kCVPixelBufferWidthKey: w, Quartz.kCVPixelBufferHeightKey: h,
+                Quartz.kCVPixelBufferIOSurfacePropertiesKey: {}})
+            e = vt.VTPixelTransferSessionTransferImage(xfer, yuv, dst)
+            if e != 0:
+                raise RuntimeError(f"forced-color YUV->{out_format:#x} transfer failed: {e}")
+            out.append(dst)
+        yield out
 
 
 def iter_video_buffer_chunks(

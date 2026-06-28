@@ -165,49 +165,6 @@ def _wait_for_model_download(config: Any) -> None:
     print("  model download: done")
 
 
-class ColorNormalizer:
-    """VTPixelTransfer that converts a source CVPixelBuffer to a fixed colorimetry
-    (primaries/transfer/matrix), returning a clean RGBAHalf buffer.
-
-    Lets the MLX read path (realesrgan/fastdvd/none) apply the exact same color
-    conversion the VsrSession (balanced) path does, so every mode is consistent
-    under a --source-color override. For the default 'auto' the conversion would
-    be a no-op (the decode already lands in the resolved color), so the harness
-    only instantiates this for an explicit override.
-    """
-
-    def __init__(self, width: int, height: int, cv_color: tuple):
-        require_pyobjc()
-        self._w, self._h = int(width), int(height)
-        self._cv_color = cv_color
-        self._xfer = None
-        self._attrs = {
-            Quartz.kCVPixelBufferPixelFormatTypeKey: _pb.PIX_RGBAHALF,
-            Quartz.kCVPixelBufferWidthKey: self._w,
-            Quartz.kCVPixelBufferHeightKey: self._h,
-            Quartz.kCVPixelBufferIOSurfacePropertiesKey: {},
-        }
-
-    def transfer(self, src_pb: Any) -> Any:
-        if self._xfer is None:
-            err, xfer = vt.VTPixelTransferSessionCreate(None, None)
-            if err != 0 or xfer is None:
-                raise RuntimeError(f"VTPixelTransferSessionCreate failed: {err}")
-            prim, trans, mat = self._cv_color
-            for key, val in (
-                (vt.kVTPixelTransferPropertyKey_DestinationColorPrimaries, prim),
-                (vt.kVTPixelTransferPropertyKey_DestinationTransferFunction, trans),
-                (vt.kVTPixelTransferPropertyKey_DestinationYCbCrMatrix, mat),
-            ):
-                vt.VTSessionSetProperty(xfer, key, val)
-            self._xfer = xfer
-        dst = _pb.make_pixel_buffer_from_attrs(self._w, self._h, self._attrs)
-        err = vt.VTPixelTransferSessionTransferImage(self._xfer, src_pb, dst)
-        if err != 0:
-            raise RuntimeError(f"VTPixelTransferSessionTransferImage failed: {err}")
-        return dst
-
-
 class VsrSession:
     """Per-frame VSR processor with prev-frame chain for temporal coherence.
 
