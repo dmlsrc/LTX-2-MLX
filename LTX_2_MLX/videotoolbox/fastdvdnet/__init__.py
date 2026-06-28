@@ -120,10 +120,10 @@ def _reflect_pad_to4(x: Any) -> tuple[Any, int, int]:
     /2 stages need it). Returns (padded, pad_h, pad_w)."""
     _, h, w, _ = x.shape
     ph, pw = (-h) % 4, (-w) % 4
-    if ph:
-        x = mx.concatenate([x, mx.flip(x[:, h - 1 - ph:h - 1, :, :], axis=1)], axis=1)
+    if ph:   # [::-1] reverses the mirror slice (MLX has no mx.flip)
+        x = mx.concatenate([x, x[:, h - 1 - ph:h - 1, :, :][:, ::-1, :, :]], axis=1)
     if pw:
-        x = mx.concatenate([x, mx.flip(x[:, :, w - 1 - pw:w - 1, :], axis=2)], axis=2)
+        x = mx.concatenate([x, x[:, :, w - 1 - pw:w - 1, :][:, :, ::-1, :]], axis=2)
     return x, ph, pw
 
 
