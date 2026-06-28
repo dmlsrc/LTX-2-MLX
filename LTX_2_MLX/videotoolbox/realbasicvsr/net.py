@@ -122,17 +122,62 @@ def _clean(frames: list, p: dict, dynamic_refine_thres: float, max_iters: int) -
     return cleaned
 
 
-def _basicvsr(frames: list, p: dict, residual_strength: float) -> list:
+_FC_LO, _FC_HI = 1.0, 4.0   # fwd-bwd error ratio: <=LO fully trusts, >=HI drops
+
+
+def _flow_consistency_mask(flow_use: Any, flow_rev: Any, dtype: Any) -> Any:
+    """Soft forward-backward occlusion mask in [0,1] for a warp by ``flow_use``.
+
+    1.0 where ``flow_use`` and the reverse flow ``flow_rev`` round-trip (reliable
+    propagation), ramping to 0.0 where they disagree -- occlusions and fast-motion
+    flow errors (disocclusions, moving edges) that smear RealBasicVSR's recurrent
+    features. Catches gross flow failure only; it cannot catch consistent-but-wrong
+    flow (e.g. a specular highlight that optical flow tracks self-consistently to
+    the wrong place). Smooth form of the Sundaram et al. (2010) criterion
+    ``|f + warp(f_rev, f)|^2 < a1 (|f|^2 + |warp|^2) + a2``. The
+    arithmetic runs in fp32 then casts to ``dtype`` so it never upcasts an fp16
+    feature path.
+    """
+    fu = flow_use.astype(mx.float32)
+    rev_w = flow_warp(flow_rev, flow_use).astype(mx.float32)
+    s = fu + rev_w
+    err2 = s[..., 0] ** 2 + s[..., 1] ** 2
+    mag2 = fu[..., 0] ** 2 + fu[..., 1] ** 2 + rev_w[..., 0] ** 2 + rev_w[..., 1] ** 2
+    r = err2 / (0.01 * mag2 + 0.5)
+    m = mx.clip((_FC_HI - r) / (_FC_HI - _FC_LO), 0.0, 1.0)
+    return m[..., None].astype(dtype)
+
+
+def _basicvsr(frames: list, p: dict, residual_strength: float,
+              flow_consistency: float = 0.0) -> list:
     n, h, w, _ = frames[0].shape
     mid = int(p["basicvsr.backward_resblocks.main.0.bias"].shape[0])
-    feat_prop = mx.zeros((n, h, w, mid), dtype=frames[0].dtype)
+    dt = frames[0].dtype
 
     flows_forward, flows_backward = _compute_flows(frames, p)
 
+    # Precompute soft occlusion masks (flow-only, independent of feat_prop). With
+    # strength s, mask = 1 - s*(1 - m_raw): s=0 reproduces the reference (no
+    # masking), s=1 fully drops propagation where the flow round-trip fails.
+    use_mask = flow_consistency > 0.0
+    mask_b: list = []
+    mask_f: list = []
+    if use_mask:
+        s = float(flow_consistency)
+        for i in range(len(frames) - 1):
+            mb = _flow_consistency_mask(flows_backward[i], flows_forward[i], dt)
+            mf = _flow_consistency_mask(flows_forward[i], flows_backward[i], dt)
+            mask_b.append(1.0 - s * (1.0 - mb))
+            mask_f.append(1.0 - s * (1.0 - mf))
+            mx.eval(mask_b[-1], mask_f[-1])
+
+    feat_prop = mx.zeros((n, h, w, mid), dtype=dt)
     backward_feats: list[Any] = [None] * len(frames)
     for i in range(len(frames) - 1, -1, -1):
         if i < len(frames) - 1:
             feat_prop = flow_warp(feat_prop, flows_backward[i])
+            if use_mask:
+                feat_prop = feat_prop * mask_b[i]
         feat_prop = _resblocks_with_input(
             mx.concatenate([frames[i], feat_prop], axis=-1),
             p,
@@ -141,11 +186,13 @@ def _basicvsr(frames: list, p: dict, residual_strength: float) -> list:
         mx.eval(feat_prop)
         backward_feats[i] = feat_prop
 
-    feat_prop = mx.zeros((n, h, w, mid), dtype=frames[0].dtype)
+    feat_prop = mx.zeros((n, h, w, mid), dtype=dt)
     outs = []
     for i, frame in enumerate(frames):
         if i > 0:
             feat_prop = flow_warp(feat_prop, flows_forward[i - 1])
+            if use_mask:
+                feat_prop = feat_prop * mask_f[i - 1]
         feat_prop = _resblocks_with_input(
             mx.concatenate([frame, feat_prop], axis=-1),
             p,
@@ -171,6 +218,7 @@ def upscale(
     dynamic_refine_thres: float = 5.0,
     clean_iters: int = 3,
     residual_strength: float = 1.0,
+    flow_consistency: float = 0.0,
 ) -> list:
     """Upscale an LR clip 4x.
 
@@ -185,7 +233,7 @@ def upscale(
     dt = p["basicvsr.conv_last.weight"].dtype
     frames = [mx.clip(f, 0.0, 1.0).astype(dt) for f in frames]
     cleaned = _clean(frames, p, dynamic_refine_thres, clean_iters)
-    return _basicvsr(cleaned, p, residual_strength)
+    return _basicvsr(cleaned, p, residual_strength, flow_consistency)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ class RealBasicVsrUpscaler:
         dynamic_refine_thres: float = 5.0,
         clean_iters: int = 3,
         residual_strength: float = 1.0,
+        flow_consistency: float = 0.0,
     ):
         self._p = net.load_params(weights)
         self._T = int(trim)
@@ -46,6 +47,7 @@ class RealBasicVsrUpscaler:
         self._dynamic_refine_thres = float(dynamic_refine_thres)
         self._clean_iters = int(clean_iters)
         self._residual_strength = float(residual_strength)
+        self._flow_consistency = float(flow_consistency)
         self.reset()
 
     def reset(self) -> None:
@@ -91,6 +93,7 @@ class RealBasicVsrUpscaler:
             dynamic_refine_thres=self._dynamic_refine_thres,
             clean_iters=self._clean_iters,
             residual_strength=self._residual_strength,
+            flow_consistency=self._flow_consistency,
         )
         mx.eval(*sr)
         end = we if last else we - self._T

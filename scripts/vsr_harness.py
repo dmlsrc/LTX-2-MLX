@@ -719,6 +719,7 @@ def run(args: argparse.Namespace) -> None:
                 dynamic_refine_thres=args.realbasicvsr_dynamic_refine_thres,
                 clean_iters=args.realbasicvsr_clean_iters,
                 residual_strength=args.realbasicvsr_residual_strength,
+                flow_consistency=args.realbasicvsr_flow_consistency,
             )
         return s, v, pw, cw, den, up
 
@@ -1246,6 +1247,20 @@ def main() -> None:
             "Scale the learned RealBasicVSR residual before adding it to the 4x "
             "bilinear base (default 1.0). Try 0.6-0.85 to reduce GAN/pixel-shuffle "
             "lattice artifacts on moving objects while retaining most sharpening."
+        ),
+    )
+    parser.add_argument(
+        "--realbasicvsr-flow-consistency", type=float, default=0.0, metavar="S",
+        help=(
+            "Forward-backward flow-consistency masking strength in 0..1 for "
+            "--spatial-mode realbasicvsr (default 0 = off, reference behavior). "
+            "Down-weights the recurrent feature where the optical-flow round-trip "
+            "fails -- occlusions and fast-moving regions (panning backgrounds, "
+            "objects/people passing, body edges) -- cutting propagation ghosting "
+            "there while keeping detail on well-aligned regions. Note: it does "
+            "NOT fix ghosting on a stable subject with consistent-but-wrong flow "
+            "(a selfie face's specular highlights); use --realbasicvsr-window 1 "
+            "for that. Try 0.7-1.0."
         ),
     )
     parser.add_argument(
