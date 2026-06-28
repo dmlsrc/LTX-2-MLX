@@ -21,12 +21,28 @@ from typing import Any
 import mlx.core as mx
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
-_DEFAULT_WEIGHTS = "realesrgan_x4plus.safetensors"
+_DEFAULT_WEIGHTS = "realesr_general_x4v3.safetensors"   # fast/gentle default
 _IN_CH_TO_SCALE = {3: 4, 12: 2, 48: 1}   # conv_first in-channels -> output scale
 
 
 def default_weights_path() -> Path:
     return _WEIGHTS_DIR / _DEFAULT_WEIGHTS
+
+
+def wdn_path_for(weights: str | Path | None) -> Path:
+    """Locate the 'wdn' companion beside a realesr-general-x4v3 checkpoint.
+
+    The denoise dial (dni) blends general + wdn; only realesr-general-x4v3 ships a
+    wdn variant. Raises if the sibling file is absent.
+    """
+    src = Path(weights or default_weights_path())
+    name = src.name.replace("general_x4v3", "general_wdn_x4v3")
+    wdn = src.with_name(name)
+    if wdn == src or not wdn.exists():
+        raise FileNotFoundError(
+            f"--realesrgan-denoise < 1 needs the wdn companion beside "
+            f"{src.name} (expected {name}); only realesr-general-x4v3 has one")
+    return wdn
 
 
 def _canonical_key(k: str) -> str:
@@ -39,10 +55,24 @@ def _canonical_key(k: str) -> str:
     return k
 
 
-def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict:
-    """Load RRDBNet weights, normalize keys, and transpose conv kernels for MLX."""
+def load_params(path: str | Path | None = None, dtype: Any = mx.float16,
+                wdn_path: str | Path | None = None,
+                denoise_strength: float = 1.0) -> dict:
+    """Load RRDBNet/SRVGG weights, normalize keys, and transpose conv kernels.
+
+    For realesr-general-x4v3, ``wdn_path`` + ``denoise_strength`` < 1 applies the
+    Real-ESRGAN dni blend ``s*general + (1-s)*wdn``. Per upstream, higher
+    denoise_strength = stronger denoise (smoother); lower keeps more of the
+    sharper/noisier wdn model (more real-world texture/grain). 1.0 = pure general.
+    """
     src = Path(path or default_weights_path())
     w = mx.load(str(src))
+    s = float(denoise_strength)
+    if wdn_path is not None and s < 1.0:
+        wdn = mx.load(str(wdn_path))
+        if set(wdn) != set(w):
+            raise ValueError(f"wdn weights {wdn_path} do not match {src}")
+        w = {k: w[k] * s + wdn[k] * (1.0 - s) for k in w}
     p: dict = {}
     for k, v in w.items():
         k = _canonical_key(k)

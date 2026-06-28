@@ -724,7 +724,8 @@ def run(args: argparse.Namespace) -> None:
         elif args.spatial_mode == "realesrgan":
             from LTX_2_MLX.videotoolbox.realesrgan.upscaler import RealEsrganUpscaler
             up = RealEsrganUpscaler(
-                args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS")
+                args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS"),
+                denoise_strength=args.realesrgan_denoise,
             )
         return s, v, pw, cw, den, up
 
@@ -1275,11 +1276,21 @@ def main() -> None:
     parser.add_argument(
         "--realesrgan-weights", default=None, metavar="PATH",
         help=(
-            "RRDBNet checkpoint (.safetensors) for --spatial-mode realesrgan "
-            "(or $REALESRGAN_WEIGHTS). Default RealESRGAN_x4plus (general "
-            "real-world, GAN). realesrnet_x4plus = MSE-trained variant (no GAN "
-            "hallucination, softer). Convert a .pth with "
+            "RRDBNet/SRVGG checkpoint (.safetensors) for --spatial-mode "
+            "realesrgan (or $REALESRGAN_WEIGHTS). Default realesr_general_x4v3 "
+            "(SRVGG: fast, gentle, real-world). Others bundled: realesrgan_x4plus "
+            "(RRDBNet crisp/GAN, ~20x slower), realesrnet_x4plus / bsrnet_x4 "
+            "(MSE, faithful/soft), bsrgan_x4. Convert a .pth with "
             "scripts/pth_to_safetensors.py."
+        ),
+    )
+    parser.add_argument(
+        "--realesrgan-denoise", type=float, default=1.0, metavar="S",
+        help=(
+            "Denoise dial (dni) for realesr-general-x4v3 only, 0..1 (default "
+            "1.0 = pure general). Blends s*general + (1-s)*wdn; per Real-ESRGAN, "
+            "higher = stronger denoise (smoother), lower keeps more real-world "
+            "texture/grain. Needs the realesr_general_wdn_x4v3 companion weight."
         ),
     )
     parser.add_argument(

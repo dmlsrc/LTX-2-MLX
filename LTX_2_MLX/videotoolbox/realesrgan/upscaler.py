@@ -20,8 +20,10 @@ except ImportError:   # running directly as a script
 class RealEsrganUpscaler:
     """feed()/flush() driver for the per-frame RRDBNet upscaler."""
 
-    def __init__(self, weights: Any = None):
-        self._p = net.load_params(weights)
+    def __init__(self, weights: Any = None, denoise_strength: float = 1.0):
+        wdn = net.wdn_path_for(weights) if float(denoise_strength) < 1.0 else None
+        self._p = net.load_params(weights, wdn_path=wdn,
+                                  denoise_strength=denoise_strength)
         self.scale = net.scale_of(self._p)
         self.reset()
 
