@@ -55,7 +55,7 @@ def scale_for_mode(mode: str) -> int:
     """
     if mode == "fast":
         return 2
-    if mode in ("balanced", "image", "basicvsrpp", "realbasicvsr"):
+    if mode in ("balanced", "image", "basicvsrpp", "realbasicvsr", "realesrgan"):
         return 4
     raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
 
@@ -79,7 +79,7 @@ def source_format_for_mode(mode: str) -> int:
     """
     if mode == "fast":
         return _pb.PIX_NV12
-    if mode in ("balanced", "image", "basicvsrpp", "realbasicvsr"):
+    if mode in ("balanced", "image", "basicvsrpp", "realbasicvsr", "realesrgan"):
         # Learned MLX upscalers do not use VideoToolbox, but they also want RGB
         # in fp16-preserving RGBAHalf on the native decoder path.
         return _pb.PIX_RGBAHALF

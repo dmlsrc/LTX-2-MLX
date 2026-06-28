@@ -53,6 +53,7 @@ env/
 !LTX_2_MLX/videotoolbox/fastdvdnet/weights/*.safetensors
 !LTX_2_MLX/videotoolbox/basicvsrpp/weights/*.safetensors
 !LTX_2_MLX/videotoolbox/realbasicvsr/weights/*.safetensors
+!LTX_2_MLX/videotoolbox/realesrgan/weights/*.safetensors
 # ntire_vsr (c128n25) exceeds GitHub's 100MB file limit, so it ships split into
 # basicvsrpp_ntire_vsr.shardNN.safetensors (committed above) + a merging loader.
 # Keep the reassembled full file out of git.

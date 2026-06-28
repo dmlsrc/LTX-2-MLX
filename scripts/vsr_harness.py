@@ -411,7 +411,7 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
         return HEVC_PROFILE_MAIN422_10
     # balanced/image/none/learned upscalers carry RGB (4:4:4 chroma) to the encoder -> 4:2:2.
     return (HEVC_PROFILE_MAIN422_10
-            if spatial_mode in ("balanced", "image", "none", "basicvsrpp", "realbasicvsr")
+            if spatial_mode in ("balanced", "image", "none", "basicvsrpp", "realbasicvsr", "realesrgan")
             else HEVC_PROFILE_MAIN10)
 
 
@@ -623,7 +623,7 @@ def run(args: argparse.Namespace) -> None:
         s: Any
         if args.spatial_mode == "none":
             s = NativePassthrough(in_w, in_h, fps=source_fps)
-        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr"):
+        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr", "realesrgan"):
             # Learned MLX upscalers do the 4x upscale in the loop (windowed); the
             # session is a passthrough at the 4x output dims that just packs the
             # already-upscaled frame for the encoder.
@@ -720,6 +720,11 @@ def run(args: argparse.Namespace) -> None:
                 clean_iters=args.realbasicvsr_clean_iters,
                 residual_strength=args.realbasicvsr_residual_strength,
                 flow_consistency=args.realbasicvsr_flow_consistency,
+            )
+        elif args.spatial_mode == "realesrgan":
+            from LTX_2_MLX.videotoolbox.realesrgan.upscaler import RealEsrganUpscaler
+            up = RealEsrganUpscaler(
+                args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS")
             )
         return s, v, pw, cw, den, up
 
@@ -1075,11 +1080,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--spatial-mode",
-        choices=["fast", "balanced", "image", "none", "basicvsrpp", "realbasicvsr"],
+        choices=["fast", "balanced", "image", "none", "basicvsrpp", "realbasicvsr", "realesrgan"],
         default="balanced",
         help=(
             "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
-            "balanced=4x, image=4x, none=1x, basicvsrpp=4x, realbasicvsr=4x). "
+            "balanced=4x, image=4x, none=1x, basicvsrpp=4x, realbasicvsr=4x, "
+            "realesrgan=4x). "
+            "realesrgan = MLX Real-ESRGAN / ESRGAN RRDBNet 4x per-frame SR "
+            "(single-image: no temporal propagation, so no flow ghosting; choose "
+            "the checkpoint with --realesrgan-weights). "
             "basicvsrpp = MLX BasicVSR++ 4x super-resolution (recurrent, learned); "
             "realbasicvsr = MLX RealBasicVSR 4x real-world video SR with an "
             "iterative cleaning stage before BasicVSR propagation; "
@@ -1261,6 +1270,16 @@ def main() -> None:
             "NOT fix ghosting on a stable subject with consistent-but-wrong flow "
             "(a selfie face's specular highlights); use --realbasicvsr-window 1 "
             "for that. Try 0.7-1.0."
+        ),
+    )
+    parser.add_argument(
+        "--realesrgan-weights", default=None, metavar="PATH",
+        help=(
+            "RRDBNet checkpoint (.safetensors) for --spatial-mode realesrgan "
+            "(or $REALESRGAN_WEIGHTS). Default RealESRGAN_x4plus (general "
+            "real-world, GAN). realesrnet_x4plus = MSE-trained variant (no GAN "
+            "hallucination, softer). Convert a .pth with "
+            "scripts/pth_to_safetensors.py."
         ),
     )
     parser.add_argument(

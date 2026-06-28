@@ -138,7 +138,7 @@ def main() -> int:
     # ---- 3. find the state_dict (handle common nesting) --------------------
     sd = obj
     if not (hasattr(sd, "items") and any(torch.is_tensor(v) for v in sd.values())):
-        for key in ("state_dict", "model", "net", "weights", "params"):
+        for key in ("state_dict", "model", "net", "weights", "params_ema", "params"):
             if isinstance(obj, dict) and key in obj and hasattr(obj[key], "items"):
                 sd = obj[key]
                 print(f"[load] using nested checkpoint key '{key}'")

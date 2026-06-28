@@ -1,0 +1,42 @@
+"""Per-frame driver for the MLX RRDBNet upscaler.
+
+Real-ESRGAN / ESRGAN are single-image networks, so unlike the BasicVSR wrappers
+there is no sliding window, trim, or recurrent state -- each frame is upscaled
+independently and emitted immediately. The feed()/flush() shape mirrors the other
+upscalers so the harness wiring stays parallel.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import mlx.core as mx
+
+try:
+    from . import net
+except ImportError:   # running directly as a script
+    import net
+
+
+class RealEsrganUpscaler:
+    """feed()/flush() driver for the per-frame RRDBNet upscaler."""
+
+    def __init__(self, weights: Any = None):
+        self._p = net.load_params(weights)
+        self.scale = net.scale_of(self._p)
+        self.reset()
+
+    def reset(self) -> None:
+        pass
+
+    @staticmethod
+    def _batch(rgb: Any) -> Any:
+        a = rgb if rgb.ndim == 4 else rgb[None]
+        return a[..., :3].astype(mx.float32)
+
+    def feed(self, rgb: Any, token: Any = None) -> list:
+        sr = net.upscale([self._batch(rgb)], self._p)[0]
+        mx.eval(sr)
+        return [(sr[0], token)]
+
+    def flush(self) -> list:
+        return []
