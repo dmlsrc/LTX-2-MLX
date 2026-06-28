@@ -22,9 +22,20 @@ except ImportError:   # running net.py directly as a script
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 
+# Bundled 4x-SR checkpoints (all is_low_res_input=True). reds4/vimeo90k_bi are
+# c64n7 (7.3M); ntire_vsr is c128n25 (44M, NTIRE'21). Block counts auto-detect.
+_VARIANTS = {
+    "reds4": "basicvsrpp_reds4.safetensors",
+    "vimeo90k_bi": "basicvsrpp_vimeo90k_bi.safetensors",
+    "vimeo90k_bd": "basicvsrpp_vimeo90k_bd.safetensors",
+    "ntire_vsr": "basicvsrpp_ntire_vsr.safetensors",
+}
 
-def default_weights_path() -> Path:
-    return _WEIGHTS_DIR / "basicvsrpp_reds4.safetensors"
+
+def default_weights_path(variant: str = "reds4") -> Path:
+    if variant not in _VARIANTS:
+        raise ValueError(f"unknown basicvsrpp variant {variant!r}; choose from {list(_VARIANTS)}")
+    return _WEIGHTS_DIR / _VARIANTS[variant]
 
 
 def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict:
@@ -33,8 +44,21 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
 
     Default fp16 halves activation memory and is ~1.5x faster; the deformable
     conv still runs its im2col/GEMM in fp32 internally for safety. Pass
-    dtype=mx.float32 to match the bit-exact validation reference."""
-    w = mx.load(str(path or default_weights_path()))
+    dtype=mx.float32 to match the bit-exact validation reference.
+
+    A checkpoint over GitHub's 100MB file limit (ntire_vsr) ships split into
+    `<stem>.shardNN<suffix>` pieces; if the single file is absent, the shards are
+    loaded and merged."""
+    src = Path(path or default_weights_path())
+    if src.exists():
+        w = mx.load(str(src))
+    else:
+        shards = sorted(src.parent.glob(f"{src.stem}.shard*{src.suffix}"))
+        if not shards:
+            raise FileNotFoundError(f"{src} (no file, and no {src.stem}.shard*{src.suffix} shards)")
+        w = {}
+        for s in shards:
+            w.update(mx.load(str(s)))
     p: dict = {}
     for k, v in w.items():
         if k == "step_counter":
@@ -166,10 +190,14 @@ def _resblock(x: Any, p: dict, key: str) -> Any:
     return x + conv(relu(conv(x, p, f"{key}.conv1")), p, f"{key}.conv2")
 
 
-def _resblocks_with_input(x: Any, p: dict, prefix: str, num_blocks: int) -> Any:
+def _resblocks_with_input(x: Any, p: dict, prefix: str) -> Any:
+    # Block count is read from the checkpoint, so c64n7 (7) and c128n25 (25) and
+    # the 15-block restoration variants all load without a hardcoded count.
     x = lrelu(conv(x, p, f"{prefix}.main.0"))
-    for i in range(num_blocks):
+    i = 0
+    while f"{prefix}.main.2.{i}.conv1.weight" in p:
         x = _resblock(x, p, f"{prefix}.main.2.{i}")
+        i += 1
     return x
 
 
@@ -261,7 +289,7 @@ def _propagate(feats: dict, flows: list, module: str, p: dict) -> dict:
             feat_prop = _deform_align(mx.concatenate([feat_prop, feat_n2], axis=-1),
                                       cond, flow_n1, flow_n2, p, f"deform_align.{module}")
         feat = [feat_current] + [feats[k][idx] for k in feats if k not in ("spatial", module)] + [feat_prop]
-        feat_prop = feat_prop + _resblocks_with_input(mx.concatenate(feat, axis=-1), p, f"backbone.{module}", 7)
+        feat_prop = feat_prop + _resblocks_with_input(mx.concatenate(feat, axis=-1), p, f"backbone.{module}")
         # Materialize each step so the recurrent graph (and the large transient
         # DCN im2col columns) frees per frame instead of accumulating the whole
         # clip's forward into one lazy graph - that peaks memory catastrophically.
@@ -277,7 +305,7 @@ def _upsample(frames: list, feats: dict, p: dict) -> list:
     outs = []
     for i in range(len(feats["spatial"])):
         hr = [feats["spatial"][i]] + [feats[k][i] for k in feats if k != "spatial"]
-        hr = _resblocks_with_input(mx.concatenate(hr, axis=-1), p, "reconstruction", 5)
+        hr = _resblocks_with_input(mx.concatenate(hr, axis=-1), p, "reconstruction")
         hr = lrelu(_pixelshuffle_pack(hr, p, "upsample1"))
         hr = lrelu(_pixelshuffle_pack(hr, p, "upsample2"))
         hr = lrelu(conv(hr, p, "conv_hr"))
@@ -296,7 +324,7 @@ def upscale(frames: list, p: dict) -> list:
     frames = [f.astype(dt) for f in frames]
     spatial = []
     for f in frames:
-        s = _resblocks_with_input(f, p, "feat_extract", 5)
+        s = _resblocks_with_input(f, p, "feat_extract")
         mx.eval(s)                       # materialize per frame, not all at once
         spatial.append(s)
     feats: dict = {"spatial": spatial}

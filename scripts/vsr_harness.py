@@ -693,10 +693,12 @@ def run(args: argparse.Namespace) -> None:
 
         up: Any = None
         if args.spatial_mode == "basicvsrpp":
+            from LTX_2_MLX.videotoolbox.basicvsrpp import net as bvnet
             from LTX_2_MLX.videotoolbox.basicvsrpp.upscaler import BasicVsrUpscaler
+            weights = (args.basicvsrpp_weights or os.environ.get("BASICVSRPP_WEIGHTS")
+                       or str(bvnet.default_weights_path(args.basicvsrpp_variant)))
             up = BasicVsrUpscaler(
-                args.basicvsrpp_weights or os.environ.get("BASICVSRPP_WEIGHTS"),
-                window=args.basicvsrpp_window, trim=args.basicvsrpp_trim,
+                weights, window=args.basicvsrpp_window, trim=args.basicvsrpp_trim,
             )
         return s, v, pw, cw, den, up
 
@@ -1144,11 +1146,22 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--basicvsrpp-variant",
+        choices=["reds4", "vimeo90k_bi", "vimeo90k_bd", "ntire_vsr"], default="vimeo90k_bd",
+        help=(
+            "Which bundled BasicVSR++ 4x checkpoint for --spatial-mode basicvsrpp. "
+            "All are bicubic/blur-degradation SR models. ntire_vsr = the big "
+            "c128n25 model (sharpest, 175MB, more memory); vimeo90k_bd (default) = "
+            "blur-downsample, the best of the small c64n7 models on native footage; "
+            "vimeo90k_bi / reds4 = bicubic, softer on non-bicubic input. Ignored "
+            "when --basicvsrpp-weights is given."
+        ),
+    )
+    parser.add_argument(
         "--basicvsrpp-weights", default=None, metavar="PATH",
         help=(
             "Override BasicVSR++ weights (.safetensors) for --spatial-mode "
-            "basicvsrpp. Optional - defaults to the bundled REDS4 weights (or "
-            "$BASICVSRPP_WEIGHTS)."
+            "basicvsrpp, bypassing --basicvsrpp-variant (or $BASICVSRPP_WEIGHTS)."
         ),
     )
     parser.add_argument(
