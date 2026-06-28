@@ -445,6 +445,7 @@ def run(args: argparse.Namespace) -> None:
     # the latent path (no source container) leaves them None -> BT.709 default.
     color_props: dict | None = None
     cv_color: tuple | None = None
+    normalizer: Any = None   # ColorNormalizer for --source-color overrides
 
     # ---- Input source ------------------------------------------------------
     if args.latent:
@@ -527,6 +528,13 @@ def run(args: argparse.Namespace) -> None:
         cv_color = _color.cv_triple(_resolved)
         print(f"Source color: {'tagged' if _src_color['tagged'] else 'untagged'}"
               f" -> output {_color.describe(_resolved)}")
+        if args.source_color != "auto":
+            # Override: convert the MLX source the same way VsrSession does, so
+            # every mode (balanced/realesrgan/fastdvd) stays colorimetrically
+            # consistent. auto needs no transfer (the decode already lands there).
+            from LTX_2_MLX.videotoolbox.vsr import ColorNormalizer
+            normalizer = ColorNormalizer(in_w, in_h, cv_color)
+            print("  (override: normalizing the MLX source via VTPixelTransfer)")
         # Decode straight into VSR's source format (NV12 for fast, RGBAHalf for
         # balanced/image) and feed the buffers directly to VSR - no RGB
         # intermediate, no MLX round-trip, no re-quantization. Size the decode
@@ -844,7 +852,8 @@ def run(args: argparse.Namespace) -> None:
         if den_rgb is not None:
             lr = den_rgb
         elif frames_are_buffers:
-            lr = _pb.read_buffer_rgb_f32(src_frame)
+            lr = _pb.read_buffer_rgb_f32(
+                normalizer.transfer(src_frame) if normalizer is not None else src_frame)
         else:
             lr = src_frame[..., :3].astype(mx.float32)
         for up_rgb, (u_sf, u_sa) in upscaler.feed(lr, token=(None, src_arr)):
@@ -951,7 +960,8 @@ def run(args: argparse.Namespace) -> None:
                         # fp16-preserving for RGBAHalf (balanced/image/none); 8-bit
                         # CoreImage fallback for NV12 (fast).
                         if frames_are_buffers:
-                            base_rgb = _pb.read_buffer_rgb_f32(src_frame)
+                            base_rgb = _pb.read_buffer_rgb_f32(
+                                normalizer.transfer(src_frame) if normalizer is not None else src_frame)
                         else:
                             base_rgb = src_frame[..., :3].astype(mx.float32)
                         if hasattr(denoiser, "feed"):
