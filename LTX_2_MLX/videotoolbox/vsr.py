@@ -55,7 +55,7 @@ def scale_for_mode(mode: str) -> int:
     """
     if mode == "fast":
         return 2
-    if mode in ("balanced", "image", "basicvsrpp"):
+    if mode in ("balanced", "image", "basicvsrpp", "realbasicvsr"):
         return 4
     raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
 
@@ -79,8 +79,9 @@ def source_format_for_mode(mode: str) -> int:
     """
     if mode == "fast":
         return _pb.PIX_NV12
-    if mode in ("balanced", "image", "basicvsrpp"):
-        # basicvsrpp upscales in MLX, not VideoToolbox, but it also wants RGB in
+    if mode in ("balanced", "image", "basicvsrpp", "realbasicvsr"):
+        # Learned MLX upscalers do not use VideoToolbox, but they also want RGB
+        # in fp16-preserving RGBAHalf on the native decoder path.
         return _pb.PIX_RGBAHALF
     raise ValueError(f"unknown VSR spatial-mode: {mode!r}")
 
@@ -190,6 +191,8 @@ class VsrSession:
 
     def __init__(self, in_w: int, in_h: int, mode: str, fps: float = 24.0):
         require_pyobjc()
+        if mode not in ("fast", "balanced", "image"):
+            raise ValueError(f"VsrSession only supports VideoToolbox modes, got {mode!r}")
         scale = scale_for_mode(mode)
         _validate_combination(in_w, in_h, scale, mode)
         self.in_w, self.in_h = in_w, in_h
@@ -419,12 +422,13 @@ class NativePassthrough:
     resolution without special-casing the loop.
     """
 
-    def __init__(self, in_w: int, in_h: int, fps: float = 24.0):
+    def __init__(self, in_w: int, in_h: int, fps: float = 24.0, label: str = "no upscale"):
         require_pyobjc()
         self.in_w, self.in_h = int(in_w), int(in_h)
         self.scale = 1
         self.out_w, self.out_h = self.in_w, self.in_h
         self.mode = "none"
+        self.label = str(label)
         self.fps = float(fps)
         self.dst_attrs = {
             Quartz.kCVPixelBufferPixelFormatTypeKey: _pb.PIX_RGBAHALF,
@@ -434,7 +438,7 @@ class NativePassthrough:
         }
         self.src_attrs = dict(self.dst_attrs)
         self._pool = _pb.make_pool_from_attrs(self.dst_attrs)
-        print(f"Native passthrough (no upscale) ready ({self.in_w}x{self.in_h}, RGBAHalf)")
+        print(f"Native passthrough ({self.label}) ready ({self.in_w}x{self.in_h}, RGBAHalf)")
 
     def use_dst_pool(self, pool: Any) -> None:
         self._pool = pool

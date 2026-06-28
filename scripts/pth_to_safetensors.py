@@ -17,6 +17,7 @@ loads with mlx.core.load().
     scripts/pth_to_safetensors.py model.pth                  # -> model.safetensors
     scripts/pth_to_safetensors.py model.pth -o weights.safetensors
     scripts/pth_to_safetensors.py ckpt.pth --strip-prefix "" --keep-fp64
+    scripts/pth_to_safetensors.py ckpt.pth --only-prefix generator_ema. --strip-prefix generator_ema.
 """
 
 from __future__ import annotations
@@ -92,6 +93,10 @@ def main() -> int:
         "--strip-prefix", default="module.",
         help="Key prefix to strip from every weight (default 'module.'; '' to keep).",
     )
+    ap.add_argument(
+        "--only-prefix", default="",
+        help="Keep only tensor keys with this prefix before applying --strip-prefix.",
+    )
     ap.add_argument("--keep-fp64", action="store_true", help="Keep float64 tensors as-is (default: demote to float32).")
     ap.add_argument("--force", action="store_true", help="Convert even if the static scan flags non-tensor globals.")
     args = ap.parse_args()
@@ -141,10 +146,14 @@ def main() -> int:
 
     # ---- 4. make MLX-friendly: strip prefix, demote fp64, drop non-tensors -
     prefix = args.strip_prefix
-    tensors, dropped, stripped = {}, [], 0
+    only_prefix = args.only_prefix
+    tensors, dropped, stripped, filtered = {}, [], 0, 0
     for k, v in sd.items():
         if not torch.is_tensor(v):
             dropped.append(k)
+            continue
+        if only_prefix and not k.startswith(only_prefix):
+            filtered += 1
             continue
         nk = k[len(prefix):] if prefix and k.startswith(prefix) else k
         stripped += (nk != k)
@@ -160,6 +169,8 @@ def main() -> int:
           f"dtypes={sorted({str(t.dtype) for t in tensors.values()})}")
     if stripped:
         print(f"[convert] stripped '{prefix}' from {stripped} keys")
+    if filtered:
+        print(f"[convert] filtered out {filtered} tensor keys outside '{only_prefix}'")
     if dropped:
         print(f"[convert] dropped {len(dropped)} non-tensor entries: {dropped[:6]}"
               f"{'...' if len(dropped) > 6 else ''}")

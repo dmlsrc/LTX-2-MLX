@@ -24,8 +24,8 @@ Usage
     scripts/vsr_harness.py --video clip.mp4 \
         --output-dir outputs/vsr/run3 --start 0:05 --end 0:08 --audio
 
-Spatial modes (VideoToolbox-imposed; scale is implied by the mode)
-------------------------------------------------------------------
+Spatial modes (scale is implied by the mode)
+--------------------------------------------
     fast      VTLowLatencySuperResolutionScalerConfiguration.  Scale 2x.
               Input must fit between 96x96 and 960x960.  Per-frame,
               no temporal context.
@@ -42,6 +42,10 @@ Spatial modes (VideoToolbox-imposed; scale is implied by the mode)
               than balanced but measurably smoother frame-to-frame (lower
               temporal second-difference).  Use scripts/compare_video_shimmer.py
               to A/B the two modes on your own content.
+    basicvsrpp MLX BasicVSR++ 4x learned SR, recurrent sliding windows.
+    realbasicvsr
+              MLX RealBasicVSR 4x learned SR. Cleans the LR clip first, then
+              runs BasicVSR propagation in sliding windows.
 
 Temporal modes (only relevant when --target-fps is set)
 -------------------------------------------------------
@@ -405,9 +409,9 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
         return HEVC_PROFILE_MAIN10
     if encode_chroma == "422":
         return HEVC_PROFILE_MAIN422_10
-    # balanced/image/none/basicvsrpp carry RGB (4:4:4 chroma) to the encoder -> 4:2:2.
+    # balanced/image/none/learned upscalers carry RGB (4:4:4 chroma) to the encoder -> 4:2:2.
     return (HEVC_PROFILE_MAIN422_10
-            if spatial_mode in ("balanced", "image", "none", "basicvsrpp")
+            if spatial_mode in ("balanced", "image", "none", "basicvsrpp", "realbasicvsr")
             else HEVC_PROFILE_MAIN10)
 
 
@@ -605,7 +609,7 @@ def run(args: argparse.Namespace) -> None:
     post_writer: AVWriter | None = None
     comparison_writer: AVWriter | None = None
     denoiser: Any = None  # SpatialDenoiser / McTemporalDenoiser / FastDvd when --denoise set
-    upscaler: Any = None  # BasicVsrUpscaler when --spatial-mode basicvsrpp
+    upscaler: Any = None  # learned MLX upscaler when --spatial-mode basicvsrpp/realbasicvsr
 
     def _build_post_pipeline() -> tuple[
         VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any
@@ -619,11 +623,11 @@ def run(args: argparse.Namespace) -> None:
         s: Any
         if args.spatial_mode == "none":
             s = NativePassthrough(in_w, in_h, fps=source_fps)
-        elif args.spatial_mode == "basicvsrpp":
-            # MLX BasicVSR++ does the 4x upscale in the loop (windowed); the
+        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr"):
+            # Learned MLX upscalers do the 4x upscale in the loop (windowed); the
             # session is a passthrough at the 4x output dims that just packs the
             # already-upscaled frame for the encoder.
-            s = NativePassthrough(out_w, out_h, fps=source_fps)
+            s = NativePassthrough(out_w, out_h, fps=source_fps, label=f"{args.spatial_mode} packer")
         else:
             s = VsrSession(in_w, in_h, mode=args.spatial_mode, fps=source_fps)
         v: VtfrcSession | None = None
@@ -699,6 +703,22 @@ def run(args: argparse.Namespace) -> None:
                        or str(bvnet.default_weights_path(args.basicvsrpp_variant)))
             up = BasicVsrUpscaler(
                 weights, window=args.basicvsrpp_window, trim=args.basicvsrpp_trim,
+            )
+        elif args.spatial_mode == "realbasicvsr":
+            from LTX_2_MLX.videotoolbox.realbasicvsr import net as rbvnet
+            from LTX_2_MLX.videotoolbox.realbasicvsr.upscaler import RealBasicVsrUpscaler
+            weights = (
+                args.realbasicvsr_weights
+                or os.environ.get("REALBASICVSR_WEIGHTS")
+                or str(rbvnet.default_weights_path())
+            )
+            up = RealBasicVsrUpscaler(
+                weights,
+                window=args.realbasicvsr_window,
+                trim=args.realbasicvsr_trim,
+                dynamic_refine_thres=args.realbasicvsr_dynamic_refine_thres,
+                clean_iters=args.realbasicvsr_clean_iters,
+                residual_strength=args.realbasicvsr_residual_strength,
             )
         return s, v, pw, cw, den, up
 
@@ -794,8 +814,8 @@ def run(args: argparse.Namespace) -> None:
         processed += 1
 
     def _emit_scaled(den_rgb: Any, src_frame: Any, src_arr: Any) -> None:
-        """For --spatial-mode basicvsrpp, route the (denoised or raw) LR frame
-        through the windowed BasicVSR++ upscaler and emit each 4x frame it
+        """For learned MLX upscalers, route the (denoised or raw) LR frame
+        through the windowed recurrent upscaler and emit each 4x frame it
         releases; otherwise emit straight through. Preserves denoise -> upscale
         ordering and keeps one emit path for both the per-frame and flush cases."""
         if upscaler is None:
@@ -952,7 +972,7 @@ def run(args: argparse.Namespace) -> None:
                     break
                 with autorelease_pool():
                     _emit_scaled(d_rgb, d_sf, d_sa)
-        # Drain the BasicVSR++ upscaler's final window (the clip-end frames).
+        # Drain the learned upscaler's final window (the clip-end frames).
         if upscaler is not None and session is not None:
             for up_rgb, (u_sf, u_sa) in upscaler.flush():
                 if max_frames is not None and appended >= max_frames:
@@ -1053,15 +1073,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--spatial-mode", choices=["fast", "balanced", "image", "none", "basicvsrpp"],
+        "--spatial-mode",
+        choices=["fast", "balanced", "image", "none", "basicvsrpp", "realbasicvsr"],
         default="balanced",
         help=(
             "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
-            "balanced=4x, image=4x, none=1x, basicvsrpp=4x). "
+            "balanced=4x, image=4x, none=1x, basicvsrpp=4x, realbasicvsr=4x). "
             "basicvsrpp = MLX BasicVSR++ 4x super-resolution (recurrent, learned); "
+            "realbasicvsr = MLX RealBasicVSR 4x real-world video SR with an "
+            "iterative cleaning stage before BasicVSR propagation; "
             "runs on the GPU via MLX instead of VideoToolbox, processed in sliding "
-            "windows (see --basicvsrpp-window/-trim). Slower than the VT modes but "
-            "recovers markedly more detail. "
+            "windows (see the model-specific --*-window/--*-trim flags). "
+            "Slower than the VT modes but uses learned SR checkpoints. "
             "none = no super-resolution; output stays at native resolution. Use "
             "it with --denoise to denoise-only, or alone for a plain transcode. "
             "balanced (default) = HQ Video mode; uses prev source + prev output "
@@ -1182,6 +1205,50 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--realbasicvsr-weights", default=None, metavar="PATH",
+        help=(
+            "Override RealBasicVSR weights (.safetensors) for --spatial-mode "
+            "realbasicvsr (or $REALBASICVSR_WEIGHTS). Convert the .pth with "
+            "scripts/pth_to_safetensors.py --only-prefix generator_ema. "
+            "--strip-prefix generator_ema."
+        ),
+    )
+    parser.add_argument(
+        "--realbasicvsr-window", type=int, default=14, metavar="N",
+        help=(
+            "Sliding-window length (frames) for --spatial-mode realbasicvsr "
+            "(default 14). Larger = more temporal context, but more memory + compute."
+        ),
+    )
+    parser.add_argument(
+        "--realbasicvsr-trim", type=int, default=0, metavar="N",
+        help=(
+            "Warm-up frames trimmed at each window join for --spatial-mode "
+            "realbasicvsr (default 0, matching the reference max_seq_len "
+            "non-overlap chunking). Values >0 re-run overlapping windows and "
+            "discard boundary frames, which costs more compute."
+        ),
+    )
+    parser.add_argument(
+        "--realbasicvsr-dynamic-refine-thres", type=float, default=5.0, metavar="V",
+        help=(
+            "RealBasicVSR cleaning stop threshold in 0..255 units (default 5, "
+            "the GAN test-time setting; 255 forces one cleaning pass)."
+        ),
+    )
+    parser.add_argument(
+        "--realbasicvsr-clean-iters", type=int, default=3, metavar="N",
+        help="Maximum RealBasicVSR cleaning passes before propagation (default 3).",
+    )
+    parser.add_argument(
+        "--realbasicvsr-residual-strength", type=float, default=1.0, metavar="V",
+        help=(
+            "Scale the learned RealBasicVSR residual before adding it to the 4x "
+            "bilinear base (default 1.0). Try 0.6-0.85 to reduce GAN/pixel-shuffle "
+            "lattice artifacts on moving objects while retaining most sharpening."
+        ),
+    )
+    parser.add_argument(
         "--mc-window", type=int, default=0, metavar="N",
         help=(
             "mc temporal structure (mutually exclusive). 0 (default) = recursive "
@@ -1269,6 +1336,16 @@ def main() -> None:
 
     if args.latent and not args.weights:
         parser.error("--latent requires --weights")
+    if args.spatial_mode == "realbasicvsr":
+        if args.realbasicvsr_window < 1:
+            parser.error("--realbasicvsr-window must be >= 1")
+        if args.realbasicvsr_trim < 0:
+            parser.error("--realbasicvsr-trim must be >= 0")
+        if args.realbasicvsr_trim and args.realbasicvsr_window <= 2 * args.realbasicvsr_trim:
+            parser.error(
+                "--realbasicvsr-window must be greater than 2*--realbasicvsr-trim; "
+                "use --realbasicvsr-trim 0 for reference-like chunks"
+            )
 
     require_pyobjc()
     run(args)
