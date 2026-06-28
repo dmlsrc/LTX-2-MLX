@@ -99,7 +99,22 @@ def probe_color(path: Path) -> dict:
     url = Foundation.NSURL.fileURLWithPath_(str(path))
     asset = av.AVURLAsset.alloc().initWithURL_options_(url, None)
     track = _first_video_track(asset)
-    return color.read_source_color(track.formatDescriptions()[0])
+    src = color.read_source_color(track.formatDescriptions()[0])
+    if not src["tagged"]:
+        # Untagged: read VideoToolbox's decode-time guess (its undocumented,
+        # width-keyed choice) off a decoded frame, so 'auto' reports/tags what was
+        # actually read instead of assuming BT.709.
+        try:
+            buf = next(iter(iter_video_buffer_chunks(path, _pb.PIX_RGBAHALF, chunk_size=1)))[0]
+            att = Quartz.CVBufferCopyAttachments(buf, Quartz.kCVAttachmentMode_ShouldPropagate) or {}
+            by = {str(k): att[k] for k in att}
+            src["primaries"] = by.get("CVImageBufferColorPrimaries") or src["primaries"]
+            src["transfer"] = by.get("CVImageBufferTransferFunction") or src["transfer"]
+            src["matrix"] = by.get("CVImageBufferYCbCrMatrix") or src["matrix"]
+            src["guessed"] = src["matrix"] is not None
+        except Exception:
+            pass
+    return src
 
 
 # 10-bit 4:2:2 YUV for the forced-decode path: a precision-preserving superset

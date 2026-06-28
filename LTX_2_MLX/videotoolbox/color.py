@@ -55,15 +55,21 @@ def read_source_color(format_desc: Any) -> dict:
 def resolve(src: dict, override: str = "auto") -> tuple:
     """(primaries, transfer, matrix, full_range) as CV constants.
 
-    override 'auto' = explicit source tags, else BT.709 for untagged. Any other
-    override forces that colorimetry (the source's range flag is still honored).
+    override 'auto' = the source's actual color: explicit container tags, or (for
+    untagged sources) VideoToolbox's decode-time guess, which probe_color reads
+    from a decoded frame -- so the output tag matches how the source was actually
+    read, not a fixed BT.709. Falls back to BT.709 only if even the guess is
+    absent. Any other override forces that colorimetry; the range flag is honored.
     """
     if override != "auto":
         prim, trans, mat = _OVERRIDES[override]
         return prim, trans, mat, src["full_range"]
-    if src["tagged"]:
-        return src["primaries"], src["transfer"], src["matrix"], src["full_range"]
-    return (*_709, src["full_range"])
+    return (
+        src.get("primaries") or _709[0],
+        src.get("transfer") or _709[1],
+        src.get("matrix") or _709[2],
+        src["full_range"],
+    )
 
 
 def cv_triple(resolved: tuple) -> tuple:

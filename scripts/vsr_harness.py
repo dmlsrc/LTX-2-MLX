@@ -525,8 +525,10 @@ def run(args: argparse.Namespace) -> None:
         _resolved = _color.resolve(_src_color, args.source_color)
         color_props = _color.av_color_properties(_resolved)
         cv_color = _color.cv_triple(_resolved)
-        print(f"Source color: {'tagged' if _src_color['tagged'] else 'untagged'}"
-              f" -> output {_color.describe(_resolved)}")
+        _origin = ("tagged" if _src_color["tagged"]
+                   else "untagged, VT guessed" if _src_color.get("guessed")
+                   else "untagged")
+        print(f"Source color: {_origin} -> output {_color.describe(_resolved)}")
         if args.source_color != "auto":
             print(f"  (forcing the source to be DECODED as {args.source_color}, "
                   "overriding VideoToolbox's resolution guess)")
