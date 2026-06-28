@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import pixel_buffers as _pb
+from . import yuv as _yuv
 from ._compat import CoreMedia, Foundation, Quartz, av, libdispatch, require_pyobjc
 from .audio import AudioTrack, audio_writer_settings
 
@@ -94,6 +95,8 @@ class AVWriter:
         transform: Any = None,
         source_attrs: dict | None = None,
         color_props: dict | None = None,
+        cv_color: tuple | None = None,
+        full_range: bool = False,
     ):
         require_pyobjc()
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,8 +120,18 @@ class AVWriter:
         if transform is not None:
             video_input.setTransform_(transform)
 
+        # Feed the encoder YUV we converted ourselves (see yuv.py) rather than
+        # RGBAHalf: AVAssetWriter's internal RGB->YUV is colorspace-metadata-
+        # dependent and color-shifts uploaded buffers. cv_color present => YUV feed,
+        # and `append` converts the RGBAHalf input to 10-bit 4:2:2 with that matrix.
+        # Only the RGBAHalf producers (balanced/image + the learned/upload upscalers)
+        # need this; NV12 (fast) output is already YUV and feeds through untouched.
+        self._yuv_feed = cv_color is not None and source_pixel_format == _pb.PIX_RGBAHALF
+        self._yuv_matrix = cv_color[2] if cv_color is not None else None
+        self._yuv_full = full_range
+        adaptor_format = _yuv.pixel_format(full_range) if self._yuv_feed else source_pixel_format
         src_attrs = {
-            Quartz.kCVPixelBufferPixelFormatTypeKey: source_pixel_format,
+            Quartz.kCVPixelBufferPixelFormatTypeKey: adaptor_format,
             Quartz.kCVPixelBufferWidthKey: width,
             Quartz.kCVPixelBufferHeightKey: height,
             Quartz.kCVPixelBufferIOSurfacePropertiesKey: {},
@@ -252,6 +265,13 @@ class AVWriter:
     def append(self, pb: Any) -> None:
         """Append one video frame at the next PTS (frame_count/fps)."""
         self._wait_for_ready(self.video_input, "video")
+        if self._yuv_feed:
+            rgb = _pb.read_rgbahalf_rgb(pb)
+            ybuf = _pb.pool_create_buffer(self.adaptor.pixelBufferPool())
+            if ybuf is None:
+                raise RuntimeError(f"[{self.label}] YUV pool buffer allocation failed")
+            _yuv.rgb_to_yuv422_10(rgb, ybuf, self._yuv_matrix, self._yuv_full)
+            pb = ybuf
         pts = _pb.frame_pts(self.frame_count, self.fps)
         if not self.adaptor.appendPixelBuffer_withPresentationTime_(pb, pts):
             raise RuntimeError(

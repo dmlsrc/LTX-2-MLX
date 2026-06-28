@@ -683,13 +683,13 @@ def run(args: argparse.Namespace) -> None:
                 transform=src_transform,
                 source_attrs=producer_attrs,
                 color_props=color_props,
+                cv_color=cv_color,
+                full_range=_resolved[3],
                 **audio_kwargs,
             )
-            # Zero-copy from VSR (or VtfrcSession's output) into encoder.
-            if v is not None:
-                v.use_dst_pool(pw.adaptor.pixelBufferPool())
-            else:
-                s.use_dst_pool(pw.adaptor.pixelBufferPool())
+            # The writer feeds the encoder 10-bit YUV it converts itself (yuv.py),
+            # so its adaptor pool is YUV; the producer keeps its own RGBAHalf dst
+            # pool (no use_dst_pool zero-copy -- the RGB->YUV conversion is the copy).
 
         cw: AVWriter | None = None
         if args.comparison:
