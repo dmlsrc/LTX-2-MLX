@@ -612,8 +612,8 @@ def run(args: argparse.Namespace) -> None:
     upscaler: Any = None  # learned MLX upscaler when --spatial-mode basicvsrpp/realbasicvsr
 
     def _build_post_pipeline() -> tuple[
-        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any
-    ]:
+        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any, Any
+    ]:  # session, vtfrc, post_writer, comparison_writer, denoiser, upscaler
         """Materialize VSR + temporal + writer sessions just-in-time.
 
         Called on the first chunk so chunk-1 VAE has the Metal heap to
