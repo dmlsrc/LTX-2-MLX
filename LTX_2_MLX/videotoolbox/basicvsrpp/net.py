@@ -311,7 +311,10 @@ def _upsample(frames: list, feats: dict, p: dict) -> list:
         hr = lrelu(conv(hr, p, "conv_hr"))
         hr = conv(hr, p, "conv_last")
         _, fh, fw, _ = frames[i].shape
-        out_frame = hr + resize(frames[i], fh * 4, fw * 4, False)
+        # Clip the terminal SR to [0,1]: the residual overshoots slightly at edges
+        # (ringing) and this frame goes straight to the encoder. Not fed back into
+        # the recurrence, so clipping here is safe.
+        out_frame = mx.clip(hr + resize(frames[i], fh * 4, fw * 4, False), 0.0, 1.0)
         mx.eval(out_frame)   # free each frame's upsample graph before the next
         outs.append(out_frame)
     return outs
@@ -321,7 +324,9 @@ def upscale(frames: list, p: dict) -> list:
     """Upscale an LR clip 4x. frames: list of (N,H,W,3) f32 [0,1]; out: same len,
     each (N,4H,4W,3). Bidirectional + second-order, so the whole clip is needed."""
     dt = p["conv_last.weight"].dtype
-    frames = [f.astype(dt) for f in frames]
+    # Clip to [0,1] - the model trained on uint8-derived [0,1] LR, but the
+    # RGBAHalf decode can overshoot (~[-0.07, 1.04]); keep input in-distribution.
+    frames = [mx.clip(f, 0.0, 1.0).astype(dt) for f in frames]
     spatial = []
     for f in frames:
         s = _resblocks_with_input(f, p, "feat_extract")
