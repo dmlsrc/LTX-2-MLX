@@ -30,7 +30,7 @@ PIX_422YCBCR10_VIDEO = Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
 PIX_422YCBCR10_FULL = Quartz.kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
 
 
-def _coef_for_matrix(matrix: Any) -> tuple[float, float]:
+def coef_for_matrix(matrix: Any) -> tuple[float, float]:
     """ITU-R (Kr, Kb) luma coefficients for a CV YCbCrMatrix constant (601 default)."""
     if matrix == Quartz.kCVImageBufferYCbCrMatrix_ITU_R_2020:
         return 0.2627, 0.0593
@@ -91,7 +91,7 @@ def rgb_to_yuv422_10(rgb: Any, dst_buffer: Any, matrix: Any, full_range: bool = 
     the BiPlanar10 formats expect. Chroma is box-averaged to 4:2:2.
     """
     require_pyobjc()
-    Kr, Kb = _coef_for_matrix(matrix)
+    Kr, Kb = coef_for_matrix(matrix)
     luma, chroma = _compiled_planes(Kr, Kb, full_range)(rgb)
     _write_planes(dst_buffer, (luma, chroma))
 

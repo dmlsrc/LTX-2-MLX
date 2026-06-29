@@ -98,6 +98,7 @@ from LTX_2_MLX.videotoolbox import (
 from LTX_2_MLX.videotoolbox import color as _color
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
 from LTX_2_MLX.videotoolbox import video_reader as _vr
+from LTX_2_MLX.videotoolbox import yuv as _yuv
 from LTX_2_MLX.videotoolbox.comparison import render_comparison
 from LTX_2_MLX.videotoolbox.denoise import LumaChromaDenoiser, McTemporalDenoiser, SpatialDenoiser
 from LTX_2_MLX.videotoolbox.fastdvdnet import FastDvdDenoiser
@@ -729,8 +730,9 @@ def run(args: argparse.Namespace) -> None:
 
         if den is not None and (args.denoise_luma_strength != 1.0
                                 or args.denoise_chroma_strength != 1.0):
+            kr, kb = _yuv.coef_for_matrix(_resolved_color[2])    # match the source color matrix
             den = LumaChromaDenoiser(den, args.denoise_luma_strength,
-                                     args.denoise_chroma_strength)
+                                     args.denoise_chroma_strength, kr=kr, kb=kb)
 
         deb: Any = None
         if args.deblock == "stdf":
