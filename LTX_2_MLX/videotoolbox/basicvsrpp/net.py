@@ -27,7 +27,7 @@ from ..vsr_blocks import (
     resize,
 )
 from ..weights import resolve_weights as _resolve_weights
-from .deform_conv import deform_conv2d
+from ..deform_conv import deform_conv2d
 
 # Per-checkpoint compiled reconstruction/upsample tail (keyed by id(p)).
 _UPSAMPLE_COMPILE_CACHE: dict = {}
