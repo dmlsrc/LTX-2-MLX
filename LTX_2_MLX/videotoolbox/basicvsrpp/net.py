@@ -20,12 +20,32 @@ from ..vsr_blocks import (
     _compute_flows,
     _pixelshuffle_pack,
     _resblocks_with_input,
+    compiled_resblocks,
     conv,
     flow_warp,
     lrelu,
     resize,
 )
 from .deform_conv import deform_conv2d
+
+# Per-checkpoint compiled reconstruction/upsample tail (keyed by id(p)).
+_UPSAMPLE_COMPILE_CACHE: dict = {}
+
+
+def _compiled_upsample(p: dict):
+    """Compiled reconstruction resblocks + pixel-shuffle upsample tail -> HR residual.
+    The cheap base resize + clip stay in the loop. Pure, byte-identical (profiled)."""
+    fn = _UPSAMPLE_COMPILE_CACHE.get(id(p))
+    if fn is None:
+        def step(hr):
+            hr = _resblocks_with_input(hr, p, "reconstruction")
+            hr = lrelu(_pixelshuffle_pack(hr, p, "upsample1"))
+            hr = lrelu(_pixelshuffle_pack(hr, p, "upsample2"))
+            hr = lrelu(conv(hr, p, "conv_hr"))
+            return conv(hr, p, "conv_last")
+        fn = mx.compile(step)
+        _UPSAMPLE_COMPILE_CACHE[id(p)] = fn
+    return fn
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 
@@ -141,7 +161,7 @@ def _propagate(feats: dict, flows: list, module: str, p: dict) -> dict:
             feat_prop = _deform_align(mx.concatenate([feat_prop, feat_n2], axis=-1),
                                       cond, flow_n1, flow_n2, p, f"deform_align.{module}")
         feat = [feat_current] + [feats[k][idx] for k in feats if k not in ("spatial", module)] + [feat_prop]
-        feat_prop = feat_prop + _resblocks_with_input(mx.concatenate(feat, axis=-1), p, f"backbone.{module}")
+        feat_prop = feat_prop + compiled_resblocks(mx.concatenate(feat, axis=-1), p, f"backbone.{module}")
         # Materialize each step so the recurrent graph (and the large transient
         # DCN im2col columns) frees per frame instead of accumulating the whole
         # clip's forward into one lazy graph - that peaks memory catastrophically.
@@ -157,16 +177,12 @@ def _upsample(frames: list, feats: dict, p: dict) -> list:
     outs = []
     for i in range(len(feats["spatial"])):
         hr = [feats["spatial"][i]] + [feats[k][i] for k in feats if k != "spatial"]
-        hr = _resblocks_with_input(mx.concatenate(hr, axis=-1), p, "reconstruction")
-        hr = lrelu(_pixelshuffle_pack(hr, p, "upsample1"))
-        hr = lrelu(_pixelshuffle_pack(hr, p, "upsample2"))
-        hr = lrelu(conv(hr, p, "conv_hr"))
-        hr = conv(hr, p, "conv_last")
+        residual = _compiled_upsample(p)(mx.concatenate(hr, axis=-1))
         _, fh, fw, _ = frames[i].shape
         # Clip the terminal SR to [0,1]: the residual overshoots slightly at edges
         # (ringing) and this frame goes straight to the encoder. Not fed back into
         # the recurrence, so clipping here is safe.
-        out_frame = mx.clip(hr + resize(frames[i], fh * 4, fw * 4, False), 0.0, 1.0)
+        out_frame = mx.clip(residual + resize(frames[i], fh * 4, fw * 4, False), 0.0, 1.0)
         mx.eval(out_frame)   # free each frame's upsample graph before the next
         outs.append(out_frame)
     return outs
@@ -181,7 +197,7 @@ def upscale(frames: list, p: dict) -> list:
     frames = [mx.clip(f, 0.0, 1.0).astype(dt) for f in frames]
     spatial = []
     for f in frames:
-        s = _resblocks_with_input(f, p, "feat_extract")
+        s = compiled_resblocks(f, p, "feat_extract")
         mx.eval(s)                       # materialize per frame, not all at once
         spatial.append(s)
     feats: dict = {"spatial": spatial}

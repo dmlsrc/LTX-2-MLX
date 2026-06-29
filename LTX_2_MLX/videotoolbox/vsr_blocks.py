@@ -142,6 +142,26 @@ def _resblocks_with_input(x: Any, p: dict, prefix: str) -> Any:
     return x
 
 
+_RESBLOCKS_COMPILE_CACHE: dict = {}
+
+
+def compiled_resblocks(x: Any, p: dict, prefix: str) -> Any:
+    """_resblocks_with_input, mx.compiled + cached per (checkpoint, prefix).
+
+    The resblock stack fuses for ~1.05-1.07x over the op-by-op path, pure and
+    byte-identical (profiled, MLX cache capped). For the recurrent VSR loops, where
+    the stack runs many times per frame. Keyed by (id(p), prefix); the cache entry
+    closes over p so its id stays stable. Do NOT call this from inside another
+    mx.compile'd step (it would nest compiles) -- call _resblocks_with_input there.
+    """
+    key = (id(p), prefix)
+    fn = _RESBLOCKS_COMPILE_CACHE.get(key)
+    if fn is None:
+        fn = mx.compile(lambda x: _resblocks_with_input(x, p, prefix))
+        _RESBLOCKS_COMPILE_CACHE[key] = fn
+    return fn(x)
+
+
 def _pixel_shuffle(x: Any, r: int) -> Any:
     """(N,H,W,C*r^2) -> (N,H*r,W*r,C), torch PixelShuffle channel order."""
     n, h, w, c4 = x.shape

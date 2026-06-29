@@ -16,11 +16,49 @@ from ..vsr_blocks import (
     _compute_flows,
     _pixelshuffle_pack,
     _resblocks_with_input,
+    compiled_resblocks,
     conv,
     flow_warp,
     lrelu,
     resize,
 )
+
+# Per-checkpoint compiled step functions (built lazily, keyed by id(p)). The clean
+# step and the forward output step are pure and shape-stable, so mx.compile fuses
+# each into one graph (~1.06x / ~1.15x, byte-identical, profiled with the MLX cache
+# capped). spynet is intentionally left uncompiled -- compiling it drifts the fp16
+# flow by ~0.02, which would break bit-exactness.
+_CLEAN_COMPILE_CACHE: dict = {}
+_FWD_COMPILE_CACHE: dict = {}
+
+
+def _compiled_clean(p: dict):
+    fn = _CLEAN_COMPILE_CACHE.get(id(p))
+    if fn is None:
+        fn = mx.compile(
+            lambda f: conv(_resblocks_with_input(f, p, "image_cleaning.0"), p, "image_cleaning.1"))
+        _CLEAN_COMPILE_CACHE[id(p)] = fn
+    return fn
+
+
+def _compiled_fwd(p: dict):
+    """Compiled forward output step: (frame, warped feat_prop, backward feat) ->
+    (new feat_prop, HR residual). The cheap base-resize + residual scale + clip stay
+    outside so residual_strength is not baked into the graph."""
+    fn = _FWD_COMPILE_CACHE.get(id(p))
+    if fn is None:
+        def step(frame, feat_prop, backward_feat):
+            fp = _resblocks_with_input(
+                mx.concatenate([frame, feat_prop], axis=-1), p, "basicvsr.forward_resblocks")
+            out = mx.concatenate([backward_feat, fp], axis=-1)
+            out = lrelu(conv(out, p, "basicvsr.fusion", pad=0))
+            out = lrelu(_pixelshuffle_pack(out, p, "basicvsr.upsample1"))
+            out = lrelu(_pixelshuffle_pack(out, p, "basicvsr.upsample2"))
+            out = lrelu(conv(out, p, "basicvsr.conv_hr"))
+            return fp, conv(out, p, "basicvsr.conv_last")
+        fn = mx.compile(step)
+        _FWD_COMPILE_CACHE[id(p)] = fn
+    return fn
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _DEFAULT_WEIGHTS = "realbasicvsr_x4.safetensors"
@@ -96,7 +134,7 @@ def _clean(frames: list, p: dict, dynamic_refine_thres: float, max_iters: int) -
         next_frames = []
         means = []
         for f in cleaned:
-            residue = conv(_resblocks_with_input(f, p, "image_cleaning.0"), p, "image_cleaning.1")
+            residue = _compiled_clean(p)(f)
             nf = f + residue
             mean_abs = mx.mean(mx.abs(residue.astype(mx.float32)))
             mx.eval(nf, mean_abs)
@@ -164,7 +202,7 @@ def _basicvsr(frames: list, p: dict, residual_strength: float,
             feat_prop = flow_warp(feat_prop, flows_backward[i])
             if use_mask:
                 feat_prop = feat_prop * mask_b[i]
-        feat_prop = _resblocks_with_input(
+        feat_prop = compiled_resblocks(
             mx.concatenate([frames[i], feat_prop], axis=-1),
             p,
             "basicvsr.backward_resblocks",
@@ -179,20 +217,10 @@ def _basicvsr(frames: list, p: dict, residual_strength: float,
             feat_prop = flow_warp(feat_prop, flows_forward[i - 1])
             if use_mask:
                 feat_prop = feat_prop * mask_f[i - 1]
-        feat_prop = _resblocks_with_input(
-            mx.concatenate([frame, feat_prop], axis=-1),
-            p,
-            "basicvsr.forward_resblocks",
-        )
-        out = mx.concatenate([backward_feats[i], feat_prop], axis=-1)
-        out = lrelu(conv(out, p, "basicvsr.fusion", pad=0))
-        out = lrelu(_pixelshuffle_pack(out, p, "basicvsr.upsample1"))
-        out = lrelu(_pixelshuffle_pack(out, p, "basicvsr.upsample2"))
-        out = lrelu(conv(out, p, "basicvsr.conv_hr"))
-        residual = conv(out, p, "basicvsr.conv_last")
+        feat_prop, residual = _compiled_fwd(p)(frame, feat_prop, backward_feats[i])
         base = resize(frame, h * 4, w * 4, False)
         out = mx.clip(base + residual * float(residual_strength), 0.0, 1.0)
-        mx.eval(out)
+        mx.eval(out, feat_prop)
         outs.append(out)
     return outs
 
