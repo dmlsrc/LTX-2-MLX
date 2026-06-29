@@ -12,29 +12,15 @@ from typing import Any
 
 import mlx.core as mx
 
-try:
-    from ..basicvsrpp.net import (
-        _compute_flows,
-        _pixelshuffle_pack,
-        _resblocks_with_input,
-        conv,
-        flow_warp,
-        lrelu,
-        resize,
-    )
-except ImportError:   # running net.py directly as a script
-    import sys
-
-    sys.path.append(str(Path(__file__).resolve().parents[1] / "basicvsrpp"))
-    from net import (  # type: ignore
-        _compute_flows,
-        _pixelshuffle_pack,
-        _resblocks_with_input,
-        conv,
-        flow_warp,
-        lrelu,
-        resize,
-    )
+from ..vsr_blocks import (
+    _compute_flows,
+    _pixelshuffle_pack,
+    _resblocks_with_input,
+    conv,
+    flow_warp,
+    lrelu,
+    resize,
+)
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _DEFAULT_WEIGHTS = "realbasicvsr_x4.safetensors"
