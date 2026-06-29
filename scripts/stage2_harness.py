@@ -28,7 +28,7 @@ REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
-import generate as gen  # noqa: E402
+from LTX_2_MLX import generate as gen  # noqa: E402
 
 from LTX_2_MLX.pipelines.common import audio_modality_from_state, modality_from_state  # noqa: E402
 from LTX_2_MLX.progress import StackedPhaseBars  # noqa: E402
