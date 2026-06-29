@@ -351,3 +351,67 @@ class McTemporalDenoiser:
             if len(self._hist) > self.window:
                 self._hist.pop(0)
         self._idx += 1
+
+
+def luma_chroma_blend(orig: Any, new: Any, a_luma: float, a_chroma: float) -> Any:
+    """Recombine `orig` and `new` (both (H,W,3) RGB in [0,1]) with separate blend
+    strengths for luma and chroma, BT.601 full-range: the output luma is
+    lerp(orig, new, a_luma) and the chroma is lerp(orig, new, a_chroma). a=1 takes the
+    new (denoised) value, a=0 keeps the original; a_luma=a_chroma=1 returns `new` exactly.
+    Computed in float32 -- the YCbCr round-trip divides by the chroma scales, which fp16
+    coarsens."""
+    Kr, Kg, Kb, Cb, Cr = 0.299, 0.587, 0.114, 1.772, 1.402
+    o = orig.astype(mx.float32)
+    n = new.astype(mx.float32)
+
+    def _yc(x):
+        y = Kr * x[..., 0:1] + Kg * x[..., 1:2] + Kb * x[..., 2:3]
+        return y, (x[..., 2:3] - y) / Cb, (x[..., 0:1] - y) / Cr     # y, cb, cr
+
+    yo, cbo, cro = _yc(o)
+    yn, cbn, crn = _yc(n)
+    y = yo + a_luma * (yn - yo)
+    cb = cbo + a_chroma * (cbn - cbo)
+    cr = cro + a_chroma * (crn - cro)
+    r = y + Cr * cr
+    b = y + Cb * cb
+    g = (y - Kr * r - Kb * b) / Kg
+    return mx.clip(mx.concatenate([r, g, b], axis=-1), 0.0, 1.0)
+
+
+class LumaChromaDenoiser:
+    """Wrap any harness denoiser to apply separate luma/chroma blend strengths between
+    its input and output -- e.g. denoise chroma hard (a_chroma=1) while keeping luma
+    texture (a_luma<1), the split a single joint RGB sigma cannot do. The base still
+    denoises RGB jointly; this only re-weights its effect per channel group on the way
+    out.
+
+    Threads the input frame through the base's token so delay-line denoisers (FastDVDnet)
+    still pair each delayed output with its own input; per-frame denoisers (spatial / mc)
+    blend in step. Presents the feed/flush interface either way."""
+
+    def __init__(self, base: Any, luma_strength: float = 1.0, chroma_strength: float = 1.0):
+        self._base = base
+        self._al = float(luma_strength)
+        self._ac = float(chroma_strength)
+
+    def reset(self) -> None:
+        self._base.reset()
+
+    def close(self) -> None:
+        if hasattr(self._base, "close"):
+            self._base.close()
+
+    def _blend(self, orig: Any, den: Any) -> Any:
+        return luma_chroma_blend(orig, den, self._al, self._ac)
+
+    def feed(self, rgb: Any, token: Any = None) -> list:
+        if hasattr(self._base, "feed"):
+            return [(self._blend(o, d), t)
+                    for d, (o, t) in self._base.feed(rgb, token=(rgb, token))]
+        return [(self._blend(rgb, self._base.denoise(rgb)), token)]
+
+    def flush(self) -> list:
+        if hasattr(self._base, "flush"):
+            return [(self._blend(o, d), t) for d, (o, t) in self._base.flush()]
+        return []
