@@ -735,7 +735,7 @@ def run(args: argparse.Namespace) -> None:
         elif args.deblock == "fbcnn":
             from LTX_2_MLX.videotoolbox.fbcnn import FbcnnDeblocker
             deb = FbcnnDeblocker(args.deblock_weights or os.environ.get("FBCNN_WEIGHTS"),
-                                 quality=args.fbcnn_quality)
+                                 quality=args.fbcnn_quality, strength=args.fbcnn_strength)
 
         up: Any = None
         if args.spatial_mode == "basicvsrpp":
@@ -1259,7 +1259,17 @@ def main() -> None:
             "the JPEG-trained estimator reads loop-filtered H.264/HEVC as near-lossless "
             "(~QF 96) and barely acts -- on compressed video PIN a value: 25-50, going "
             "lower for heavier compression. A fixed value also avoids the shot-to-shot "
-            "flicker blind can show (single-image net)."
+            "flicker blind can show (single-image net), and skips the (then-unused) QF "
+            "predictor, ~1.1x faster."
+        ),
+    )
+    parser.add_argument(
+        "--fbcnn-strength", type=float, default=1.0, metavar="A",
+        help=(
+            "Linear dry/wet blend of FBCNN's correction for --deblock fbcnn: out = "
+            "(1-A)*input + A*fbcnn(input). 1.0 = full (default); <1 keeps more original "
+            "texture (and faint residual artifacts) uniformly; >1 over-drives (can ring). "
+            "A QF-independent strength dial, complementary to --fbcnn-quality."
         ),
     )
     parser.add_argument(
