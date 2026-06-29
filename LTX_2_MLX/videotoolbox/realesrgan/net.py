@@ -20,13 +20,30 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..weights import resolve_weights as _resolve_weights
+
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
-_DEFAULT_WEIGHTS = "realesr_general_x4v3.safetensors"   # fast/gentle default
 _IN_CH_TO_SCALE = {3: 4, 12: 2, 48: 1}   # conv_first in-channels -> output scale
 
+# Bundled checkpoints, by short token. RRDBNet (x4plus/realesrnet/bsrgan/bsrnet) are
+# crisp-GAN or MSE-faithful; the SRVGG 'general' is the fast, gentle default.
+_VARIANTS = {
+    "general":    "realesr_general_x4v3.safetensors",   # SRVGG, fast, gentle (default)
+    "x4plus":     "realesrgan_x4plus.safetensors",      # RRDBNet, GAN, crisp
+    "realesrnet": "realesrnet_x4plus.safetensors",      # RRDBNet, MSE, faithful
+    "bsrgan":     "bsrgan_x4.safetensors",              # RRDBNet, BSRGAN degradation
+    "bsrnet":     "bsrnet_x4.safetensors",              # RRDBNet, BSRNet (no GAN)
+}
+_DEFAULT_VARIANT = "general"
 
-def default_weights_path() -> Path:
-    return _WEIGHTS_DIR / _DEFAULT_WEIGHTS
+
+def default_weights_path(variant: str = _DEFAULT_VARIANT) -> Path:
+    return _WEIGHTS_DIR / _VARIANTS[variant]
+
+
+def resolve_weights(spec: Any = None) -> Path:
+    """Bundled variant token (general/x4plus/realesrnet/bsrgan/bsrnet) or a path."""
+    return _resolve_weights(spec, _VARIANTS, _WEIGHTS_DIR, _DEFAULT_VARIANT)
 
 
 def wdn_path_for(weights: str | Path | None) -> Path:

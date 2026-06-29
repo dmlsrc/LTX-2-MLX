@@ -32,7 +32,7 @@ class BasicVsrUpscaler(WindowedUpscaler):
     ~`window` buffered LR frames regardless of clip length."""
 
     def __init__(self, weights: Any = None, window: int = 14, trim: int = 2):
-        self._p = net.load_params(weights)
+        self._p = net.load_params(net.resolve_weights(weights))
         # Window must span both trim edges plus >=1 interior frame to emit.
         super().__init__(window=max(int(window), 2 * int(trim) + 1), trim=trim)
 

@@ -23,6 +23,7 @@ class RealEsrganUpscaler:
     """feed()/flush() driver for the per-frame RRDBNet upscaler."""
 
     def __init__(self, weights: Any = None, denoise_strength: float = 1.0):
+        weights = net.resolve_weights(weights)   # variant token or path -> file
         wdn = net.wdn_path_for(weights) if float(denoise_strength) < 1.0 else None
         self._p = net.load_params(weights, wdn_path=wdn,
                                   denoise_strength=denoise_strength)

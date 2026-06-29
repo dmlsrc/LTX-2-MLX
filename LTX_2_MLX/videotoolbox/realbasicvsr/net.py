@@ -22,6 +22,7 @@ from ..vsr_blocks import (
     lrelu,
     resize,
 )
+from ..weights import resolve_weights as _resolve_weights
 
 # Per-checkpoint compiled step functions (built lazily, keyed by id(p)). The clean
 # step and the forward output step are pure and shape-stable, so mx.compile fuses
@@ -61,11 +62,18 @@ def _compiled_fwd(p: dict):
     return fn
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
-_DEFAULT_WEIGHTS = "realbasicvsr_x4.safetensors"
+# Only one bundled checkpoint, but exposed as a token for a uniform --weights API.
+_VARIANTS = {"x4": "realbasicvsr_x4.safetensors"}
+_DEFAULT_VARIANT = "x4"
 
 
 def default_weights_path() -> Path:
-    return _WEIGHTS_DIR / _DEFAULT_WEIGHTS
+    return _WEIGHTS_DIR / _VARIANTS[_DEFAULT_VARIANT]
+
+
+def resolve_weights(spec: Any = None) -> Path:
+    """Bundled variant token (x4) or a path."""
+    return _resolve_weights(spec, _VARIANTS, _WEIGHTS_DIR, _DEFAULT_VARIANT)
 
 
 def _load_safetensors(path: Path) -> dict:

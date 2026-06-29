@@ -36,7 +36,7 @@ class RealBasicVsrUpscaler(WindowedUpscaler):
         residual_strength: float = 1.0,
         flow_consistency: float = 0.0,
     ):
-        self._p = net.load_params(weights)
+        self._p = net.load_params(net.resolve_weights(weights))
         t, w = int(trim), int(window)
         if t < 0:
             raise ValueError(f"RealBasicVSR trim must be >= 0; got {t}")

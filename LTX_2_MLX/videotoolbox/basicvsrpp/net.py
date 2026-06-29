@@ -26,6 +26,7 @@ from ..vsr_blocks import (
     lrelu,
     resize,
 )
+from ..weights import resolve_weights as _resolve_weights
 from .deform_conv import deform_conv2d
 
 # Per-checkpoint compiled reconstruction/upsample tail (keyed by id(p)).
@@ -63,6 +64,11 @@ def default_weights_path(variant: str = "reds4") -> Path:
     if variant not in _VARIANTS:
         raise ValueError(f"unknown basicvsrpp variant {variant!r}; choose from {list(_VARIANTS)}")
     return _WEIGHTS_DIR / _VARIANTS[variant]
+
+
+def resolve_weights(spec: Any = None) -> Path:
+    """Bundled variant token (reds4/vimeo90k_bi/vimeo90k_bd/ntire_vsr) or a path."""
+    return _resolve_weights(spec, _VARIANTS, _WEIGHTS_DIR, "reds4")
 
 
 def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict:

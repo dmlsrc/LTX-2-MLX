@@ -729,23 +729,17 @@ def run(args: argparse.Namespace) -> None:
 
         up: Any = None
         if args.spatial_mode == "basicvsrpp":
-            from LTX_2_MLX.videotoolbox.basicvsrpp import net as bvnet
             from LTX_2_MLX.videotoolbox.basicvsrpp.upscaler import BasicVsrUpscaler
-            weights = (args.basicvsrpp_weights or os.environ.get("BASICVSRPP_WEIGHTS")
-                       or str(bvnet.default_weights_path(args.basicvsrpp_variant)))
+            # weights spec: --basicvsrpp-weights (token or path) > env > --variant token
             up = BasicVsrUpscaler(
-                weights, window=args.basicvsrpp_window, trim=args.basicvsrpp_trim,
+                args.basicvsrpp_weights or os.environ.get("BASICVSRPP_WEIGHTS")
+                or args.basicvsrpp_variant,
+                window=args.basicvsrpp_window, trim=args.basicvsrpp_trim,
             )
         elif args.spatial_mode == "realbasicvsr":
-            from LTX_2_MLX.videotoolbox.realbasicvsr import net as rbvnet
             from LTX_2_MLX.videotoolbox.realbasicvsr.upscaler import RealBasicVsrUpscaler
-            weights = (
-                args.realbasicvsr_weights
-                or os.environ.get("REALBASICVSR_WEIGHTS")
-                or str(rbvnet.default_weights_path())
-            )
             up = RealBasicVsrUpscaler(
-                weights,
+                args.realbasicvsr_weights or os.environ.get("REALBASICVSR_WEIGHTS"),
                 window=args.realbasicvsr_window,
                 trim=args.realbasicvsr_trim,
                 dynamic_refine_thres=args.realbasicvsr_dynamic_refine_thres,
@@ -1236,10 +1230,11 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--basicvsrpp-weights", default=None, metavar="PATH",
+        "--basicvsrpp-weights", default=None, metavar="VARIANT|PATH",
         help=(
-            "Override BasicVSR++ weights (.safetensors) for --spatial-mode "
-            "basicvsrpp, bypassing --basicvsrpp-variant (or $BASICVSRPP_WEIGHTS)."
+            "BasicVSR++ weights for --spatial-mode basicvsrpp: a bundled variant token "
+            "(reds4/vimeo90k_bi/vimeo90k_bd/ntire_vsr) or a .safetensors path. Overrides "
+            "--basicvsrpp-variant (or $BASICVSRPP_WEIGHTS)."
         ),
     )
     parser.add_argument(
@@ -1260,12 +1255,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--realbasicvsr-weights", default=None, metavar="PATH",
+        "--realbasicvsr-weights", default=None, metavar="VARIANT|PATH",
         help=(
-            "Override RealBasicVSR weights (.safetensors) for --spatial-mode "
-            "realbasicvsr (or $REALBASICVSR_WEIGHTS). Convert the .pth with "
-            "scripts/pth_to_safetensors.py --only-prefix generator_ema. "
-            "--strip-prefix generator_ema."
+            "RealBasicVSR weights for --spatial-mode realbasicvsr: the bundled variant "
+            "token 'x4' (default) or a .safetensors path (or $REALBASICVSR_WEIGHTS). "
+            "Convert a .pth with scripts/pth_to_safetensors.py --only-prefix "
+            "generator_ema. --strip-prefix generator_ema."
         ),
     )
     parser.add_argument(
@@ -1318,13 +1313,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--realesrgan-weights", default=None, metavar="PATH",
+        "--realesrgan-weights", default=None, metavar="VARIANT|PATH",
         help=(
-            "RRDBNet/SRVGG checkpoint (.safetensors) for --spatial-mode "
-            "realesrgan (or $REALESRGAN_WEIGHTS). Default realesr_general_x4v3 "
-            "(SRVGG: fast, gentle, real-world). Others bundled: realesrgan_x4plus "
-            "(RRDBNet crisp/GAN, ~20x slower), realesrnet_x4plus / bsrnet_x4 "
-            "(MSE, faithful/soft), bsrgan_x4. Convert a .pth with "
+            "RRDBNet/SRVGG weights for --spatial-mode realesrgan: a bundled variant "
+            "token or a .safetensors path (or $REALESRGAN_WEIGHTS). Tokens: general "
+            "(default; SRVGG, fast/gentle), x4plus (RRDBNet crisp/GAN, ~20x slower), "
+            "realesrnet / bsrnet (MSE, faithful/soft), bsrgan. Convert a .pth with "
             "scripts/pth_to_safetensors.py."
         ),
     )
