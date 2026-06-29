@@ -1255,9 +1255,11 @@ def main() -> None:
         "--fbcnn-quality", type=float, default=None, metavar="QF",
         help=(
             "Assumed JPEG quality factor (1-100, lower = more compressed = stronger "
-            "removal) for --deblock fbcnn. Default None = blind per-frame estimate. "
-            "FBCNN is single-image, so blind can flicker shot-to-shot on video; pin a "
-            "value for a temporally stable result."
+            "removal) for --deblock fbcnn. Default None = blind per-frame estimate, but "
+            "the JPEG-trained estimator reads loop-filtered H.264/HEVC as near-lossless "
+            "(~QF 96) and barely acts -- on compressed video PIN a value: 25-50, going "
+            "lower for heavier compression. A fixed value also avoids the shot-to-shot "
+            "flicker blind can show (single-image net)."
         ),
     )
     parser.add_argument(
