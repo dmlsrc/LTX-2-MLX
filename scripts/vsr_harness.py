@@ -95,6 +95,7 @@ from LTX_2_MLX.videotoolbox import (
     autorelease_pool,
     require_pyobjc,
 )
+from LTX_2_MLX.videotoolbox import color as _color
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
 from LTX_2_MLX.videotoolbox import video_reader as _vr
 from LTX_2_MLX.videotoolbox.comparison import render_comparison
@@ -442,9 +443,13 @@ def run(args: argparse.Namespace) -> None:
     loop_win_start, loop_win_end = 0, None
     win_start, win_end = 0, None  # resolved input window (both paths set these)
     # Output color tags: the video path fills these from the source container;
-    # the latent path (no source container) leaves them None -> BT.709 default.
-    color_props: dict | None = None
-    cv_color: tuple | None = None
+    # the latent path has no source container, so use the SDR BT.709/video-range
+    # default explicitly. Passing cv_color also enables the writer's deterministic
+    # RGBAHalf->YUV conversion for latent/uploaded-buffer producers.
+    _resolved_color = _color.resolve({"full_range": False}, "bt709")
+    color_props: dict | None = _color.av_color_properties(_resolved_color)
+    cv_color: tuple | None = _color.cv_triple(_resolved_color)
+    output_full_range = _resolved_color[3]
 
     # ---- Input source ------------------------------------------------------
     if args.latent:
@@ -520,15 +525,15 @@ def run(args: argparse.Namespace) -> None:
         in_w, in_h, source_fps, total_frames, src_transform = _vr.probe_video(
             Path(args.video),
         )
-        from LTX_2_MLX.videotoolbox import color as _color
         _src_color = _vr.probe_color(Path(args.video))
-        _resolved = _color.resolve(_src_color, args.source_color)
-        color_props = _color.av_color_properties(_resolved)
-        cv_color = _color.cv_triple(_resolved)
+        _resolved_color = _color.resolve(_src_color, args.source_color)
+        color_props = _color.av_color_properties(_resolved_color)
+        cv_color = _color.cv_triple(_resolved_color)
+        output_full_range = _resolved_color[3]
         _origin = ("tagged" if _src_color["tagged"]
                    else "untagged, VT guessed" if _src_color.get("guessed")
                    else "untagged")
-        print(f"Source color: {_origin} -> output {_color.describe(_resolved)}")
+        print(f"Source color: {_origin} -> output {_color.describe(_resolved_color)}")
         if args.source_color != "auto":
             print(f"  (forcing the source to be DECODED as {args.source_color}, "
                   "overriding VideoToolbox's resolution guess)")
@@ -556,7 +561,7 @@ def run(args: argparse.Namespace) -> None:
             # matrix, overriding VideoToolbox's resolution-based guess. (NV12 'fast'
             # keeps the default decode; the LowLatency scaler consumes YUV directly.)
             chunks = _vr.iter_forced_color_chunks(
-                Path(args.video), vsr_src_fmt, cv_color[2], _resolved[3],
+                Path(args.video), vsr_src_fmt, cv_color[2], output_full_range,
                 chunk_size=buf_chunk, start_frame=win_start, end_frame=win_end,
             )
         else:
@@ -684,7 +689,7 @@ def run(args: argparse.Namespace) -> None:
                 source_attrs=producer_attrs,
                 color_props=color_props,
                 cv_color=cv_color,
-                full_range=_resolved[3],
+                full_range=output_full_range,
                 **audio_kwargs,
             )
             # The writer feeds the encoder 10-bit YUV it converts itself (yuv.py),
@@ -1148,8 +1153,9 @@ def main() -> None:
             "color tags, or VideoToolbox's resolution guess when untagged (SD "
             "width -> BT.601, HD -> BT.709). bt601/bt709/bt2020 FORCE the source to "
             "be decoded as that matrix -- the fix for untagged/mistagged clips VT "
-            "guesses wrong (it decodes raw YUV and re-interprets it, not just an "
-            "output tag). The output is tagged to match."
+            "guesses wrong. For balanced/image it decodes raw YUV and re-interprets "
+            "it (not just an output tag); fast/NV12 keeps VideoToolbox's decode and "
+            "only re-tags. The output is tagged to match."
         ),
     )
     parser.add_argument(

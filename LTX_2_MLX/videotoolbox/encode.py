@@ -45,6 +45,7 @@ from typing import Any
 import mlx.core as mx
 
 from ..progress import StackedPhaseBars
+from . import color as _color
 from . import pixel_buffers as _pb
 from ._compat import autorelease_pool, require_pyobjc
 from .audio import AudioTrack
@@ -308,10 +309,17 @@ def encode_video_videotoolbox(
         else:
             writer_src_fmt = _pb.PIX_NV12
 
+        resolved_color = _color.resolve({"full_range": False}, "bt709")
+        color_props = _color.av_color_properties(resolved_color)
+        cv_color = _color.cv_triple(resolved_color)
+        writer_yuv_feed = writer_src_fmt == _pb.PIX_RGBAHALF
+
         # Writer + pool wiring.  Zero-copy hookups: VTFRC writes into the
         # writer's adaptor pool when active; VSR writes into its own dst
         # pool when VTFRC is between (a copy at the VT call boundary), or
         # directly into the writer's adaptor pool when there is no VTFRC.
+        # If the writer is doing the explicit RGBAHalf->YUV conversion, its
+        # adaptor pool is YUV; keep the producer on its own RGBAHalf pool.
         writer = AVWriter(
             output_path,
             width=out_w, height=out_h, fps=target_fps,
@@ -319,13 +327,18 @@ def encode_video_videotoolbox(
             profile=profile,
             quality=encode_quality,
             label="encode",
+            color_props=color_props,
+            cv_color=cv_color if writer_yuv_feed else None,
+            full_range=False,
             audio_track=audio_track,
             audio_codec=audio_codec,
         )
         if vtfrc is not None:
-            vtfrc.use_dst_pool(writer.adaptor.pixelBufferPool())
+            if not writer_yuv_feed:
+                vtfrc.use_dst_pool(writer.adaptor.pixelBufferPool())
         elif vsr is not None:
-            vsr.use_dst_pool(writer.adaptor.pixelBufferPool())
+            if not writer_yuv_feed:
+                vsr.use_dst_pool(writer.adaptor.pixelBufferPool())
 
         # Optional "save the un-processed original alongside the VSR/VTFRC
         # result" companion writer.  Only meaningful when some VT post-
@@ -360,6 +373,7 @@ def encode_video_videotoolbox(
             else:
                 orig_src_fmt = _pb.PIX_NV12
                 orig_profile = HEVC_PROFILE_MAIN10
+            orig_yuv_feed = orig_src_fmt == _pb.PIX_RGBAHALF
             writer_orig = AVWriter(
                 orig_path,
                 width=in_w, height=in_h, fps=fps,
@@ -367,9 +381,14 @@ def encode_video_videotoolbox(
                 profile=orig_profile,
                 quality=encode_quality,
                 label="encode_orig",
+                color_props=color_props,
+                cv_color=cv_color if orig_yuv_feed else None,
+                full_range=False,
                 audio_track=audio_track,
                 audio_codec=audio_codec,
             )
+        else:
+            orig_yuv_feed = False
 
         # Optional audio sidecar WAV.
         sidecar_path: Path | None = None
@@ -446,7 +465,8 @@ def encode_video_videotoolbox(
                 # formats and both source dtypes (uint8 RGB / fp16 RGBA).
                 if writer_orig is not None:
                     orig_pb = _allocate_writer_src_buffer(
-                        writer_orig.adaptor, in_w, in_h, orig_src_fmt,
+                        None if orig_yuv_feed else writer_orig.adaptor,
+                        in_w, in_h, orig_src_fmt,
                     )
                     _pb.upload_frame_to_buffer(src_frame, orig_pb)
                     writer_orig.append(orig_pb)
