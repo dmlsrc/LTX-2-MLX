@@ -732,6 +732,10 @@ def run(args: argparse.Namespace) -> None:
             from LTX_2_MLX.videotoolbox.stdf.deblocker import StdfDeblocker
             deb = StdfDeblocker(args.deblock_weights or os.environ.get("STDF_WEIGHTS"),
                                 strength=args.deblock_strength)
+        elif args.deblock == "fbcnn":
+            from LTX_2_MLX.videotoolbox.fbcnn import FbcnnDeblocker
+            deb = FbcnnDeblocker(args.deblock_weights or os.environ.get("FBCNN_WEIGHTS"),
+                                 quality=args.fbcnn_quality)
 
         up: Any = None
         if args.spatial_mode == "basicvsrpp":
@@ -1222,20 +1226,22 @@ def main() -> None:
         help="Also write the muxed audio as <stem>_audio.wav next to the MP4s.",
     )
     parser.add_argument(
-        "--deblock", choices=["off", "stdf"], default="off",
+        "--deblock", choices=["off", "stdf", "fbcnn"], default="off",
         help=(
             "Pre-upscale compression-artifact deblock, applied before denoise + VSR "
             "(deblock before SR amplifies the blocking). off (default); stdf = STDF "
-            "deformable spatio-temporal fusion (MLX, learned; HEVC-trained, luma-only "
-            "7-frame window, weights bundled). Routes frames through the MLX upload path."
+            "deformable spatio-temporal fusion (HEVC-trained, luma-only 7-frame window, "
+            "weights bundled); fbcnn = FBCNN flexible blind JPEG-artifact removal "
+            "(single-image RGB, ~72M params, weights downloaded not bundled -- see "
+            "videotoolbox/fbcnn/weights/README.md). Routes frames through the MLX path."
         ),
     )
     parser.add_argument(
         "--deblock-weights", default=None, metavar="VARIANT|PATH",
         help=(
-            "STDF weights for --deblock stdf: a bundled variant token (mfqev2 = HEVC "
-            "multi-QP, the default; vimeo90k = All-Intra QP37) or a .safetensors path "
-            "(or $STDF_WEIGHTS)."
+            "Weights for --deblock. stdf: a bundled token (mfqev2 = HEVC multi-QP, the "
+            "default; vimeo90k = All-Intra QP37) or a path (or $STDF_WEIGHTS). fbcnn: a "
+            "fbcnn_color.safetensors path (or $FBCNN_WEIGHTS); not bundled."
         ),
     )
     parser.add_argument(
@@ -1243,6 +1249,15 @@ def main() -> None:
         help=(
             "Scale the STDF deblock residual (1.0 = full, default; lower keeps more "
             "fine texture at the cost of less deblocking -- try 0.5-0.7 on faces)."
+        ),
+    )
+    parser.add_argument(
+        "--fbcnn-quality", type=float, default=None, metavar="QF",
+        help=(
+            "Assumed JPEG quality factor (1-100, lower = more compressed = stronger "
+            "removal) for --deblock fbcnn. Default None = blind per-frame estimate. "
+            "FBCNN is single-image, so blind can flicker shot-to-shot on video; pin a "
+            "value for a temporally stable result."
         ),
     )
     parser.add_argument(
