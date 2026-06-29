@@ -7,6 +7,9 @@ single frame can't be upscaled in isolation. We slide a window of `window`
 frames, emit its interior, and trim `trim` warm-up frames at each window join
 (the propagation's transient edge). Interior frames match the full-clip result
 to ~50 dB; only the clip ends use one-sided context, exactly as the reference.
+
+The sliding-window feed()/flush() machinery lives in ../upscaler_base; this
+wrapper only loads the BasicVSR++ weights and upscales each window.
 """
 from __future__ import annotations
 
@@ -14,15 +17,15 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..upscaler_base import WindowedUpscaler
+
 try:
     from . import net
 except ImportError:   # running directly as a script
     import net
 
-SCALE = 4
 
-
-class BasicVsrUpscaler:
+class BasicVsrUpscaler(WindowedUpscaler):
     """Windowed feed()/flush() driver for net.upscale. Each call to feed(rgb)
     buffers a frame and returns a list of (upscaled_rgb_4x, token) tuples once
     enough lookahead has arrived; flush() drains the tail. Memory is bounded to
@@ -30,55 +33,11 @@ class BasicVsrUpscaler:
 
     def __init__(self, weights: Any = None, window: int = 14, trim: int = 2):
         self._p = net.load_params(weights)
-        self._T = int(trim)
-        self._W = max(int(window), 2 * self._T + 1)
-        self.reset()
+        # Window must span both trim edges plus >=1 interior frame to emit.
+        super().__init__(window=max(int(window), 2 * int(trim) + 1), trim=trim)
 
-    def reset(self) -> None:
-        self._frames: list = []     # sliding LR buffer (1,H,W,3)
-        self._tokens: list = []
-        self._base = 0              # global index of _frames[0]
-        self._emitted = 0          # global index of the next frame to emit
-
-    @staticmethod
-    def _batch(rgb: Any) -> Any:
-        a = rgb if rgb.ndim == 4 else rgb[None]
-        return a[..., :3].astype(mx.float32)
-
-    def feed(self, rgb: Any, token: Any = None) -> list:
-        self._frames.append(self._batch(rgb))
-        self._tokens.append(token)
-        out: list = []
-        while (self._base + len(self._frames)) >= max(0, self._emitted - self._T) + self._W:
-            ws = max(0, self._emitted - self._T)
-            out.extend(self._run(ws, ws + self._W, last=False))
-        # Retain enough for the next interior window (back to emitted-T) AND a
-        # full-width flush window (back to total-W); drop only what neither needs.
-        total = self._base + len(self._frames)
-        keep = max(0, min(self._emitted - self._T, total - self._W)) - self._base
-        if keep > 0:
-            self._frames = self._frames[keep:]
-            self._tokens = self._tokens[keep:]
-            self._base += keep
-        return out
-
-    def flush(self) -> list:
-        total = self._base + len(self._frames)
-        if self._emitted >= total:
-            self.reset()
-            return []
-        ws = max(0, min(self._emitted - self._T, total - self._W))
-        out = self._run(ws, total, last=True)
-        self.reset()
-        return out
-
-    def _run(self, ws: int, we: int, last: bool) -> list:
-        sr = net.upscale(self._frames[ws - self._base:we - self._base], self._p)
-        mx.eval(*sr)
-        end = we if last else we - self._T
-        out = [(sr[g - ws][0], self._tokens[g - self._base]) for g in range(self._emitted, end)]
-        self._emitted = end
-        return out
+    def _upscale_window(self, frames: list) -> list:
+        return net.upscale(frames, self._p)
 
 
 if __name__ == "__main__":

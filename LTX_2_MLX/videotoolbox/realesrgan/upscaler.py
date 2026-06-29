@@ -11,6 +11,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..upscaler_base import to_rgb_batch
+
 try:
     from . import net
 except ImportError:   # running directly as a script
@@ -30,13 +32,8 @@ class RealEsrganUpscaler:
     def reset(self) -> None:
         pass
 
-    @staticmethod
-    def _batch(rgb: Any) -> Any:
-        a = rgb if rgb.ndim == 4 else rgb[None]
-        return a[..., :3].astype(mx.float32)
-
     def feed(self, rgb: Any, token: Any = None) -> list:
-        sr = net.upscale([self._batch(rgb)], self._p)[0]
+        sr = net.upscale([to_rgb_batch(rgb)], self._p)[0]
         mx.eval(sr)
         return [(sr[0], token)]
 
