@@ -127,10 +127,12 @@ def _qe(x: Any, p: dict) -> Any:
     return _conv(out, p, "qenet.out_conv")
 
 
-def deblock(frames: list, p: dict) -> Any:
+def deblock(frames: list, p: dict, strength: float = 1.0) -> Any:
     """Deblock the center of a (2*radius+1)-frame window. `frames` is a list of
     (N,H,W,in_nc) arrays in [0,1] (in_nc=1 for the bundled Y-only models); returns the
-    deblocked center frame (N,H,W,in_nc). The net predicts a residual onto the center."""
+    deblocked center frame (N,H,W,in_nc). The net predicts a residual onto the center;
+    `strength` scales that residual (1.0 = full deblock, 0.0 = passthrough) to trade
+    artifact removal against softening of fine texture."""
     in_nc, input_len, nb = _config(p)
     radius = (input_len - 1) // 2
     if len(frames) != input_len:
@@ -144,7 +146,7 @@ def deblock(frames: list, p: dict) -> Any:
     res = _qe(_stdf(xp, p, nb), p)
     centers = mx.concatenate(
         [xp[..., radius + c * input_len:radius + c * input_len + 1] for c in range(in_nc)], axis=-1)
-    return (res + centers)[:, :h, :w, :]
+    return (centers + float(strength) * res)[:, :h, :w, :]
 
 
 if __name__ == "__main__":

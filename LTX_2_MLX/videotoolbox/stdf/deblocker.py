@@ -25,8 +25,9 @@ _CB, _CR = 1.772, 1.402
 class StdfDeblocker:
     """RGB-in / RGB-out streaming compressed-video deblocker (luma-only STDF)."""
 
-    def __init__(self, weights: Any = None, dtype: Any = mx.float16):
+    def __init__(self, weights: Any = None, strength: float = 1.0, dtype: Any = mx.float16):
         self._p = net.load_params(weights, dtype=dtype)
+        self._strength = float(strength)
         in_nc, self._ilen, _ = net._config(self._p)
         if in_nc != 1:
             raise ValueError(f"StdfDeblocker expects a Y-only STDF checkpoint (in_nc=1), got {in_nc}")
@@ -77,7 +78,7 @@ class StdfDeblocker:
     def _emit_one(self, last: int) -> tuple:
         t = self._emitted
         window = [self._luma(t + d, last) for d in range(-self._radius, self._radius + 1)]
-        dy = net.deblock(window, self._p)                       # deblocked center luma
+        dy = net.deblock(window, self._p, self._strength)       # deblocked center luma
         _, rgb, tok = self._buf[t - self._base]
         out = self._recombine(rgb, dy)
         mx.eval(out)

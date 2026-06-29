@@ -730,7 +730,8 @@ def run(args: argparse.Namespace) -> None:
         deb: Any = None
         if args.deblock == "stdf":
             from LTX_2_MLX.videotoolbox.stdf.deblocker import StdfDeblocker
-            deb = StdfDeblocker(args.deblock_weights or os.environ.get("STDF_WEIGHTS"))
+            deb = StdfDeblocker(args.deblock_weights or os.environ.get("STDF_WEIGHTS"),
+                                strength=args.deblock_strength)
 
         up: Any = None
         if args.spatial_mode == "basicvsrpp":
@@ -1228,6 +1229,13 @@ def main() -> None:
             "STDF weights for --deblock stdf: a bundled variant token (mfqev2 = HEVC "
             "multi-QP, the default; vimeo90k = All-Intra QP37) or a .safetensors path "
             "(or $STDF_WEIGHTS)."
+        ),
+    )
+    parser.add_argument(
+        "--deblock-strength", type=float, default=1.0, metavar="S",
+        help=(
+            "Scale the STDF deblock residual (1.0 = full, default; lower keeps more "
+            "fine texture at the cost of less deblocking -- try 0.5-0.7 on faces)."
         ),
     )
     parser.add_argument(
