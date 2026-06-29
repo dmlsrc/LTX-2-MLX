@@ -1421,6 +1421,11 @@ def main() -> None:
         help="Also write a side-by-side <stem>_comparison.mp4 "
              "(NEAREST-upscaled pre vs VSR post).",
     )
+    parser.add_argument(
+        "--mlx-cache-limit-gb", type=float, default=1.0,
+        help="Cap MLX's buffer cache (GB) so per-frame allocation churn does not "
+             "grow into swap; 0 disables. Default 1.0, matching generate.py.",
+    )
     args = parser.parse_args()
 
     if args.latent and not args.weights:
@@ -1435,6 +1440,11 @@ def main() -> None:
                 "--realbasicvsr-window must be greater than 2*--realbasicvsr-trim; "
                 "use --realbasicvsr-trim 0 for reference-like chunks"
             )
+
+    if args.mlx_cache_limit_gb and args.mlx_cache_limit_gb > 0:
+        mx.set_cache_limit(int(args.mlx_cache_limit_gb * (1000 ** 3)))
+        mx.clear_cache()
+        print(f"MLX cache limit: {args.mlx_cache_limit_gb:g} GB")
 
     require_pyobjc()
     run(args)
