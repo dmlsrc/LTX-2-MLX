@@ -170,31 +170,39 @@ def _replicate_pad(x: Any, m: int) -> Any:
     return x
 
 
-def fbcnn(x: Any, p: dict, qf_input: Any = None, nb: int | None = None) -> tuple:
+def fbcnn(x: Any, p: dict, qf_input: Any = None, strength: float = 1.0,
+          nb: int | None = None) -> tuple:
     """Restore one batch. x: (N,H,W,in_nc) in [0,1]. qf_input: None = blind (use the
-    predicted qf), else a float or (N,1) in [0,1] model-space (higher = assume lower
-    JPEG quality = stronger removal). Returns (restored (N,H,W,in_nc), qf (N,1) predicted)."""
+    predicted qf), else a float or (N,1) in [0,1] model-space (higher = assume lower JPEG
+    quality = stronger removal). strength: linear dry/wet of the correction --
+    out = input + strength*(fbcnn(input) - input); 1.0 = full (default), <1 keeps texture
+    (and faint residual artifacts) uniformly, >1 over-drives. Returns (restored
+    (N,H,W,in_nc), qf (N,1)); qf is None when qf_input is given -- the QF predictor is
+    then skipped because its output would be unused (~10% of the convs)."""
     if nb is None:
         _, nb = _config(p)
     h, w = x.shape[1], x.shape[2]
     dt = p["m_head.weight"].dtype
-    x = _replicate_pad(x.astype(dt), 8)
+    x_in = x.astype(dt)
+    x = _replicate_pad(x_in, 8)
 
     x1 = _conv(x, p, "m_head")
     x2 = _down(x1, p, "m_down1", nb)
     x3 = _down(x2, p, "m_down2", nb)
     x4 = _down(x3, p, "m_down3", nb)
     xe = _body(x4, p, "m_body_encoder", nb)
-    qf = _qf_pred(xe, p, nb)
-    xd = _body(xe, p, "m_body_decoder", nb)
 
     n = x.shape[0]
     if qf_input is None:
+        qf = _qf_pred(xe, p, nb)                  # blind: estimate the QF
         emb_in = qf
-    elif isinstance(qf_input, (int, float)):
-        emb_in = mx.full((n, 1), float(qf_input), dtype=dt)
-    else:
-        emb_in = mx.array(qf_input).reshape(n, 1).astype(dt)
+    else:                                         # fixed QF -> skip the unused predictor
+        qf = None
+        emb_in = (mx.full((n, 1), float(qf_input), dtype=dt)
+                  if isinstance(qf_input, (int, float))
+                  else mx.array(qf_input).reshape(n, 1).astype(dt))
+
+    xd = _body(xe, p, "m_body_decoder", nb)
     emb = _qf_embed(emb_in, p)
     g3, b3 = _film(emb, p, "3")
     g2, b2 = _film(emb, p, "2")
@@ -213,8 +221,36 @@ def fbcnn(x: Any, p: dict, qf_input: Any = None, nb: int | None = None) -> tuple
     for i in range(1, nb + 1):
         x = _qfatt(x, p, f"m_up1.{i}", g1, b1)
     x = x + x1
-    x = _conv(x, p, "m_tail")
-    return x[:, :h, :w, :], qf
+    out = _conv(x, p, "m_tail")[:, :h, :w, :]
+    if strength != 1.0:
+        out = x_in + strength * (out - x_in)
+    return out, qf
+
+
+_COMPILE_CACHE: dict = {}
+
+
+def make_forward(p: dict, qf_input: Any = None, strength: float = 1.0,
+                 nb: int | None = None, compile: bool = True):
+    """Build a per-frame forward x -> restored image for a fixed (qf_input, strength).
+    With compile=True the shape-stable graph is mx.compiled once (per loaded checkpoint +
+    config) and reused, fusing the ~80 conv/linear ops; pair with a capped MLX buffer
+    cache (the harness sets one) so per-frame churn does not grow into swap. Compiling
+    needs a scalar/None qf_input (a per-frame array would change the graph each call)."""
+    if nb is None:
+        _, nb = _config(p)
+
+    def run(x):
+        return fbcnn(x, p, qf_input=qf_input, strength=strength, nb=nb)[0]
+
+    if not compile or not (qf_input is None or isinstance(qf_input, (int, float))):
+        return run
+    key = (id(p), qf_input, float(strength), nb)
+    fn = _COMPILE_CACHE.get(key)
+    if fn is None:
+        fn = mx.compile(run)
+        _COMPILE_CACHE[key] = fn
+    return fn
 
 
 if __name__ == "__main__":
