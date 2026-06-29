@@ -642,8 +642,8 @@ def run(args: argparse.Namespace) -> None:
     upscaler: Any = None  # learned MLX upscaler when --spatial-mode basicvsrpp/realbasicvsr
 
     def _build_post_pipeline() -> tuple[
-        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any, Any
-    ]:  # session, vtfrc, post_writer, comparison_writer, denoiser, upscaler
+        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any, Any, Any
+    ]:  # session, vtfrc, post_writer, comparison_writer, deblocker, denoiser, upscaler
         """Materialize VSR + temporal + writer sessions just-in-time.
 
         Called on the first chunk so chunk-1 VAE has the Metal heap to
@@ -727,6 +727,11 @@ def run(args: argparse.Namespace) -> None:
                 strength=args.denoise_strength,
             )
 
+        deb: Any = None
+        if args.deblock == "stdf":
+            from LTX_2_MLX.videotoolbox.stdf.deblocker import StdfDeblocker
+            deb = StdfDeblocker(args.deblock_weights or os.environ.get("STDF_WEIGHTS"))
+
         up: Any = None
         if args.spatial_mode == "basicvsrpp":
             from LTX_2_MLX.videotoolbox.basicvsrpp.upscaler import BasicVsrUpscaler
@@ -753,7 +758,7 @@ def run(args: argparse.Namespace) -> None:
                 args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS"),
                 denoise_strength=args.realesrgan_denoise,
             )
-        return s, v, pw, cw, den, up
+        return s, v, pw, cw, deb, den, up
 
     # ---- Cut detector ------------------------------------------------------
     cut_detector: CutDetector | None = None
@@ -863,6 +868,37 @@ def run(args: argparse.Namespace) -> None:
         for up_rgb, (u_sf, u_sa) in upscaler.feed(lr, token=(None, src_arr)):
             _emit(up_rgb, u_sf, u_sa)
 
+    def _preprocess(base_rgb: Any, src_arr: Any) -> list:
+        """Run base_rgb through the deblock (compression) then denoise (analog) delay
+        lines; returns [(rgb, (None, src_arr)), ...] for _emit_scaled. Either stage may
+        buffer and emit nothing now; the tails drain via _preprocess_flush()."""
+        stage = (deblocker.feed(base_rgb, token=(None, src_arr))
+                 if deblocker is not None else [(base_rgb, (None, src_arr))])
+        out: list = []
+        for rgb, tok in stage:
+            if denoiser is None:
+                out.append((rgb, tok))
+            elif hasattr(denoiser, "feed"):
+                out += denoiser.feed(rgb, token=tok)
+            else:
+                out.append((denoiser.denoise(rgb), tok))
+        return out
+
+    def _preprocess_flush() -> list:
+        """Drain the deblock tail (each fed onward to denoise), then the denoise tail."""
+        out: list = []
+        if deblocker is not None:
+            for rgb, tok in deblocker.flush():
+                if denoiser is None:
+                    out.append((rgb, tok))
+                elif hasattr(denoiser, "feed"):
+                    out += denoiser.feed(rgb, token=tok)
+                else:
+                    out.append((denoiser.denoise(rgb), tok))
+        if denoiser is not None and hasattr(denoiser, "flush"):
+            out += denoiser.flush()
+        return out
+
     try:
         for chunk in chunks:
             # Both paths yield a list, freed per-frame as consumed: the latent
@@ -893,7 +929,7 @@ def run(args: argparse.Namespace) -> None:
                 import io as _io
                 _buf = _io.StringIO()
                 with contextlib.redirect_stdout(_buf):
-                    session, vtfrc, post_writer, comparison_writer, denoiser, upscaler = _build_post_pipeline()
+                    session, vtfrc, post_writer, comparison_writer, deblocker, denoiser, upscaler = _build_post_pipeline()
                 msg = _buf.getvalue().rstrip("\n")
                 if msg:
                     bars.write(msg)
@@ -940,15 +976,17 @@ def run(args: argparse.Namespace) -> None:
                         )
 
                     if cut_detector is not None and cut_detector.is_cut(src_arr):
-                        # Flush a lookahead denoiser's buffered (pre-cut) frames
-                        # before resetting so its window never bridges the cut.
-                        if denoiser is not None and hasattr(denoiser, "flush"):
-                            for d_rgb, (d_sf, d_sa) in denoiser.flush():
+                        # Flush the lookahead deblock + denoiser's buffered (pre-cut)
+                        # frames before resetting so no window bridges the cut.
+                        if deblocker is not None or (denoiser is not None and hasattr(denoiser, "flush")):
+                            for d_rgb, (d_sf, d_sa) in _preprocess_flush():
                                 _emit_scaled(d_rgb, d_sf, d_sa)
                         if upscaler is not None:
                             for up_rgb, (u_sf, u_sa) in upscaler.flush():
                                 _emit(up_rgb, u_sf, u_sa)
                         session.reset_temporal_context()
+                        if deblocker is not None:
+                            deblocker.reset()
                         if denoiser is not None:
                             denoiser.reset()
                         if cut_log is not None:
@@ -960,17 +998,15 @@ def run(args: argparse.Namespace) -> None:
                     # step; fastdvd buffers and emits centered-window frames once
                     # their two future neighbours have arrived (feed() may return
                     # nothing now; the tail drains after the loop). f32 RGB [0,1].
-                    if denoiser is not None:
+                    if deblocker is not None or denoiser is not None:
                         # fp16-preserving for RGBAHalf (balanced/image/none); 8-bit
-                        # CoreImage fallback for NV12 (fast).
+                        # CoreImage fallback for NV12 (fast). Deblock (compression)
+                        # runs before denoise (analog), both ahead of the upscaler.
                         if frames_are_buffers:
                             base_rgb = _pb.read_buffer_rgb_f32(src_frame)
                         else:
                             base_rgb = src_frame[..., :3].astype(mx.float32)
-                        if hasattr(denoiser, "feed"):
-                            ready = denoiser.feed(base_rgb, token=(None, src_arr))
-                        else:
-                            ready = [(denoiser.denoise(base_rgb), (None, src_arr))]
+                        ready = _preprocess(base_rgb, src_arr)
                     else:
                         ready = [(None, (src_frame, src_arr))]
                     for d_rgb, (d_sf, d_sa) in ready:
@@ -999,8 +1035,8 @@ def run(args: argparse.Namespace) -> None:
             gc.collect()
         # Drain any frames a lookahead denoiser still holds (the centered-window
         # tail, with the standard reflected window at the clip's end).
-        if denoiser is not None and hasattr(denoiser, "flush") and session is not None:
-            for d_rgb, (d_sf, d_sa) in denoiser.flush():
+        if (deblocker is not None or (denoiser is not None and hasattr(denoiser, "flush"))) and session is not None:
+            for d_rgb, (d_sf, d_sa) in _preprocess_flush():
                 if max_frames is not None and appended >= max_frames:
                     break
                 with autorelease_pool():
@@ -1176,6 +1212,23 @@ def main() -> None:
     parser.add_argument(
         "--save-audio-sidecar", action="store_true",
         help="Also write the muxed audio as <stem>_audio.wav next to the MP4s.",
+    )
+    parser.add_argument(
+        "--deblock", choices=["off", "stdf"], default="off",
+        help=(
+            "Pre-upscale compression-artifact deblock, applied before denoise + VSR "
+            "(deblock before SR amplifies the blocking). off (default); stdf = STDF "
+            "deformable spatio-temporal fusion (MLX, learned; HEVC-trained, luma-only "
+            "7-frame window, weights bundled). Routes frames through the MLX upload path."
+        ),
+    )
+    parser.add_argument(
+        "--deblock-weights", default=None, metavar="VARIANT|PATH",
+        help=(
+            "STDF weights for --deblock stdf: a bundled variant token (mfqev2 = HEVC "
+            "multi-QP, the default; vimeo90k = All-Intra QP37) or a .safetensors path "
+            "(or $STDF_WEIGHTS)."
+        ),
     )
     parser.add_argument(
         "--denoise", choices=["off", "spatial", "mc", "fastdvd"], default="off",
