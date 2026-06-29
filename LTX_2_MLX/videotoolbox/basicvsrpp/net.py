@@ -134,6 +134,20 @@ def _deform_align(feat_cat: Any, cond: Any, flow1: Any, flow2: Any, p: dict,
     return mx.transpose(out, (0, 2, 3, 1)).astype(feat_cat.dtype)   # DCN runs fp32 inside
 
 
+_DEFORM_COMPILE_CACHE: dict = {}
+
+
+def _compiled_deform_align(p: dict, key: str):
+    """_deform_align (offset convs + the deform_conv kernel), compiled + cached per
+    (checkpoint, module). ~1.02x byte-identical: the custom kernel is one big dispatch
+    with nothing to fuse, but the offset conv stack around it fuses. Keyed by (id(p), key)."""
+    fn = _DEFORM_COMPILE_CACHE.get((id(p), key))
+    if fn is None:
+        fn = mx.compile(lambda fc, c, f1, f2: _deform_align(fc, c, f1, f2, p, key))
+        _DEFORM_COMPILE_CACHE[(id(p), key)] = fn
+    return fn
+
+
 # ---- recurrent forward -----------------------------------------------------
 def _propagate(feats: dict, flows: list, module: str, p: dict) -> dict:
     nf = len(feats["spatial"])
@@ -158,8 +172,8 @@ def _propagate(feats: dict, flows: list, module: str, p: dict) -> dict:
                 flow_n2 = flow_n1 + flow_warp(flows[flow_idx[i - 1]], flow_n1)
                 cond_n2 = flow_warp(feat_n2, flow_n2)
             cond = mx.concatenate([cond_n1, feat_current, cond_n2], axis=-1)
-            feat_prop = _deform_align(mx.concatenate([feat_prop, feat_n2], axis=-1),
-                                      cond, flow_n1, flow_n2, p, f"deform_align.{module}")
+            feat_prop = _compiled_deform_align(p, f"deform_align.{module}")(
+                mx.concatenate([feat_prop, feat_n2], axis=-1), cond, flow_n1, flow_n2)
         feat = [feat_current] + [feats[k][idx] for k in feats if k not in ("spatial", module)] + [feat_prop]
         feat_prop = feat_prop + compiled_resblocks(mx.concatenate(feat, axis=-1), p, f"backbone.{module}")
         # Materialize each step so the recurrent graph (and the large transient
