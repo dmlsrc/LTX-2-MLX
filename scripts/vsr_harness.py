@@ -869,35 +869,42 @@ def run(args: argparse.Namespace) -> None:
         for up_rgb, (u_sf, u_sa) in upscaler.feed(lr, token=(None, src_arr)):
             _emit(up_rgb, u_sf, u_sa)
 
+    def _pp_stages() -> list:
+        """Enabled preprocessors in pipeline order: deblock (compression) then denoise
+        (analog) by default; --denoise-first swaps them. See the order rationale in the
+        --denoise-first help -- deblock-first is the right default for captured-then-
+        encoded footage, denoise-first only for noise added after compression."""
+        order = [denoiser, deblocker] if args.denoise_first else [deblocker, denoiser]
+        return [s for s in order if s is not None]
+
+    def _stage_feed(stage: Any, rgb: Any, tok: Any) -> list:
+        """Push one frame through a preprocessor -> [(rgb, tok), ...]. feed/flush delay
+        lines (deblock, fastdvd) buffer; per-frame denoisers (spatial, mc) emit in step."""
+        if hasattr(stage, "feed"):
+            return stage.feed(rgb, token=tok)
+        return [(stage.denoise(rgb), tok)]
+
     def _preprocess(base_rgb: Any, src_arr: Any) -> list:
-        """Run base_rgb through the deblock (compression) then denoise (analog) delay
-        lines; returns [(rgb, (None, src_arr)), ...] for _emit_scaled. Either stage may
-        buffer and emit nothing now; the tails drain via _preprocess_flush()."""
-        stage = (deblocker.feed(base_rgb, token=(None, src_arr))
-                 if deblocker is not None else [(base_rgb, (None, src_arr))])
-        out: list = []
-        for rgb, tok in stage:
-            if denoiser is None:
-                out.append((rgb, tok))
-            elif hasattr(denoiser, "feed"):
-                out += denoiser.feed(rgb, token=tok)
-            else:
-                out.append((denoiser.denoise(rgb), tok))
-        return out
+        """Chain the enabled preprocessors in order; returns [(rgb, (None, src_arr)),
+        ...] for _emit_scaled. Any stage may buffer now; tails drain via _preprocess_flush."""
+        items = [(base_rgb, (None, src_arr))]
+        for stage in _pp_stages():
+            items = [r for rgb, tok in items for r in _stage_feed(stage, rgb, tok)]
+        return items
 
     def _preprocess_flush() -> list:
-        """Drain the deblock tail (each fed onward to denoise), then the denoise tail."""
+        """Drain each stage's lookahead tail in order, feeding it through the stages
+        downstream of it so a flushed tail still passes through later preprocessors."""
+        stages = _pp_stages()
         out: list = []
-        if deblocker is not None:
-            for rgb, tok in deblocker.flush():
-                if denoiser is None:
-                    out.append((rgb, tok))
-                elif hasattr(denoiser, "feed"):
-                    out += denoiser.feed(rgb, token=tok)
-                else:
-                    out.append((denoiser.denoise(rgb), tok))
-        if denoiser is not None and hasattr(denoiser, "flush"):
-            out += denoiser.flush()
+        for i, stage in enumerate(stages):
+            if not hasattr(stage, "flush"):
+                continue
+            for rgb, tok in stage.flush():
+                items = [(rgb, tok)]
+                for ds in stages[i + 1:]:
+                    items = [r for rr, tt in items for r in _stage_feed(ds, rr, tt)]
+                out += items
         return out
 
     try:
@@ -1236,6 +1243,16 @@ def main() -> None:
         help=(
             "Scale the STDF deblock residual (1.0 = full, default; lower keeps more "
             "fine texture at the cost of less deblocking -- try 0.5-0.7 on faces)."
+        ),
+    )
+    parser.add_argument(
+        "--denoise-first", action="store_true",
+        help=(
+            "Run --denoise before --deblock (default is deblock then denoise). The "
+            "default suits captured-then-encoded footage: undo the last degradation "
+            "(compression) first, and a denoiser's white-noise assumption is broken by "
+            "structured blocking. Use --denoise-first only when noise was added AFTER "
+            "compression (regrained master, analog/transmission noise)."
         ),
     )
     parser.add_argument(
