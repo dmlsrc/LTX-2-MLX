@@ -99,7 +99,7 @@ from LTX_2_MLX.videotoolbox import color as _color
 from LTX_2_MLX.videotoolbox import pixel_buffers as _pb
 from LTX_2_MLX.videotoolbox import video_reader as _vr
 from LTX_2_MLX.videotoolbox.comparison import render_comparison
-from LTX_2_MLX.videotoolbox.denoise import McTemporalDenoiser, SpatialDenoiser
+from LTX_2_MLX.videotoolbox.denoise import LumaChromaDenoiser, McTemporalDenoiser, SpatialDenoiser
 from LTX_2_MLX.videotoolbox.fastdvdnet import FastDvdDenoiser
 from LTX_2_MLX.videotoolbox.images import save_image
 from LTX_2_MLX.videotoolbox.vsr import NativePassthrough
@@ -727,6 +727,11 @@ def run(args: argparse.Namespace) -> None:
                 strength=args.denoise_strength,
             )
 
+        if den is not None and (args.denoise_luma_strength != 1.0
+                                or args.denoise_chroma_strength != 1.0):
+            den = LumaChromaDenoiser(den, args.denoise_luma_strength,
+                                     args.denoise_chroma_strength)
+
         deb: Any = None
         if args.deblock == "stdf":
             from LTX_2_MLX.videotoolbox.stdf.deblocker import StdfDeblocker
@@ -1302,6 +1307,25 @@ def main() -> None:
             "Denoise strength 0..1 (default 0.5). For mc, the max temporal blend "
             "toward motion-compensated history; for spatial, the noise level; for "
             "fastdvd, the noise sigma (mapped onto sigma_255 in [5, 55])."
+        ),
+    )
+    parser.add_argument(
+        "--denoise-luma-strength", type=float, default=1.0, metavar="A",
+        help=(
+            "Luma half of --denoise: blend strength for the luma channel between the "
+            "input and the denoiser output. 1.0 = full denoise (default); lower keeps "
+            "original luma texture. Split from --denoise-chroma-strength via a BT.601 "
+            "recombine (works with any --denoise backend), so you can preserve luma "
+            "detail while still cleaning chroma. >1 over-drives."
+        ),
+    )
+    parser.add_argument(
+        "--denoise-chroma-strength", type=float, default=1.0, metavar="A",
+        help=(
+            "Chroma half of --denoise: blend strength for the chroma channels. 1.0 = "
+            "full (default). The standard split is a low --denoise-luma-strength with "
+            "this at 1.0 (aggressive chroma NR, gentle luma -- the eye barely sees chroma "
+            "detail). <1 keeps original chroma noise."
         ),
     )
     parser.add_argument(
