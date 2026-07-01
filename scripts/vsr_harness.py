@@ -614,6 +614,12 @@ def run(args: argparse.Namespace) -> None:
     # ---- Output geometry + encoder settings --------------------------------
     from LTX_2_MLX.videotoolbox.vsr import scale_for_mode
     spatial_scale = 1 if args.spatial_mode == "none" else scale_for_mode(args.spatial_mode)
+    if args.spatial_mode == "realesrgan":
+        # realesrgan covers 2x (x2plus) as well as 4x models; read the real scale from the
+        # checkpoint instead of assuming 4x, so output dims + encoder match the frames.
+        from LTX_2_MLX.videotoolbox.realesrgan import net as _rnet
+        spatial_scale = _rnet.scale_of(_rnet.load_params(
+            _rnet.resolve_weights(args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS"))))
     out_w, out_h = in_w * spatial_scale, in_h * spatial_scale
     profile = _pick_hevc_profile(args.spatial_mode, args.encode_chroma)
     target_fps = args.target_fps if args.target_fps is not None else source_fps
@@ -1516,11 +1522,12 @@ def main() -> None:
     parser.add_argument(
         "--realesrgan-weights", default=None, metavar="VARIANT|PATH",
         help=(
-            "RRDBNet/SRVGG weights for --spatial-mode realesrgan: a bundled variant "
-            "token or a .safetensors path (or $REALESRGAN_WEIGHTS). Tokens: general "
-            "(default; SRVGG, fast/gentle), x4plus (RRDBNet crisp/GAN, ~20x slower), "
-            "realesrnet / bsrnet (MSE, faithful/soft), bsrgan. Convert a .pth with "
-            "scripts/pth_to_safetensors.py."
+            "RRDBNet/SRVGG weights for --spatial-mode realesrgan: a variant token or a "
+            ".safetensors path (or $REALESRGAN_WEIGHTS). Tokens: general (default; SRVGG, "
+            "fast/gentle), x4plus (RRDBNet crisp/GAN, ~20x slower), realesrnet / bsrnet "
+            "(MSE, faithful/soft), bsrgan, x2plus (2x output), anime / animevideo (anime), "
+            "esrgan (original ESRGAN). Only general is bundled; the rest download + convert "
+            "(see videotoolbox/realesrgan/weights/README.md)."
         ),
     )
     parser.add_argument(

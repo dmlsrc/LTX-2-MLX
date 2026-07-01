@@ -25,14 +25,19 @@ from ..weights import resolve_weights as _resolve_weights
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 _IN_CH_TO_SCALE = {3: 4, 12: 2, 48: 1}   # conv_first in-channels -> output scale
 
-# Bundled checkpoints, by short token. RRDBNet (x4plus/realesrnet/bsrgan/bsrnet) are
-# crisp-GAN or MSE-faithful; the SRVGG 'general' is the fast, gentle default.
+# Checkpoints by short token; only 'general' (+ its wdn companion) is bundled -- the rest
+# are download + convert (see weights/README.md). Scale and block count auto-detect, so
+# every variant loads with no code change (x2plus is 2x, the others 4x).
 _VARIANTS = {
-    "general":    "realesr_general_x4v3.safetensors",   # SRVGG, fast, gentle (default)
-    "x4plus":     "realesrgan_x4plus.safetensors",      # RRDBNet, GAN, crisp
-    "realesrnet": "realesrnet_x4plus.safetensors",      # RRDBNet, MSE, faithful
-    "bsrgan":     "bsrgan_x4.safetensors",              # RRDBNet, BSRGAN degradation
-    "bsrnet":     "bsrnet_x4.safetensors",              # RRDBNet, BSRNet (no GAN)
+    "general":    "realesr_general_x4v3.safetensors",       # SRVGG, fast, gentle (default)
+    "x4plus":     "realesrgan_x4plus.safetensors",          # RRDBNet, GAN, crisp
+    "realesrnet": "realesrnet_x4plus.safetensors",          # RRDBNet, MSE, faithful
+    "bsrgan":     "bsrgan_x4.safetensors",                  # RRDBNet, BSRGAN degradation
+    "bsrnet":     "bsrnet_x4.safetensors",                  # RRDBNet, BSRNet (no GAN)
+    "x2plus":     "realesrgan_x2plus.safetensors",          # RRDBNet, 2x
+    "anime":      "realesrgan_x4plus_anime_6b.safetensors",  # RRDBNet, 6 blocks, anime
+    "animevideo": "realesr_animevideov3.safetensors",       # SRVGG, anime video
+    "esrgan":     "esrgan_x4.safetensors",                  # original ESRGAN x4 (DF2K+OST)
 }
 _DEFAULT_VARIANT = "general"
 
