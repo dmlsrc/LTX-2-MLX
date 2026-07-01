@@ -127,13 +127,14 @@ def _qe(x: Any, p: dict) -> Any:
     return _conv(out, p, "qenet.out_conv")
 
 
-def deblock(frames: list, p: dict, strength: float = 1.0) -> Any:
+def deblock(frames: list, p: dict, strength: float = 1.0, cfg: tuple | None = None) -> Any:
     """Deblock the center of a (2*radius+1)-frame window. `frames` is a list of
     (N,H,W,in_nc) arrays in [0,1] (in_nc=1 for the bundled Y-only models); returns the
     deblocked center frame (N,H,W,in_nc). The net predicts a residual onto the center;
     `strength` scales that residual (1.0 = full deblock, 0.0 = passthrough) to trade
-    artifact removal against softening of fine texture."""
-    in_nc, input_len, nb = _config(p)
+    artifact removal against softening of fine texture. `cfg` (the _config tuple) can be
+    passed to hoist shape inference out of the compiled per-frame path."""
+    in_nc, input_len, nb = cfg if cfg is not None else _config(p)
     radius = (input_len - 1) // 2
     if len(frames) != input_len:
         raise ValueError(f"STDF needs {input_len} frames (radius {radius}); got {len(frames)}")
@@ -147,6 +148,30 @@ def deblock(frames: list, p: dict, strength: float = 1.0) -> Any:
     centers = mx.concatenate(
         [xp[..., radius + c * input_len:radius + c * input_len + 1] for c in range(in_nc)], axis=-1)
     return (centers + float(strength) * res)[:, :h, :w, :]
+
+
+_COMPILE_CACHE: dict = {}
+
+
+def make_forward(p: dict, strength: float = 1.0, cfg: tuple | None = None, compile: bool = True):
+    """Window (list of input_len frames) -> deblocked center frame for a fixed strength,
+    mx.compiled once per checkpoint + strength and reused across frames (pair with a capped
+    MLX cache, which the harness sets). STDF was the one harness net still running its raw
+    ~20-conv op graph every frame; the deform-conv fuses fine inside the compiled graph."""
+    if cfg is None:
+        cfg = _config(p)
+
+    def run(frames):
+        return deblock(frames, p, strength=strength, cfg=cfg)
+
+    if not compile:
+        return run
+    key = (id(p), float(strength), cfg)
+    fn = _COMPILE_CACHE.get(key)
+    if fn is None:
+        fn = mx.compile(run)
+        _COMPILE_CACHE[key] = fn
+    return fn
 
 
 if __name__ == "__main__":

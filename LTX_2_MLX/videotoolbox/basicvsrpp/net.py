@@ -16,6 +16,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..deform_conv import deform_conv2d
 from ..vsr_blocks import (
     _compute_flows,
     _pixelshuffle_pack,
@@ -27,7 +28,6 @@ from ..vsr_blocks import (
     resize,
 )
 from ..weights import resolve_weights as _resolve_weights
-from ..deform_conv import deform_conv2d
 
 # Per-checkpoint compiled reconstruction/upsample tail (keyed by id(p)).
 _UPSAMPLE_COMPILE_CACHE: dict = {}
@@ -214,7 +214,8 @@ def upscale(frames: list, p: dict) -> list:
         for direction in ("backward", "forward"):
             mod = f"{direction}_{it}"
             feats = _propagate(feats, fb if direction == "backward" else ff, mod, p)
-            mx.eval(*feats[mod])
+            # _propagate already mx.eval's each step internally (see net.py:176), so every
+            # element of feats[mod] is materialized here -- no extra sync barrier needed.
     return _upsample(frames, feats, p)
 
 

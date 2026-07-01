@@ -104,7 +104,17 @@ def _conv(x: Any, p: dict, key: str, stride: int = 1, pad: int = 0, groups: int 
 
 def _layernorm(x: Any, w: Any, b: Any, eps: float = 1e-6) -> Any:
     """Channel-wise LayerNorm2d (over the last NHWC axis): (x-mu)/sqrt(var+eps)*w + b,
-    var biased. Done in float32 -- the per-location reduction over C coarsens in fp16."""
+    var biased. Done in float32 -- the per-location reduction over C coarsens in fp16.
+
+    Deliberately NOT mx.fast.layer_norm. Its kernel launches one threadgroup per row sized
+    to the normalized axis (see mlx/backend/metal/kernels/layer_norm.metal + normalization.
+    cpp), so a channel-norm over a small C (32-512) across many N*H*W rows underfills the
+    threadgroup -- ~8 of 32 lanes active at C=64, over ~100k tiny threadgroups -- and runs
+    ~2.2-2.5x SLOWER than this reduction; it only wins for large axes (transformer hidden
+    dims). The penalty is shape-bound, not dtype-bound: the reduction accumulates in float32
+    regardless, so fp16 and fp32 show the same ~2.2-2.5x loss. Measured full-net: ~0.8x on
+    width32, ~1.05x on width64 -- and the fused kernel's different reduction order compounds
+    through the 60+ deep norms into a ~2e-2 width64 output shift vs this validated version."""
     xf = x.astype(mx.float32)
     mu = mx.mean(xf, axis=-1, keepdims=True)
     var = mx.mean((xf - mu) ** 2, axis=-1, keepdims=True)

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import mlx.core as mx
-
 from ..upscaler_base import to_rgb_batch
 
 try:
@@ -34,8 +32,9 @@ class RealEsrganUpscaler:
         pass
 
     def feed(self, rgb: Any, token: Any = None) -> list:
+        # net.upscale already mx.eval's each output frame (see net.py:249), so sr is
+        # materialized here -- the second barrier was redundant.
         sr = net.upscale([to_rgb_batch(rgb)], self._p)[0]
-        mx.eval(sr)
         return [(sr[0], token)]
 
     def flush(self) -> list:

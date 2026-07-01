@@ -25,13 +25,18 @@ _CB, _CR = 1.772, 1.402
 class StdfDeblocker:
     """RGB-in / RGB-out streaming compressed-video deblocker (luma-only STDF)."""
 
-    def __init__(self, weights: Any = None, strength: float = 1.0, dtype: Any = mx.float16):
+    def __init__(self, weights: Any = None, strength: float = 1.0, dtype: Any = mx.float16,
+                 compile: bool = True):
         self._p = net.load_params(weights, dtype=dtype)
         self._strength = float(strength)
-        in_nc, self._ilen, _ = net._config(self._p)
+        in_nc, self._ilen, nb = net._config(self._p)
         if in_nc != 1:
             raise ValueError(f"StdfDeblocker expects a Y-only STDF checkpoint (in_nc=1), got {in_nc}")
         self._radius = self._ilen // 2
+        # Compile the window -> deblocked-center forward once (cached per checkpoint +
+        # strength), rather than tracing the raw op graph on every frame.
+        self._fwd = net.make_forward(self._p, self._strength, cfg=(in_nc, self._ilen, nb),
+                                     compile=compile)
         self._reset()
 
     def _reset(self) -> None:
@@ -78,7 +83,7 @@ class StdfDeblocker:
     def _emit_one(self, last: int) -> tuple:
         t = self._emitted
         window = [self._luma(t + d, last) for d in range(-self._radius, self._radius + 1)]
-        dy = net.deblock(window, self._p, self._strength)       # deblocked center luma
+        dy = self._fwd(window)                                  # deblocked center luma
         _, rgb, tok = self._buf[t - self._base]
         out = self._recombine(rgb, dy)
         mx.eval(out)
