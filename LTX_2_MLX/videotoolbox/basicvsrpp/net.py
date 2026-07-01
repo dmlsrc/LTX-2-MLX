@@ -77,21 +77,9 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
 
     Default fp16 halves activation memory and is ~1.5x faster; the deformable
     conv still runs its im2col/GEMM in fp32 internally for safety. Pass
-    dtype=mx.float32 to match the bit-exact validation reference.
-
-    A checkpoint over GitHub's 100MB file limit (ntire_vsr) ships split into
-    `<stem>.shardNN<suffix>` pieces; if the single file is absent, the shards are
-    loaded and merged."""
+    dtype=mx.float32 to match the bit-exact validation reference."""
     src = Path(path or default_weights_path())
-    if src.exists():
-        w = mx.load(str(src))
-    else:
-        shards = sorted(src.parent.glob(f"{src.stem}.shard*{src.suffix}"))
-        if not shards:
-            raise FileNotFoundError(f"{src} (no file, and no {src.stem}.shard*{src.suffix} shards)")
-        w = {}
-        for s in shards:
-            w.update(mx.load(str(s)))
+    w = mx.load(str(src))
     p: dict = {}
     for k, v in w.items():
         if k == "step_counter":

@@ -49,15 +49,13 @@ env/
 *.bin
 *.pt
 *.pth
-# Bundled model weights (small, ship with the package, package/weights/ layout).
+# Bundled model weights (small). Larger nets -- basicvsrpp, the realesrgan RRDBNet x4
+# (x4plus/esrnet/bsrgan/bsrnet), fbcnn, nafnet -- are downloaded + converted per each
+# weights/README.md, NOT committed (GitHub space). stdf's two 1.4MB files are force-added.
 !LTX_2_MLX/videotoolbox/fastdvdnet/weights/*.safetensors
-!LTX_2_MLX/videotoolbox/basicvsrpp/weights/*.safetensors
 !LTX_2_MLX/videotoolbox/realbasicvsr/weights/*.safetensors
-!LTX_2_MLX/videotoolbox/realesrgan/weights/*.safetensors
-# ntire_vsr (c128n25) exceeds GitHub's 100MB file limit, so it ships split into
-# basicvsrpp_ntire_vsr.shardNN.safetensors (committed above) + a merging loader.
-# Keep the reassembled full file out of git.
-LTX_2_MLX/videotoolbox/basicvsrpp/weights/basicvsrpp_ntire_vsr.safetensors
+!LTX_2_MLX/videotoolbox/realesrgan/weights/realesr_general_x4v3.safetensors
+!LTX_2_MLX/videotoolbox/realesrgan/weights/realesr_general_wdn_x4v3.safetensors
 *.ckpt
 
 # Output files
