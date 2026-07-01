@@ -14,7 +14,7 @@ that residual (1.0 = full, <1 = a light detail/deblur pass).
 
 Config (width, enc/middle/dec block counts) is inferred from the checkpoint. Layout:
 MLX-native NHWC. Every conv weight -> (O,kH,kW,I) (the 3x3 depthwise is (C,1,3,3) ->
-(C,3,3,1), used with groups=C); beta/gamma (1,C,1,1) -> (1,1,1,C); LayerNorm weight/bias
+(C,3,3,1), for the _depthwise3x3 shift-add); beta/gamma (1,C,1,1) -> (1,1,1,C); LayerNorm weight/bias
 stay (C,). Upsample = 1x1 conv (no bias) + PixelShuffle(2), padding is zero (F.pad
 default), matching the reference.
 """
@@ -66,7 +66,7 @@ def resolve_weights(spec: Any = None) -> Path:
 
 def load_params(path: str | Path | None = None, dtype: Any = mx.float32) -> dict:
     """Load + lay out the checkpoint. Conv weights -> NHWC (O,kH,kW,I) (the depthwise
-    conv2 too, used with groups=C); beta/gamma -> (1,1,1,C); LayerNorm weight/bias and
+    conv2 too, for the _depthwise3x3 shift-add); beta/gamma -> (1,1,1,C); LayerNorm weight/bias and
     biases stay 1-D. Cast to `dtype` -- default float32, NOT fp16: NAFNet's SimpleGate
     multiplies two channel halves, so magnitudes square and overflow fp16's 65504 in this
     deep (31-block) net -> NaN. bf16 is safe (fp32 range) but its conv is ~1.4x slower
@@ -98,8 +98,27 @@ def _config(p: dict) -> tuple:
     return width, enc, _count("middle_blks."), dec
 
 
-def _conv(x: Any, p: dict, key: str, stride: int = 1, pad: int = 0, groups: int = 1) -> Any:
-    return mx.conv2d(x, p[f"{key}.weight"], stride=stride, padding=pad, groups=groups) + p[f"{key}.bias"]
+def _conv(x: Any, p: dict, key: str, stride: int = 1, pad: int = 0) -> Any:
+    return mx.conv2d(x, p[f"{key}.weight"], stride=stride, padding=pad) + p[f"{key}.bias"]
+
+
+def _depthwise3x3(x: Any, p: dict, key: str) -> Any:
+    """3x3 depthwise conv (stride 1, pad 1) + bias, as 9 shifted per-channel-scaled adds.
+    mx.conv2d(groups=C) is pathologically slow for many channels at small spatial (~83x over
+    the memory-bandwidth floor at 1024ch / 60x108 -- MLX's grouped-conv path); this shift-add
+    is ~8x faster there and ~1.0x at the shallow scales, matching conv2d to ~1e-6 per op. The
+    weight keeps the NHWC depthwise layout (C,3,3,1) load_params produces; w[:, i, j, 0] is
+    the (i,j) tap per channel and broadcasts over the (1,H,W,C) shifted slice."""
+    w = p[f"{key}.weight"]
+    b = p[f"{key}.bias"]
+    h, wd = x.shape[1], x.shape[2]
+    xp = mx.pad(x, [(0, 0), (1, 1), (1, 1), (0, 0)])
+    acc = None
+    for i in range(3):
+        for j in range(3):
+            t = xp[:, i:i + h, j:j + wd, :] * w[:, i, j, 0]
+            acc = t if acc is None else acc + t
+    return acc + b
 
 
 def _layernorm(x: Any, w: Any, b: Any, eps: float = 1e-6) -> Any:
@@ -137,7 +156,7 @@ def _naf_block(x: Any, p: dict, prefix: str) -> Any:
     inp = x
     y = _layernorm(x, p[f"{prefix}.norm1.weight"], p[f"{prefix}.norm1.bias"])
     y = _conv(y, p, f"{prefix}.conv1")                       # 1x1, c -> 2c
-    y = _conv(y, p, f"{prefix}.conv2", pad=1, groups=y.shape[-1])   # 3x3 depthwise
+    y = _depthwise3x3(y, p, f"{prefix}.conv2")               # 3x3 depthwise (manual shift-add)
     y = _simplegate(y)                                       # 2c -> c
     y = y * _sca(y, p, f"{prefix}.sca.1")
     y = _conv(y, p, f"{prefix}.conv3")                       # 1x1, c -> c
