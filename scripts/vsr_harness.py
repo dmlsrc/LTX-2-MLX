@@ -656,6 +656,10 @@ def run(args: argparse.Namespace) -> None:
     comparison_writer: AVWriter | None = None
     denoiser: Any = None  # SpatialDenoiser / McTemporalDenoiser / FastDvd when --denoise set
     upscaler: Any = None  # learned MLX upscaler when --spatial-mode basicvsrpp/realbasicvsr
+    # deblocker/nafnet pre-set (like denoiser/upscaler) so a _build_post_pipeline failure
+    # -- e.g. a missing weight -- cannot UnboundLocalError in the cleanup finally.
+    deblocker: Any = None  # STDF / FBCNN when --deblock set
+    nafnet: Any = None     # NAFNet restorer when --nafnet set
 
     def _build_post_pipeline() -> tuple[
         VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any, Any, Any, Any
