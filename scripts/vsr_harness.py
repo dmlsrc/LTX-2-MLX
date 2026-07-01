@@ -417,6 +417,21 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
             else HEVC_PROFILE_MAIN10)
 
 
+_PP_STAGE_NAMES = ("deblock", "denoise", "nafnet")
+
+
+def _pp_order(spec: str) -> list:
+    """argparse type for --preprocess-order: a comma-separated permutation/subset of the
+    preprocess stage names (deblock, denoise, nafnet)."""
+    names = [x.strip() for x in spec.split(",") if x.strip()]
+    bad = [n for n in names if n not in _PP_STAGE_NAMES]
+    if bad:
+        raise argparse.ArgumentTypeError(f"unknown preprocess stage(s) {bad}; valid: {list(_PP_STAGE_NAMES)}")
+    if len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError(f"duplicate stage in {names}")
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
@@ -890,14 +905,19 @@ def run(args: argparse.Namespace) -> None:
             _emit(up_rgb, u_sf, u_sa)
 
     def _pp_stages() -> list:
-        """Enabled preprocessors in pipeline order: deblock (compression) then denoise
-        (analog) by default; --denoise-first swaps them; then a NAFNet detail/deblur pass
-        last (--nafnet). See the order rationale in the --denoise-first help -- deblock-
-        first is the right default for captured-then-encoded footage, denoise-first only
-        for noise added after compression."""
-        order = [denoiser, deblocker] if args.denoise_first else [deblocker, denoiser]
-        order.append(nafnet)                          # NAFNet detail/deblur pass runs last
-        return [s for s in order if s is not None]
+        """Enabled preprocessors in order. Default: deblock (compression) then denoise
+        (analog) then a NAFNet detail/deblur pass; --denoise-first swaps the first two;
+        --preprocess-order sets the full explicit order (any enabled stage omitted from it
+        is appended in the default order). Only enabled (non-None) stages run."""
+        by_name = {"deblock": deblocker, "denoise": denoiser, "nafnet": nafnet}
+        if args.preprocess_order:
+            order = list(args.preprocess_order)
+        else:
+            order = ["denoise", "deblock"] if args.denoise_first else ["deblock", "denoise"]
+        for name in _PP_STAGE_NAMES:                  # append any enabled stage not listed
+            if name not in order:
+                order.append(name)
+        return [by_name[n] for n in order if by_name[n] is not None]
 
     def _stage_feed(stage: Any, rgb: Any, tok: Any) -> list:
         """Push one frame through a preprocessor -> [(rgb, tok), ...]. feed/flush delay
@@ -1324,6 +1344,15 @@ def main() -> None:
             "(compression) first, and a denoiser's white-noise assumption is broken by "
             "structured blocking. Use --denoise-first only when noise was added AFTER "
             "compression (regrained master, analog/transmission noise)."
+        ),
+    )
+    parser.add_argument(
+        "--preprocess-order", type=_pp_order, default=None, metavar="A,B,C",
+        help=(
+            "Explicit order for the preprocess stages, comma-separated from "
+            "{deblock, denoise, nafnet}, e.g. 'nafnet,denoise,deblock'. Only enabled "
+            "stages run; any enabled stage you omit is appended in the default order "
+            "(deblock, denoise, nafnet). Overrides --denoise-first when set."
         ),
     )
     parser.add_argument(
