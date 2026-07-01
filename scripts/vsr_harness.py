@@ -643,8 +643,8 @@ def run(args: argparse.Namespace) -> None:
     upscaler: Any = None  # learned MLX upscaler when --spatial-mode basicvsrpp/realbasicvsr
 
     def _build_post_pipeline() -> tuple[
-        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any, Any, Any
-    ]:  # session, vtfrc, post_writer, comparison_writer, deblocker, denoiser, upscaler
+        VsrSession, VtfrcSession | None, AVWriter | None, AVWriter | None, Any, Any, Any, Any
+    ]:  # session, vtfrc, post_writer, comparison_writer, deblocker, denoiser, upscaler, nafnet
         """Materialize VSR + temporal + writer sessions just-in-time.
 
         Called on the first chunk so chunk-1 VAE has the Metal heap to
@@ -770,7 +770,16 @@ def run(args: argparse.Namespace) -> None:
                 args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS"),
                 denoise_strength=args.realesrgan_denoise,
             )
-        return s, v, pw, cw, deb, den, up
+
+        naf: Any = None
+        if args.nafnet != "off":
+            from LTX_2_MLX.videotoolbox.nafnet import NafnetRestorer
+            naf = NafnetRestorer(
+                args.nafnet_weights or os.environ.get("NAFNET_WEIGHTS") or args.nafnet,
+                strength=args.nafnet_strength,
+            )
+
+        return s, v, pw, cw, deb, den, up, naf
 
     # ---- Cut detector ------------------------------------------------------
     cut_detector: CutDetector | None = None
@@ -882,10 +891,12 @@ def run(args: argparse.Namespace) -> None:
 
     def _pp_stages() -> list:
         """Enabled preprocessors in pipeline order: deblock (compression) then denoise
-        (analog) by default; --denoise-first swaps them. See the order rationale in the
-        --denoise-first help -- deblock-first is the right default for captured-then-
-        encoded footage, denoise-first only for noise added after compression."""
+        (analog) by default; --denoise-first swaps them; then a NAFNet detail/deblur pass
+        last (--nafnet). See the order rationale in the --denoise-first help -- deblock-
+        first is the right default for captured-then-encoded footage, denoise-first only
+        for noise added after compression."""
         order = [denoiser, deblocker] if args.denoise_first else [deblocker, denoiser]
+        order.append(nafnet)                          # NAFNet detail/deblur pass runs last
         return [s for s in order if s is not None]
 
     def _stage_feed(stage: Any, rgb: Any, tok: Any) -> list:
@@ -948,7 +959,7 @@ def run(args: argparse.Namespace) -> None:
                 import io as _io
                 _buf = _io.StringIO()
                 with contextlib.redirect_stdout(_buf):
-                    session, vtfrc, post_writer, comparison_writer, deblocker, denoiser, upscaler = _build_post_pipeline()
+                    session, vtfrc, post_writer, comparison_writer, deblocker, denoiser, upscaler, nafnet = _build_post_pipeline()
                 msg = _buf.getvalue().rstrip("\n")
                 if msg:
                     bars.write(msg)
@@ -1008,6 +1019,8 @@ def run(args: argparse.Namespace) -> None:
                             deblocker.reset()
                         if denoiser is not None:
                             denoiser.reset()
+                        if nafnet is not None:
+                            nafnet.reset()
                         if cut_log is not None:
                             cut_log.write(f"{processed}\n")
                             cut_log.flush()
@@ -1017,7 +1030,7 @@ def run(args: argparse.Namespace) -> None:
                     # step; fastdvd buffers and emits centered-window frames once
                     # their two future neighbours have arrived (feed() may return
                     # nothing now; the tail drains after the loop). f32 RGB [0,1].
-                    if deblocker is not None or denoiser is not None:
+                    if deblocker is not None or denoiser is not None or nafnet is not None:
                         # fp16-preserving for RGBAHalf (balanced/image/none); 8-bit
                         # CoreImage fallback for NV12 (fast). Deblock (compression)
                         # runs before denoise (analog), both ahead of the upscaler.
@@ -1075,6 +1088,8 @@ def run(args: argparse.Namespace) -> None:
             session.close()
         if denoiser is not None:
             denoiser.close()
+        if nafnet is not None:
+            nafnet.close()
         for writer in (post_writer, comparison_writer):
             if writer is not None:
                 writer.finish()
@@ -1277,6 +1292,28 @@ def main() -> None:
             "(1-A)*input + A*fbcnn(input). 1.0 = full (default); <1 keeps more original "
             "texture (and faint residual artifacts) uniformly; >1 over-drives (can ring). "
             "A QF-independent strength dial, complementary to --fbcnn-quality."
+        ),
+    )
+    parser.add_argument(
+        "--nafnet", choices=["off", "gopro", "gopro32", "sidd", "sidd32", "reds"], default="off",
+        help=(
+            "NAFNet restoration pass, run LAST in the preprocess chain (a light "
+            "detail/deblur residual after deblock + denoise). off (default); "
+            "gopro/gopro32 = motion deblur (width 64/32); sidd/sidd32 = real-noise "
+            "denoise; reds = video restore. Single-image RGB net; weights are downloaded, "
+            "not bundled (see videotoolbox/nafnet/weights/README.md)."
+        ),
+    )
+    parser.add_argument(
+        "--nafnet-weights", default=None, metavar="PATH",
+        help="NAFNet .safetensors path override for --nafnet (or $NAFNET_WEIGHTS); not bundled.",
+    )
+    parser.add_argument(
+        "--nafnet-strength", type=float, default=1.0, metavar="A",
+        help=(
+            "Scale NAFNet's residual for --nafnet: out = input + A*residual. 1.0 = full "
+            "(default); lower keeps it a LIGHT pass -- recommended on video, since it is a "
+            "single-image net and a strong pass can flicker. >1 over-drives."
         ),
     )
     parser.add_argument(
