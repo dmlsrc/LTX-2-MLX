@@ -414,7 +414,7 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
     # balanced/image/none/learned upscalers carry RGB (4:4:4 chroma) to the encoder -> 4:2:2.
     return (HEVC_PROFILE_MAIN422_10
             if spatial_mode in ("balanced", "image", "none", "basicvsrpp", "realbasicvsr",
-                                "realesrgan", "safmn", "esc")
+                                "realesrgan", "safmn", "esc", "realviformer")
             else HEVC_PROFILE_MAIN10)
 
 
@@ -686,7 +686,7 @@ def run(args: argparse.Namespace) -> None:
         s: Any
         if args.spatial_mode == "none":
             s = NativePassthrough(in_w, in_h, fps=source_fps)
-        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr", "realesrgan", "safmn", "esc"):
+        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr", "realesrgan", "safmn", "esc", "realviformer"):
             # Learned MLX upscalers do the 4x upscale in the loop (windowed); the
             # session is a passthrough at the 4x output dims that just packs the
             # already-upscaled frame for the encoder.
@@ -809,6 +809,9 @@ def run(args: argparse.Namespace) -> None:
         elif args.spatial_mode == "esc":
             from LTX_2_MLX.videotoolbox.esc import EscUpscaler
             up = EscUpscaler(args.esc_weights)
+        elif args.spatial_mode == "realviformer":
+            from LTX_2_MLX.videotoolbox.realviformer import RealViformerUpscaler
+            up = RealViformerUpscaler(args.realviformer_weights)
 
         naf: Any = None
         if args.nafnet != "off":
@@ -1235,12 +1238,12 @@ def main() -> None:
     parser.add_argument(
         "--spatial-mode",
         choices=["fast", "balanced", "image", "none", "basicvsrpp", "realbasicvsr",
-                 "realesrgan", "safmn", "esc"],
+                 "realesrgan", "safmn", "esc", "realviformer"],
         default="balanced",
         help=(
             "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
             "balanced=4x, image=4x, none=1x, basicvsrpp=4x, realbasicvsr=4x, "
-            "realesrgan=4x, safmn=4x, esc=4x). "
+            "realesrgan=4x, safmn=4x, esc=4x, realviformer=4x). "
             "realesrgan = MLX Real-ESRGAN / ESRGAN RRDBNet 4x per-frame SR "
             "(single-image: no temporal propagation, so no flow ghosting; choose "
             "the checkpoint with --realesrgan-weights). "
@@ -1565,6 +1568,16 @@ def main() -> None:
             "1.0 = pure general). Blends s*general + (1-s)*wdn; per Real-ESRGAN, "
             "higher = stronger denoise (smoother), lower keeps more real-world "
             "texture/grain. Needs the realesr_general_wdn_x4v3 companion weight."
+        ),
+    )
+    parser.add_argument(
+        "--realviformer-weights", default=None, metavar="VARIANT|PATH",
+        help=(
+            "RealViformer weights for --spatial-mode realviformer: the x4 token or a "
+            ".safetensors path (or $REALVIFORMER_WEIGHTS). A causal recurrent real-world "
+            "4x video upscaler (channel-attention transformer); streams frame by frame "
+            "with temporal state, reset at cuts. Not bundled; see "
+            "videotoolbox/realviformer/weights/README.md."
         ),
     )
     parser.add_argument(
