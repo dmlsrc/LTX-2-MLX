@@ -3,11 +3,17 @@ Feature Modulation for Efficient Image Super-Resolution", ICCV 2023, and its
 challenge-winning successors). Reimplemented from the reference architectures as a
 spec; no upstream code is bundled. Two variants, auto-detected from the checkpoint:
 
-- "real" (SAFMN-L / Real_SAFMN++, 1st place AIM 2025 Efficient Perceptual SR):
-  dim 96 x 16 AttBlocks; channel LayerNorm, 4-level SAFM pyramid (max-pool /2^i,
-  per-level 3x3 depthwise, nearest upsample, 1x1 aggregate, GELU gate) and a CCM
-  FFN (3x3 expand + GELU + 1x1). Perceptual/GAN-trained 4x -- pair it AFTER
-  deblock/denoise so it does not amplify compression artifacts.
+- "real" (SAFMN_L_Real_LSDIR_x4, the paper's real-world model): dim 128 x 16
+  AttBlocks; channel LayerNorm, 4-level SAFM pyramid (max-pool /2^i, per-level 3x3
+  depthwise, nearest upsample, 1x1 aggregate, GELU gate) and a CCM FFN (3x3 expand
+  + GELU + 1x1). Trained with the high-order Real-ESRGAN degradation (blur included)
+  on LSDIR -- handles real video, motion blur and all.
+
+Do NOT confuse "real" with the AIM 2025 challenge checkpoint also named "SAFMN-L"
+(dim 96): that one was tuned on synthetically degraded stills for no-reference
+perceptual metrics and hallucinates crusty texture over motion blur on real video
+(verified against a reference-faithful torch computation -- it is the network, not
+this port). The forward here runs it fine, but it is deliberately not a token.
 - "light" (light_SAFMN++, 1st place fidelity track, AIS 2024 Real-Time 4K SR of
   compressed AVIF): dim 32 x 2 blocks; no norms, no biases, SimpleSAFM (single /8
   max-pool level, 3x3 depthwise, bilinear upsample, GELU gate) + CCM. Fidelity-
@@ -33,10 +39,11 @@ from ..weights import resolve_weights as _resolve_weights
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 # Not bundled (download + convert; see weights/README.md).
 _VARIANTS = {
-    "real": "safmn_l_real.safetensors",      # SAFMN-L, perceptual 4x (AIM 2025)
-    "light": "light_safmnpp.safetensors",    # light_SAFMN++, fidelity 4x (AIS 2024)
+    "light": "light_safmnpp.safetensors",             # light_SAFMN++, fidelity 4x (AIS 2024)
+    "real": "safmn_l_real_lsdir_x4.safetensors",      # SAFMN_L_Real_LSDIR, real-world 4x
+    "real2x": "safmn_l_real_lsdir_x2.safetensors",    # same family, 2x (HD -> 4K class)
 }
-_DEFAULT_VARIANT = "real"
+_DEFAULT_VARIANT = "light"
 _REPO = "https://github.com/sunny2109/SAFMN"
 
 

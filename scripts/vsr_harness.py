@@ -1565,10 +1565,11 @@ def main() -> None:
         "--safmn-weights", default=None, metavar="VARIANT|PATH",
         help=(
             "SAFMN weights for --spatial-mode safmn: a variant token or a .safetensors "
-            "path (or $SAFMN_WEIGHTS). Tokens: real (default; SAFMN-L / Real_SAFMN++, "
-            "perceptual 4x -- pair after deblock/denoise) and light (light_SAFMN++, tiny "
-            "fidelity 4x trained on compressed content). Neither is bundled; see "
-            "videotoolbox/safmn/weights/README.md."
+            "path (or $SAFMN_WEIGHTS). Tokens: light (default; light_SAFMN++, tiny "
+            "fidelity 4x trained on compressed content), real (SAFMN_L_Real_LSDIR, "
+            "real-world perceptual 4x trained with the Real-ESRGAN degradation -- "
+            "video-appropriate, ~3x faster than the RRDBNet class), real2x (same family, "
+            "2x output). None are bundled; see videotoolbox/safmn/weights/README.md."
         ),
     )
     parser.add_argument(
