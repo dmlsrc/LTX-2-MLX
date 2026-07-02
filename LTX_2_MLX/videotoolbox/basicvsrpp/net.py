@@ -76,8 +76,9 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
     SPyNet mean/std -> NHWC, step_counter dropped, all cast to `dtype`.
 
     Default fp16 halves activation memory and is ~1.5x faster; the deformable
-    conv still runs its im2col/GEMM in fp32 internally for safety. Pass
-    dtype=mx.float32 to match the bit-exact validation reference."""
+    conv follows the input dtype (fp16 sampling/columns/GEMM with fp32
+    accumulation -- see deform_conv2d; ~3.8x on the op, SR shift 58 dB). Pass
+    dtype=mx.float32 for the full-fp32 validation reference."""
     src = Path(path or default_weights_path())
     w = mx.load(str(src))
     p: dict = {}
@@ -147,7 +148,7 @@ def _deform_align(feat_cat: Any, cond: Any, flow1: Any, flow2: Any, p: dict,
         p[f"{key}.weight"], p.get(f"{key}.bias"), mx.transpose(mask, (0, 3, 1, 2)),
         stride=1, padding=1, dilation=1, deform_groups=dg,
     )
-    return mx.transpose(out, (0, 2, 3, 1)).astype(feat_cat.dtype)   # DCN runs fp32 inside
+    return mx.transpose(out, (0, 2, 3, 1)).astype(feat_cat.dtype)   # DCN follows input dtype
 
 
 _DEFORM_COMPILE_CACHE: dict = {}

@@ -13,14 +13,15 @@ import mlx.core as mx
 # deformable_im2col kernel; dims are read from an int32 `params` buffer instead
 # of `constant&` args, and buffers are referenced by MLX input/output name.
 _HEADER = r"""
-inline float bilin(device const float* in, int H, int W, float h, float w) {
+template <typename T>
+inline float bilin(device const T* in, int H, int W, float h, float w) {
     if (h <= -1.0f || float(H) <= h || w <= -1.0f || float(W) <= w) return 0.0f;
     int hl = int(floor(h)), wl = int(floor(w)), hh = hl + 1, wh = wl + 1;
     float lh = h - float(hl), lw = w - float(wl), mh = 1.0f - lh, mw = 1.0f - lw;
-    float v1 = (hl >= 0 && wl >= 0)        ? in[hl * W + wl] : 0.0f;
-    float v2 = (hl >= 0 && wh <= W - 1)    ? in[hl * W + wh] : 0.0f;
-    float v3 = (hh <= H - 1 && wl >= 0)    ? in[hh * W + wl] : 0.0f;
-    float v4 = (hh <= H - 1 && wh <= W - 1)? in[hh * W + wh] : 0.0f;
+    float v1 = (hl >= 0 && wl >= 0)        ? float(in[hl * W + wl]) : 0.0f;
+    float v2 = (hl >= 0 && wh <= W - 1)    ? float(in[hl * W + wh]) : 0.0f;
+    float v3 = (hh <= H - 1 && wl >= 0)    ? float(in[hh * W + wl]) : 0.0f;
+    float v4 = (hh <= H - 1 && wh <= W - 1)? float(in[hh * W + wh]) : 0.0f;
     return mh*mw*v1 + mh*lw*v2 + lh*mw*v3 + lh*lw*v4;
 }
 """
@@ -49,9 +50,9 @@ _SRC = r"""
     for (int i = 0; i < KH; ++i) {
         for (int j = 0; j < KW; ++j) {
             int t = i * KW + j;
-            float mv = use_mask ? mask[maskbase + t * hw + pix] : 1.0f;
-            float oh = offset[offbase + (2 * t)     * hw + pix];
-            float ow = offset[offbase + (2 * t + 1) * hw + pix];
+            float mv = use_mask ? float(mask[maskbase + t * hw + pix]) : 1.0f;
+            float oh = float(offset[offbase + (2 * t)     * hw + pix]);
+            float ow = float(offset[offbase + (2 * t + 1) * hw + pix]);
             float y = float(out_y * sH - padH) + float(i * dH) + oh;
             float x = float(out_x * sW - padW) + float(j * dW) + ow;
             columns[(out_c + t) * colstride + out_b * hw + pix] =
@@ -60,41 +61,50 @@ _SRC = r"""
     }
 """
 
-_KERNEL = None
+_KERNELS: dict = {}
 
 
-def _kernel():
-    global _KERNEL
-    if _KERNEL is None:
-        _KERNEL = mx.fast.metal_kernel(
-            name="deform_im2col", input_names=["input", "offset", "mask", "params"],
+def _kernel(tag: str):
+    fn = _KERNELS.get(tag)
+    if fn is None:
+        fn = mx.fast.metal_kernel(
+            name=f"deform_im2col_{tag}", input_names=["input", "offset", "mask", "params"],
             output_names=["columns"], header=_HEADER, source=_SRC,
         )
-    return _KERNEL
+        _KERNELS[tag] = fn
+    return fn
 
 
 def deform_conv2d(inp, offset, weight, bias=None, mask=None,
                   stride=1, padding=1, dilation=1, deform_groups=1):
+    """Modulated deform conv. When the input is fp16 the whole path runs fp16
+    (fp16 sampling reads, fp16 columns, fp16 GEMM with MLX's internal fp32
+    accumulation): the inputs carry no more than fp16 precision anyway, so the
+    old cast-to-fp32 path only added ~2x the memory traffic (the columns buffer
+    is Cin*K*K x N*oH*oW -- ~1.9GB fp32 at 128ch/480p). Positions/weights inside
+    the kernel stay float. fp32 inputs keep the full-fp32 path (the validation
+    reference below)."""
     N, Cin, H, W = inp.shape
     Cout, _, KH, KW = weight.shape
     oH = (H + 2 * padding - dilation * (KH - 1) - 1) // stride + 1
     oW = (W + 2 * padding - dilation * (KW - 1) - 1) // stride + 1
     use_mask = 1 if mask is not None else 0
+    dt = mx.float16 if inp.dtype == mx.float16 else mx.float32
     params = mx.array([H, W, KH, KW, padding, padding, stride, stride,
                        dilation, dilation, N, Cin, deform_groups, oH, oW, use_mask],
                       dtype=mx.int32)
-    inp_c = mx.contiguous(inp.astype(mx.float32))
-    off_c = mx.contiguous(offset.astype(mx.float32))
-    msk_c = mx.contiguous((mask if mask is not None else mx.zeros((N, 1, oH, oW))).astype(mx.float32))
-    (cols,) = _kernel()(
+    inp_c = mx.contiguous(inp.astype(dt))
+    off_c = mx.contiguous(offset.astype(dt))
+    msk_c = mx.contiguous((mask if mask is not None else mx.zeros((N, 1, oH, oW))).astype(dt))
+    (cols,) = _kernel("f16" if dt == mx.float16 else "f32")(
         inputs=[inp_c, off_c, msk_c, params],
         grid=(Cin * oH * oW * N, 1, 1), threadgroup=(256, 1, 1),
-        output_shapes=[(Cin * KH * KW, N * oH * oW)], output_dtypes=[mx.float32],
+        output_shapes=[(Cin * KH * KW, N * oH * oW)], output_dtypes=[dt],
     )
-    out = (weight.reshape(Cout, Cin * KH * KW).astype(mx.float32) @ cols)  # (Cout, N*oH*oW)
+    out = (weight.reshape(Cout, Cin * KH * KW).astype(dt) @ cols)  # (Cout, N*oH*oW)
     out = out.reshape(Cout, N, oH, oW).transpose(1, 0, 2, 3)
     if bias is not None:
-        out = out + bias.reshape(1, Cout, 1, 1)
+        out = out + bias.reshape(1, Cout, 1, 1).astype(dt)
     return out
 
 
