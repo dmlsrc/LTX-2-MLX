@@ -414,7 +414,7 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
     # balanced/image/none/learned upscalers carry RGB (4:4:4 chroma) to the encoder -> 4:2:2.
     return (HEVC_PROFILE_MAIN422_10
             if spatial_mode in ("balanced", "image", "none", "basicvsrpp", "realbasicvsr",
-                                "realesrgan", "safmn")
+                                "realesrgan", "safmn", "esc")
             else HEVC_PROFILE_MAIN10)
 
 
@@ -624,6 +624,9 @@ def run(args: argparse.Namespace) -> None:
     elif args.spatial_mode == "safmn":
         from LTX_2_MLX.videotoolbox.safmn import net as _snet
         spatial_scale = _snet._config(_snet.load_params(args.safmn_weights))[3]
+    elif args.spatial_mode == "esc":
+        from LTX_2_MLX.videotoolbox.esc import net as _enet
+        spatial_scale = _enet._config(_enet.load_params(args.esc_weights))[6]
     out_w, out_h = in_w * spatial_scale, in_h * spatial_scale
     profile = _pick_hevc_profile(args.spatial_mode, args.encode_chroma)
     target_fps = args.target_fps if args.target_fps is not None else source_fps
@@ -683,7 +686,7 @@ def run(args: argparse.Namespace) -> None:
         s: Any
         if args.spatial_mode == "none":
             s = NativePassthrough(in_w, in_h, fps=source_fps)
-        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr", "realesrgan", "safmn"):
+        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr", "realesrgan", "safmn", "esc"):
             # Learned MLX upscalers do the 4x upscale in the loop (windowed); the
             # session is a passthrough at the 4x output dims that just packs the
             # already-upscaled frame for the encoder.
@@ -803,6 +806,9 @@ def run(args: argparse.Namespace) -> None:
         elif args.spatial_mode == "safmn":
             from LTX_2_MLX.videotoolbox.safmn import SafmnUpscaler
             up = SafmnUpscaler(args.safmn_weights)
+        elif args.spatial_mode == "esc":
+            from LTX_2_MLX.videotoolbox.esc import EscUpscaler
+            up = EscUpscaler(args.esc_weights)
 
         naf: Any = None
         if args.nafnet != "off":
@@ -1229,12 +1235,12 @@ def main() -> None:
     parser.add_argument(
         "--spatial-mode",
         choices=["fast", "balanced", "image", "none", "basicvsrpp", "realbasicvsr",
-                 "realesrgan", "safmn"],
+                 "realesrgan", "safmn", "esc"],
         default="balanced",
         help=(
             "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
             "balanced=4x, image=4x, none=1x, basicvsrpp=4x, realbasicvsr=4x, "
-            "realesrgan=4x, safmn=4x). "
+            "realesrgan=4x, safmn=4x, esc=4x). "
             "realesrgan = MLX Real-ESRGAN / ESRGAN RRDBNet 4x per-frame SR "
             "(single-image: no temporal propagation, so no flow ghosting; choose "
             "the checkpoint with --realesrgan-weights). "
@@ -1559,6 +1565,15 @@ def main() -> None:
             "1.0 = pure general). Blends s*general + (1-s)*wdn; per Real-ESRGAN, "
             "higher = stronger denoise (smoother), lower keeps more real-world "
             "texture/grain. Needs the realesr_general_wdn_x4v3 companion weight."
+        ),
+    )
+    parser.add_argument(
+        "--esc-weights", default=None, metavar="VARIANT|PATH",
+        help=(
+            "ESC-Real weights for --spatial-mode esc: a variant token or a .safetensors "
+            "path (or $ESC_WEIGHTS). Tokens: gan (default; perceptual, Real-ESRGAN-style "
+            "degradation training) and mse (fidelity twin). Neither is bundled; see "
+            "videotoolbox/esc/weights/README.md."
         ),
     )
     parser.add_argument(
