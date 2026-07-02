@@ -383,9 +383,19 @@ several findings that border this work; checked for applicability 2026-07:
 - The transformer-side norm usage (mx.fast.rms_norm at model width) and this
   doc's channel-norm rule (section 2) are the same shape rule from both sides.
 
-Open reverse-direction item: the VAE decode and spatial upscaler are conv3d
-paths that predate the conv-gate methodology here; their channel/kernel shapes
-have never been audited against the conv3d dispatch gates.
+Reverse-direction audit (done 2026-07): the VAE decode and spatial upscaler
+conv3d paths are CLEAN. The conv3d dispatch (mlx conv.cpp,
+`dispatch_conv_3D_gpu`) differs from 2D in two ways worth knowing: there is no
+winograd and no depthwise path, and a %16 channel miss with groups==1 is
+handled INTERNALLY by `pad_and_slice_conv_3D_gpu` (pad to 16, implicit GEMM,
+slice) -- mild copy overhead rather than 2D's 2-4x general-kernel penalty; only
+grouped non-mod16 conv3d falls to the slow explicit path. Census of the video
+VAE weights: every decoder conv is %16-aligned (128/256/512/1024/4096 widths,
+conv_out 128->48), as is the spatial upscaler (ResBlock3d 128<->1024); no
+grouped or dilated convs; the runtime concats are temporal-axis causal padding
+(channel counts unchanged). The single miss is the encoder's conv_out
+(1024->129, the logvar channel) -- on the internal pad-and-slice path, at tiny
+latent resolution, encoder-only: not worth fixing.
 
 ## 11. Benchmarking gotchas checklist
 
