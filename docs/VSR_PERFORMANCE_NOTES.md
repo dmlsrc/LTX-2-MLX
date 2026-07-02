@@ -353,7 +353,41 @@ writing the forward.
   runs at 2.9 TF/s-eff but output-padding it wider is a wash (measured), and
   the precise softmax costs nothing -- keep it.
 
-## 10. Benchmarking gotchas checklist
+## 10. Cross-references: the diffusion-pipeline and transformer perf work
+
+`PERFORMANCE.md` / `PERFORMANCE_NOTES.md` (this repo, DiT denoise path) contain
+several findings that border this work; checked for applicability 2026-07:
+
+- **The steel_gemm BlockLoader "pretranspose cliff"** (PERFORMANCE_NOTES.md,
+  BlockLoader characterization): a plain `x @ w.T` matmul at large K uses the
+  `_nt_` loader whose 64-row x ldb span breaks coalescing -- pretransposed
+  weights (`_nn_` loader) are up to +20% in fp16. This is a MATMUL rule; convs
+  go through the steel conv kernels and are unaffected. In the VSR ports the
+  only large-K matmuls are the channel-attention q@kT contractions (tiny
+  outputs, minor share) and the deform GEMM (no transpose) -- checked, no
+  action. Remember it if a future processor leans on big Linear layers.
+- **The local STEEL attention retile is NOT reusable here.** Its domain is
+  hard-constrained (D=64/128, no mask, LTX shapes; masked text attention falls
+  back to stock), so ESC's D=16 window attention with a dense additive bias is
+  out of scope, and the KinoMLX ISA-level analysis concluded that kernel is at
+  the M1 silicon floor for its own shapes -- corroborating section 2's verdict
+  that there is no custom-kernel rescue for window attention on M1.
+- **Custom fused elementwise/FFN kernels bottomed out at a 3-7% ceiling** in
+  the transformer work (and FlashAttention-2 ports were abandoned twice).
+  Consistent with this campaign's experience: mx.compile already fuses the
+  elementwise chains; hand kernels only paid where an MLX kernel was
+  pathological (never for fusion alone).
+- **Hot-path hygiene scans** (PERFORMANCE.md): the rg patterns for accidental
+  numpy round-trips / dict(mx.load) / .tolist() apply verbatim to processor
+  code; run them on new ports.
+- The transformer-side norm usage (mx.fast.rms_norm at model width) and this
+  doc's channel-norm rule (section 2) are the same shape rule from both sides.
+
+Open reverse-direction item: the VAE decode and spatial upscaler are conv3d
+paths that predate the conv-gate methodology here; their channel/kernel shapes
+have never been audited against the conv3d dispatch gates.
+
+## 11. Benchmarking gotchas checklist
 
 - Cap the MLX buffer cache (`mx.set_cache_limit(1 GB)`) -- an uncapped cache
   contaminates both speed and peak-memory numbers.
