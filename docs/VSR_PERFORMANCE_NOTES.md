@@ -99,6 +99,19 @@ recombination sums must run in fp32: the split rounds each partial conv output
 to fp16 where the original GEMM accumulated all of K in fp32. See
 `videotoolbox/realesrgan/net.py:_restack_rdb_weights` and `_rdb`.
 
+### Window attention is intrinsically expensive on M1
+
+ESC-Real's 32x32-window attention (405 windows x 4 heads x 1024 tokens x head_dim
+16 at 480p) costs ~230 ms per layer and ~60% of each block, and BOTH formulations
+land there: `mx.fast.scaled_dot_product_attention` with a dense additive mask at
+head_dim 16 takes a slow path (234 ms), and the manual two-batched-GEMMs + precise
+softmax is 228 ms -- the batched (1620 x) 1024x16x1024 GEMMs are thin-K/launch
+bound, ~5x over the traffic floor. There is no exact-math fix; nets built around
+many-token window attention are simply a quality tier on this hardware (papers'
+efficiency claims usually assume CUDA flex-attention). Channel attention (MDTA:
+C x C over tokens, as in RealViformer) is cheap by contrast -- the matrices are
+tiny and the cost lives in the qkv convs.
+
 ### Deformable conv: follow the input dtype
 
 The DCNv2 path (`videotoolbox/deform_conv.py`) originally forced fp32: three
@@ -148,6 +161,12 @@ All measured, all worth not re-litigating:
 - **Do not upcast fp16 data "for safety"** on memory-heavy paths -- it doubles
   traffic and adds nothing (the deform_conv lesson). Upcasting is for
   *accumulation and reductions*, not for storage.
+- **Any fp16 reduction spanning the full spatial extent overflows.** A global
+  average pool (`mx.mean` over H*W: ESC's dynamic-kernel predictor) or an L2
+  normalization over H*W tokens (RealViformer's q/k normalize) sums ~400k fp16
+  values at 480p -- far past 65504. These pass every small-input parity gate and
+  only blow up on real-resolution frames; give every such reduction an fp32
+  island. The channel-axis reductions (LayerNorm over 32-512 channels) are safe.
 - Watch for fp32-constant contamination: `mx.zeros`/`mx.full`/`mx.arange`
   default to fp32; on an fp16 path pass `dtype=x.dtype` explicitly.
 - fp32 summation-order noise compounds through deep residual stacks: a 1e-6
@@ -187,7 +206,7 @@ clips. Use 60+ frames for wall-clock numbers.
 
 ## 7. Reference numbers (854x480 input, M1 Max, post-campaign)
 
-Per-frame processing cost, fp16, compiled, capped cache:
+Per-frame processing cost, fp16, compiled, capped cache. Preprocessors:
 
 | processor | ms/frame | notes |
 | --- | --- | --- |
@@ -195,10 +214,26 @@ Per-frame processing cost, fp16, compiled, capped cache:
 | fastdvdnet denoise (steady state) | ~53 | 1.14x (grouped-conv gate pad) |
 | fbcnn deblock | ~230 | flat U-Net; audited, nothing actionable |
 | nafnet gopro (fp32) | ~340 | 1.4x (manual depthwise) |
-| realesrgan general (SRVGG), 4x | 148 | already efficient |
-| realesrgan bsrgan (RRDBNet), 4x | ~2400 | 1.5x (dense-block restack) |
-| realbasicvsr, 4x | 976 | window=1 default |
-| basicvsrpp, 4x | 1391 | 70% propagation / 20% upsample tail / 7% flows |
+
+The full upscaler ladder (all parity-gated against independent torch
+reimplementations and visually verified on real motion-blurred video):
+
+| ms/frame | --spatial-mode / weights | character |
+| --- | --- | --- |
+| 19 | safmn light | fidelity, trained on compressed content; the fast default |
+| 148 | realesrgan general (SRVGG) | light perceptual |
+| ~754 | safmn real2x (2x output) | real-world perceptual, the HD -> 4K class tool |
+| 756 | safmn real (SAFMN_L_Real_LSDIR) | real-world perceptual, per-frame |
+| 836 | realviformer (streaming) | real-world perceptual + TEMPORAL consistency |
+| 976 | realbasicvsr | temporal GAN (cleaning + BasicVSR) |
+| 1391 | basicvsrpp | temporal fidelity; 70% propagation / 20% tail |
+| ~2400 | realesrgan bsrgan (RRDBNet) | heavy perceptual (1.5x from dense restack) |
+| ~3900 | esc gan / mse | window-attention quality tier; mse = fidelity twin |
+
+RealViformer streams (causal recurrence, per-frame state, reset at cuts) --
+temporal consistency at barely more than a per-frame net's cost. ESC's numbers
+are attention-bound (section 2); its value is output quality plus the only
+fidelity/perceptual twin pair above the SRVGG class.
 
 Peak MLX memory, one pass at 854x480 (1 GB cache cap): stdf 0.8 GB, fastdvd
 1.0, general 1.2, fbcnn 1.9, nafnet-fp32 2.3, bsrgan 4.0, realbasicvsr-5-window
@@ -240,7 +275,75 @@ Ordered; stop at the first step that explains the time.
    lever for these conv nets: MLX's quantized kernels are matmul/LLM-shaped and
    the nets are compute-bound in fp16, not bandwidth-bound.
 
-## 9. Benchmarking gotchas checklist
+## 9. Porting new models: selection, validation, drift traps
+
+Lessons from porting the SAFMN family, ESC-Real, and RealViformer (and from
+rejecting SMFANet). These cost real debugging time; follow them in order.
+
+### Pick the checkpoint by its TRAINING DEGRADATION, not its name or awards
+
+- A model is only as video-appropriate as the degradations it trained on. The
+  Real-ESRGAN high-order pipeline (blur + noise + compression) transfers to real
+  video; bicubic-benchmark training (DF2K/DIV2K classic SR) does not, and
+  challenge checkpoints are tuned to the challenge's exact degradation and
+  metrics. The AIM 2025 "SAFMN-L" (stills, synthetic degradation, no-reference
+  perceptual metrics) hallucinates crusty texture over motion blur on real video
+  -- verified to be the network, not the port -- while SAFMN_L_Real_LSDIR
+  (Real-ESRGAN pipeline, blur included) is clean on the same frames.
+- Watch for name collisions: three different checkpoints all named "SAFMN-L"
+  exist (DF2K benchmark, AIM challenge, Real_LSDIR). Identify by tensor shapes
+  and training provenance, not filename.
+- If a project publishes ONLY bicubic-benchmark checkpoints (SMFANet), it has no
+  video-appropriate model to port. Skip it.
+- Release pages mix architectures: the ESC release ships the author's retrained
+  comparison baselines (ATD/HiTSRF/SRFormer) and torch-only variants (FlashBias)
+  alongside the real models.
+
+### Validation protocol (all four gates, in order)
+
+1. **Parity vs an independently written torch reimplementation.** Reference code
+   is a written spec only -- never imported or executed, not even for parity.
+   Reimplement the reference in torch with matching state_dict keys (declare
+   vestigial checkpoint params as unused so strict=True verifies everything
+   else), load the checkpoint with weights_only=True, and gate the MLX port
+   against that. Expect 110-130 dB at fp32 on small inputs; test both the
+   size-aligned and the padding code paths.
+2. **fp16 on REAL frames at REAL resolution.** The fp32 small-input gate cannot
+   see fp16 range problems; the full-spatial-reduction overflows (section 4)
+   only appear here. Check `mx.all(mx.isfinite(...))` on actual video frames.
+3. **Eyeball output frames on real video before shipping.** "Runs, finite, high
+   parity on random input" catches neither a wrong checkpoint nor an
+   out-of-distribution failure. Include a motion-blurred frame -- it is the
+   degradation real video always has and synthetic training pipelines often
+   lack, and it is what exposed the AIM checkpoint.
+4. **Harness smoke end to end** (geometry, encoder, cut/reset behavior).
+
+### Expect checkpoint-vs-source drift
+
+Released weights routinely disagree with the repo's current code; the weights
+win. Cases hit: ESC-Real's upsample tail is Upsample-first in the checkpoint
+(params at Sequential indices 1/4/6/8) but conv-first in today's source;
+RealViformer's checkpoint carries a vestigial attention parameter the reference
+inference silently skips with strict=False; light_SAFMN++ ships ffn_scale 1.5
+against the paper's 2.0. Derive EVERYTHING derivable from tensor shapes
+(widths, block counts, expansion ratios, scale) and read the key layout before
+writing the forward.
+
+### Structure notes
+
+- Causal/unidirectional recurrent nets (RealViformer) want a STREAMING driver:
+  per-frame feed with carried state and reset() at cuts -- no window buffering,
+  no trim. Bidirectional nets (BasicVSR++ class) need the windowed driver.
+- U-Nets constrain input divisibility (2 downs -> /4; deepest pool -> /8;
+  window attention -> /32 handled internally). Replicate-pad at the driver or
+  net entry and crop the scaled output; document which the reference does --
+  torch adaptive pooling at non-multiple sizes has different semantics than
+  pad-then-uniform-pool (invisible in practice, but it moves parity numbers).
+- Reuse the shared blocks: a checkpoint's SpyNet is usually BasicSR's or
+  mmagic's -- semantically identical to `vsr_blocks.spynet_flow`; remap key
+  names at load and the compiled + gate-padded implementation comes free.
+
+## 10. Benchmarking gotchas checklist
 
 - Cap the MLX buffer cache (`mx.set_cache_limit(1 GB)`) -- an uncapped cache
   contaminates both speed and peak-memory numbers.
