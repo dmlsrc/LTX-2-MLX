@@ -18,6 +18,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..compile_cache import cached as _cached
 from ..deform_conv import deform_conv2d
 from ..weights import resolve_weights as _resolve_weights
 
@@ -166,12 +167,7 @@ def make_forward(p: dict, strength: float = 1.0, cfg: tuple | None = None, compi
 
     if not compile:
         return run
-    key = (id(p), float(strength), cfg)
-    fn = _COMPILE_CACHE.get(key)
-    if fn is None:
-        fn = mx.compile(run)
-        _COMPILE_CACHE[key] = fn
-    return fn
+    return _cached(_COMPILE_CACHE, (id(p), float(strength), cfg), lambda: mx.compile(run))
 
 
 if __name__ == "__main__":

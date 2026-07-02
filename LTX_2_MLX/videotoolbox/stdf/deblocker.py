@@ -1,13 +1,16 @@
 """Streaming STDF deblocker: a centered (2*radius+1)-frame luma window in, the
 deblocked center frame out, as an RGB-in / RGB-out delay line.
 
-STDF is luma-only, so each RGB frame is split into BT.601 luma + chroma; the net
-deblocks the luma using its temporal window and the original chroma is carried
-through unchanged (compression chroma artifacts are far less visible, and the net
-was trained on Y). feed(rgb, token) buffers a frame and returns the (deblocked_rgb,
-token) pairs now ready; flush() drains the tail. Clip ends use a reflected window,
-exactly as the reference. Pair this before the scaler so compression blocking is
-removed before any GAN SR amplifies it.
+STDF is luma-only, so each RGB frame is split into luma + chroma using the source's
+ITU-R matrix coefficients (kr, kb -- default BT.601; the harness passes the clip's
+actual matrix, same as the luma/chroma denoise split); the net deblocks the luma
+using its temporal window and the original chroma is carried through unchanged
+(compression chroma artifacts are far less visible, and the net was trained on Y).
+The matrix only shapes how the deblock residual distributes across R/G/B -- at
+strength 0 the round trip is exact for any coefficients. feed(rgb, token) buffers a
+frame and returns the (deblocked_rgb, token) pairs now ready; flush() drains the
+tail. Clip ends use a reflected window, exactly as the reference. Pair this before
+the scaler so compression blocking is removed before any GAN SR amplifies it.
 """
 from __future__ import annotations
 
@@ -17,22 +20,26 @@ import mlx.core as mx
 
 from . import net
 
-# BT.601 full-range luma; the two chroma-difference scales are 2*(1-Kb), 2*(1-Kr).
-_KR, _KG, _KB = 0.299, 0.587, 0.114
-_CB, _CR = 1.772, 1.402
+# BT.601 full-range luma, the standalone default.
+_KR, _KB = 0.299, 0.114
 
 
 class StdfDeblocker:
     """RGB-in / RGB-out streaming compressed-video deblocker (luma-only STDF)."""
 
     def __init__(self, weights: Any = None, strength: float = 1.0, dtype: Any = mx.float16,
-                 compile: bool = True):
+                 compile: bool = True, kr: float = _KR, kb: float = _KB):
         self._p = net.load_params(weights, dtype=dtype)
         self._strength = float(strength)
         in_nc, self._ilen, nb = net._config(self._p)
         if in_nc != 1:
             raise ValueError(f"StdfDeblocker expects a Y-only STDF checkpoint (in_nc=1), got {in_nc}")
         self._radius = self._ilen // 2
+        # ITU-R luma coefficients of the source matrix; chroma-difference scales are
+        # 2*(1-Kb), 2*(1-Kr).
+        self._kr, self._kb = float(kr), float(kb)
+        self._kg = 1.0 - self._kr - self._kb
+        self._cb, self._cr = 2.0 * (1.0 - self._kb), 2.0 * (1.0 - self._kr)
         # Compile the window -> deblocked-center forward once (cached per checkpoint +
         # strength), rather than tracing the raw op graph on every frame.
         self._fwd = net.make_forward(self._p, self._strength, cfg=(in_nc, self._ilen, nb),
@@ -51,22 +58,20 @@ class StdfDeblocker:
     def close(self) -> None:
         pass
 
-    @staticmethod
-    def _split(rgb: Any) -> tuple:
+    def _split(self, rgb: Any) -> tuple:
         a = (rgb if rgb.ndim == 4 else rgb[None])[..., :3].astype(mx.float32)
-        y = _KR * a[..., 0:1] + _KG * a[..., 1:2] + _KB * a[..., 2:3]
+        y = self._kr * a[..., 0:1] + self._kg * a[..., 1:2] + self._kb * a[..., 2:3]
         return y, a
 
-    @staticmethod
-    def _recombine(rgb: Any, new_y: Any) -> Any:
+    def _recombine(self, rgb: Any, new_y: Any) -> Any:
         """Swap the luma of `rgb` (1,H,W,3) for `new_y` (1,H,W,1), keeping its chroma."""
         r, g, b = rgb[..., 0:1], rgb[..., 1:2], rgb[..., 2:3]
-        yo = _KR * r + _KG * g + _KB * b
-        cb, cr = (b - yo) / _CB, (r - yo) / _CR     # original chroma, preserved
+        yo = self._kr * r + self._kg * g + self._kb * b
+        cb, cr = (b - yo) / self._cb, (r - yo) / self._cr     # original chroma, preserved
         ny = new_y.astype(mx.float32)
-        nr = ny + _CR * cr
-        nb = ny + _CB * cb
-        ng = (ny - _KR * nr - _KB * nb) / _KG
+        nr = ny + self._cr * cr
+        nb = ny + self._cb * cb
+        ng = (ny - self._kr * nr - self._kb * nb) / self._kg
         return mx.clip(mx.concatenate([nr, ng, nb], axis=-1), 0.0, 1.0)
 
     @staticmethod

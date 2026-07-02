@@ -26,6 +26,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..compile_cache import cached as _cached
 from ..weights import resolve_weights as _resolve_weights
 
 # The checkpoints are ~287MB each and are NOT bundled in-repo (free-account space); see
@@ -246,11 +247,7 @@ def make_forward(p: dict, qf_input: Any = None, strength: float = 1.0,
     if not compile or not (qf_input is None or isinstance(qf_input, (int, float))):
         return run
     key = (id(p), qf_input, float(strength), nb)
-    fn = _COMPILE_CACHE.get(key)
-    if fn is None:
-        fn = mx.compile(run)
-        _COMPILE_CACHE[key] = fn
-    return fn
+    return _cached(_COMPILE_CACHE, key, lambda: mx.compile(run))
 
 
 if __name__ == "__main__":

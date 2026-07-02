@@ -16,6 +16,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..compile_cache import cached as _cached
 from ..deform_conv import deform_conv2d
 from ..vsr_blocks import (
     _compute_flows,
@@ -36,17 +37,15 @@ _UPSAMPLE_COMPILE_CACHE: dict = {}
 def _compiled_upsample(p: dict):
     """Compiled reconstruction resblocks + pixel-shuffle upsample tail -> HR residual.
     The cheap base resize + clip stay in the loop. Pure, byte-identical (profiled)."""
-    fn = _UPSAMPLE_COMPILE_CACHE.get(id(p))
-    if fn is None:
+    def make():
         def step(hr):
             hr = _resblocks_with_input(hr, p, "reconstruction")
             hr = lrelu(_pixelshuffle_pack(hr, p, "upsample1"))
             hr = lrelu(_pixelshuffle_pack(hr, p, "upsample2"))
             hr = lrelu(conv(hr, p, "conv_hr"))
             return conv(hr, p, "conv_last")
-        fn = mx.compile(step)
-        _UPSAMPLE_COMPILE_CACHE[id(p)] = fn
-    return fn
+        return mx.compile(step)
+    return _cached(_UPSAMPLE_COMPILE_CACHE, id(p), make)
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 
@@ -135,11 +134,8 @@ def _compiled_deform_align(p: dict, key: str):
     """_deform_align (offset convs + the deform_conv kernel), compiled + cached per
     (checkpoint, module). ~1.02x byte-identical: the custom kernel is one big dispatch
     with nothing to fuse, but the offset conv stack around it fuses. Keyed by (id(p), key)."""
-    fn = _DEFORM_COMPILE_CACHE.get((id(p), key))
-    if fn is None:
-        fn = mx.compile(lambda fc, c, f1, f2: _deform_align(fc, c, f1, f2, p, key))
-        _DEFORM_COMPILE_CACHE[(id(p), key)] = fn
-    return fn
+    return _cached(_DEFORM_COMPILE_CACHE, (id(p), key),
+                   lambda: mx.compile(lambda fc, c, f1, f2: _deform_align(fc, c, f1, f2, p, key)))
 
 
 # ---- recurrent forward -----------------------------------------------------

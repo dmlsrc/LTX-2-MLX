@@ -20,6 +20,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..compile_cache import cached as _cached
 from ..weights import resolve_weights as _resolve_weights
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
@@ -224,12 +225,8 @@ def _compiled_forward(p: dict):
     generate.py sets) so per-frame allocation churn does not grow into swap --
     uncapped, MLX hoards freed buffers as RSS.
     """
-    fn = _COMPILE_CACHE.get(id(p))
-    if fn is None:
-        forward = _upscale_rrdbnet if "conv_first.weight" in p else _upscale_srvgg
-        fn = mx.compile(lambda x: forward(x, p))
-        _COMPILE_CACHE[id(p)] = fn
-    return fn
+    forward = _upscale_rrdbnet if "conv_first.weight" in p else _upscale_srvgg
+    return _cached(_COMPILE_CACHE, id(p), lambda: mx.compile(lambda x: forward(x, p)))
 
 
 def upscale_frame(x: Any, p: dict) -> Any:

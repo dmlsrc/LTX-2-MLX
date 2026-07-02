@@ -75,8 +75,10 @@ class WindowedUpscaler:
         return out
 
     def _run(self, ws: int, we: int, last: bool) -> list:
+        # Both window nets (BasicVSR++ _upsample, RealBasicVSR _basicvsr) mx.eval each
+        # output frame as it is produced, so the frames arrive materialized -- no extra
+        # sync barrier here.
         sr = self._upscale_window(self._frames[ws - self._base:we - self._base])
-        mx.eval(*sr)
         end = we if last else we - self._T
         out = [(sr[g - ws][0], self._tokens[g - self._base]) for g in range(self._emitted, end)]
         self._emitted = end

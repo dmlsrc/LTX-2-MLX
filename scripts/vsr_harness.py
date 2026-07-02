@@ -762,8 +762,9 @@ def run(args: argparse.Namespace) -> None:
         deb: Any = None
         if args.deblock == "stdf":
             from LTX_2_MLX.videotoolbox.stdf.deblocker import StdfDeblocker
+            kr, kb = _yuv.coef_for_matrix(_resolved_color[2])    # match the source color matrix
             deb = StdfDeblocker(args.deblock_weights or os.environ.get("STDF_WEIGHTS"),
-                                strength=args.deblock_strength)
+                                strength=args.deblock_strength, kr=kr, kb=kb)
         elif args.deblock == "fbcnn":
             from LTX_2_MLX.videotoolbox.fbcnn import FbcnnDeblocker
             deb = FbcnnDeblocker(args.deblock_weights or os.environ.get("FBCNN_WEIGHTS"),
@@ -1110,6 +1111,19 @@ def run(args: argparse.Namespace) -> None:
                     break
                 with autorelease_pool():
                     _emit(up_rgb, u_sf, u_sa)
+        # Drain the frame-rate converter's tail: the final source period's target
+        # frames, which feed() can never emit (no next source frame arrives). Held
+        # copies of the last frame; no comparison composite (there is no distinct
+        # source frame to composite against).
+        if vtfrc is not None:
+            for out_pb in vtfrc.drain():
+                if max_frames is not None and appended >= max_frames:
+                    break
+                if post_writer is not None:
+                    post_writer.append(out_pb)
+                del out_pb
+                appended += 1
+                out_pbar.update(1)
     finally:
         bars.close()
         if vtfrc is not None:

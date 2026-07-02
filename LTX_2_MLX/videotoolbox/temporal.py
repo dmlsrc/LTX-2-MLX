@@ -259,20 +259,55 @@ class VtfrcSession:
             yield dest_buffers.pop(0)
 
     def drain(self) -> Iterator[Any]:
-        """After all source frames have been fed, yield any remaining output
-        frames that should land at or after the final source frame's PTS.
+        """After all source frames have been fed, yield the target frames of the
+        FINAL source period -- feed() only emits a pair's outputs when the next
+        source frame arrives, so the last source frame's targets (its phase-0
+        passthrough and any same-period interpolations) have no pair to ride and
+        would otherwise be dropped, ending the output one source period early.
 
-        For target rates higher than source, the last source frame's
-        contribution falls in the final pair's [N, N+1) interval and was
-        already emitted by the last feed() call. This method handles edge
-        cases where target PTSes exactly coincide with the last source PTS
-        (phase 0 of a "virtual" next pair).
+        With no next frame to interpolate toward, hold the last frame: run the
+        processor with the buffered frame as both source and next -- interpolating
+        a frame with itself reproduces it exactly at any phase -- producing one
+        held output per remaining target index in [last_pts, last_pts + 1/source).
         """
-        # For now, no additional drain needed - the half-open [N, N+1)
-        # interval logic emits everything up to but not including the next
-        # source's PTS. If the last source PTS is also a target PTS, that
-        # frame is emitted as phase 0 of the pair starting at the previous
-        # source (handled in feed()).
-        if False:
-            yield  # makes this a generator
-        return
+        if self._prev_src_pb is None:
+            return
+        target_indices = self._target_indices_in_pair(self._prev_src_index)
+        if not target_indices:
+            self._prev_src_pb = None
+            return
+        phases = self._phases_for_targets(target_indices, self._prev_src_index)
+        dest_buffers = [self._make_dst_buffer() for _ in target_indices]
+
+        prev_pts = _pb.frame_pts(self._prev_src_index, self.source_fps)
+        next_pts = _pb.frame_pts(self._prev_src_index + 1, self.source_fps)
+        src_frame = vt.VTFrameProcessorFrame.alloc(
+        ).initWithBuffer_presentationTimeStamp_(self._prev_src_pb, prev_pts)
+        next_frame = vt.VTFrameProcessorFrame.alloc(
+        ).initWithBuffer_presentationTimeStamp_(self._prev_src_pb, next_pts)
+        dest_frames = []
+        for m, dpb in zip(target_indices, dest_buffers, strict=True):
+            dpts = _pb.frame_pts(m, self.target_fps)
+            dest_frames.append(
+                vt.VTFrameProcessorFrame.alloc().initWithBuffer_presentationTimeStamp_(dpb, dpts)
+            )
+        params = vt.VTFrameRateConversionParameters.alloc(
+        ).initWithSourceFrame_nextFrame_opticalFlow_interpolationPhase_submissionMode_destinationFrames_(
+            src_frame,
+            next_frame,
+            None,
+            phases,
+            vt.VTFrameRateConversionParametersSubmissionModeSequential,
+            dest_frames,
+        )
+        ok, err = self.processor.processWithParameters_error_(params, None)
+        if not ok:
+            raise RuntimeError(
+                f"VTFRC drain (final source period, frame {self._prev_src_index}) failed: {err}"
+            )
+        del src_frame, next_frame, dest_frames, params
+
+        self._next_target_index = target_indices[-1] + 1
+        self._prev_src_pb = None
+        while dest_buffers:
+            yield dest_buffers.pop(0)

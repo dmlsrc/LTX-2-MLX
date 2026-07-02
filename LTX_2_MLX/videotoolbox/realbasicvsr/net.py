@@ -12,6 +12,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from ..compile_cache import cached as _cached
 from ..vsr_blocks import (
     _compute_flows,
     _pixelshuffle_pack,
@@ -34,20 +35,15 @@ _FWD_COMPILE_CACHE: dict = {}
 
 
 def _compiled_clean(p: dict):
-    fn = _CLEAN_COMPILE_CACHE.get(id(p))
-    if fn is None:
-        fn = mx.compile(
-            lambda f: conv(_resblocks_with_input(f, p, "image_cleaning.0"), p, "image_cleaning.1"))
-        _CLEAN_COMPILE_CACHE[id(p)] = fn
-    return fn
+    return _cached(_CLEAN_COMPILE_CACHE, id(p), lambda: mx.compile(
+        lambda f: conv(_resblocks_with_input(f, p, "image_cleaning.0"), p, "image_cleaning.1")))
 
 
 def _compiled_fwd(p: dict):
     """Compiled forward output step: (frame, warped feat_prop, backward feat) ->
     (new feat_prop, HR residual). The cheap base-resize + residual scale + clip stay
     outside so residual_strength is not baked into the graph."""
-    fn = _FWD_COMPILE_CACHE.get(id(p))
-    if fn is None:
+    def make():
         def step(frame, feat_prop, backward_feat):
             fp = _resblocks_with_input(
                 mx.concatenate([frame, feat_prop], axis=-1), p, "basicvsr.forward_resblocks")
@@ -57,9 +53,8 @@ def _compiled_fwd(p: dict):
             out = lrelu(_pixelshuffle_pack(out, p, "basicvsr.upsample2"))
             out = lrelu(conv(out, p, "basicvsr.conv_hr"))
             return fp, conv(out, p, "basicvsr.conv_last")
-        fn = mx.compile(step)
-        _FWD_COMPILE_CACHE[id(p)] = fn
-    return fn
+        return mx.compile(step)
+    return _cached(_FWD_COMPILE_CACHE, id(p), make)
 
 _WEIGHTS_DIR = Path(__file__).resolve().parent / "weights"
 # Only one bundled checkpoint, but exposed as a token for a uniform --weights API.

@@ -16,6 +16,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from .compile_cache import cached as _cached
+
 
 def relu(x: Any) -> Any:
     return mx.maximum(x, 0)
@@ -135,10 +137,7 @@ def compiled_spynet_flow(p: dict, ref: Any, supp: Any) -> Any:
     fp16 path reorders ops so the flow shifts ~0.02 vs op-by-op (fp32 reorders <3e-4).
     That moves the final SR by <=0.012 max / ~6e-4 mean on [0,1] -- fp16 noise on a net
     that is already an fp16 approximation of the fp32 reference. Keyed by id(p)."""
-    fn = _SPYNET_COMPILE_CACHE.get(id(p))
-    if fn is None:
-        fn = mx.compile(lambda r, s: spynet_flow(p, r, s))
-        _SPYNET_COMPILE_CACHE[id(p)] = fn
+    fn = _cached(_SPYNET_COMPILE_CACHE, id(p), lambda: mx.compile(lambda r, s: spynet_flow(p, r, s)))
     return fn(ref, supp)
 
 
@@ -171,11 +170,8 @@ def compiled_resblocks(x: Any, p: dict, prefix: str) -> Any:
     closes over p so its id stays stable. Do NOT call this from inside another
     mx.compile'd step (it would nest compiles) -- call _resblocks_with_input there.
     """
-    key = (id(p), prefix)
-    fn = _RESBLOCKS_COMPILE_CACHE.get(key)
-    if fn is None:
-        fn = mx.compile(lambda x: _resblocks_with_input(x, p, prefix))
-        _RESBLOCKS_COMPILE_CACHE[key] = fn
+    fn = _cached(_RESBLOCKS_COMPILE_CACHE, (id(p), prefix),
+                 lambda: mx.compile(lambda x: _resblocks_with_input(x, p, prefix)))
     return fn(x)
 
 
