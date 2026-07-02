@@ -224,7 +224,7 @@ reimplementations and visually verified on real motion-blurred video):
 | 148 | realesrgan general (SRVGG) | light perceptual |
 | ~754 | safmn real2x (2x output) | real-world perceptual, the HD -> 4K class tool |
 | 756 | safmn real (SAFMN_L_Real_LSDIR) | real-world perceptual, per-frame |
-| 836 | realviformer (streaming) | real-world perceptual + TEMPORAL consistency |
+| 817 | realviformer (streaming) | real-world perceptual + TEMPORAL consistency |
 | 976 | realbasicvsr | temporal GAN (cleaning + BasicVSR) |
 | 1391 | basicvsrpp | temporal fidelity; 70% propagation / 20% tail |
 | ~2400 | realesrgan bsrgan (RRDBNet) | heavy perceptual (1.5x from dense restack) |
@@ -342,6 +342,16 @@ writing the forward.
 - Reuse the shared blocks: a checkpoint's SpyNet is usually BasicSR's or
   mmagic's -- semantically identical to `vsr_blocks.spynet_flow`; remap key
   names at load and the compiled + gate-padded implementation comes free.
+- Fractional FFN expansion factors produce gate-missing widths: RealViformer's
+  2.66 makes hidden dims 127/255/510, putting all 75 GDFN convs on the general
+  path. The per-half zero-pad (project_in/dwconv rows become [first_h, zeros,
+  second_h, zeros] so the gate-multiply chunk stays aligned; project_out gets
+  zero columns) is bit-exact -- but measure the WHOLE net: the per-conv ~1.9x
+  amounted to 1.02x end-to-end here (the compiled net is dominated elsewhere).
+  Post-pass verdicts on the other two: SAFMN-real is healthy (its big CCM conv
+  rides winograd at 15 TF/s-eff; all widths aligned); ESC's 13x13 partial conv
+  runs at 2.9 TF/s-eff but output-padding it wider is a wash (measured), and
+  the precise softmax costs nothing -- keep it.
 
 ## 10. Benchmarking gotchas checklist
 

@@ -91,7 +91,40 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
     if "shallow_extraction.0.weight" not in p:
         raise ValueError("not a RealViformer checkpoint")
     pad_spynet_gates(p)
+    _pad_gdfn_gates(p)
     return p
+
+
+def _pad_gdfn_gates(p: dict) -> None:
+    """Zero-pad every GDFN's hidden width onto MLX's specialized implicit-GEMM path.
+
+    ffn_expansion_factor=2.66 makes the hidden widths ODD -- int(48*2.66)=127,
+    int(96*2.66)=255, int(192*2.66)=510 -- so the doubled project_in outputs
+    (254/510/1020) and the project_out inputs (127/255/510) fail the %16 gate and
+    every GDFN conv lands on the ~1.9x-slower general kernel (75 convs). Pad each
+    HALF of the doubled tensor separately (the gate multiply chunks at the middle):
+    project_in/dwconv rows become [first_h, zeros, second_h, zeros], so the chunk
+    split stays aligned and the padded lanes are exactly gelu(0)*0 = 0; project_out
+    gets matching zero input columns. Exact math; _gdfn's shape[-1]//2 chunk picks
+    up the padded half automatically."""
+    prefixes = {k[:-len(".ffn.project_in.weight")]
+                for k in p if k.endswith(".ffn.project_in.weight")}
+    for pre in prefixes:
+        w_in = p[f"{pre}.ffn.project_in.weight"]        # (2h,1,1,dim)
+        h = w_in.shape[0] // 2
+        if h % 16 == 0:
+            continue
+        hp = h + (16 - h % 16)
+        zin = mx.zeros((hp - h, *w_in.shape[1:]), dtype=w_in.dtype)
+        p[f"{pre}.ffn.project_in.weight"] = mx.concatenate(
+            [w_in[:h], zin, w_in[h:], zin], axis=0)
+        w_dw = p[f"{pre}.ffn.dwconv.weight"]            # (2h,3,3,1)
+        zdw = mx.zeros((hp - h, *w_dw.shape[1:]), dtype=w_dw.dtype)
+        p[f"{pre}.ffn.dwconv.weight"] = mx.concatenate(
+            [w_dw[:h], zdw, w_dw[h:], zdw], axis=0)
+        w_out = p[f"{pre}.ffn.project_out.weight"]      # (dim,1,1,h)
+        zout = mx.zeros((*w_out.shape[:3], hp - h), dtype=w_out.dtype)
+        p[f"{pre}.ffn.project_out.weight"] = mx.concatenate([w_out, zout], axis=-1)
 
 
 def _config(p: dict) -> tuple:
