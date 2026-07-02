@@ -104,7 +104,42 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16,
         p[k] = v.astype(dtype)
     if "conv_first.weight" not in p and "body.0.weight" not in p:
         raise ValueError(f"{src} is not an RRDBNet / SRVGGNetCompact checkpoint")
+    _restack_rdb_weights(p)
     return p
+
+
+def _restack_rdb_weights(p: dict) -> None:
+    """Regroup each ResidualDenseBlock's conv weights by INPUT segment (see _rdb).
+
+    A conv over a channel concat equals the sum of convs of each segment with the
+    matching weight slice, and every dense conv's x / x1 / x2 / x3 segment convolves
+    the same tensor -- so the five convs' slices restack into one conv per PRODUCED
+    tensor: x -> all five x-slices (64->224), x1 -> the four x1-slices (32->160), and
+    so on. Pure weight reordering (bit-identical values), done once at load; the
+    originals stay in p for introspection. No-op for SRVGG (no rdb keys)."""
+    def restack_one(pre: str) -> None:
+        W = [p[f"{pre}.conv{k}.weight"] for k in (1, 2, 3, 4, 5)]       # (O,3,3,I)
+        nf = W[0].shape[-1]                                             # feature ch (64)
+        gc = W[0].shape[0]                                              # growth ch (32)
+
+        def seg(k: int, s: int) -> Any:
+            return W[k][..., nf + s * gc: nf + (s + 1) * gc]
+
+        p[f"{pre}.stack_x.weight"] = mx.concatenate(
+            [W[0]] + [W[k][..., :nf] for k in (1, 2, 3, 4)], axis=0)          # 64 -> 4gc+nf
+        p[f"{pre}.stack_x1.weight"] = mx.concatenate(
+            [seg(k, 0) for k in (1, 2, 3, 4)], axis=0)                        # gc -> 3gc+nf
+        p[f"{pre}.stack_x2.weight"] = mx.concatenate(
+            [seg(k, 1) for k in (2, 3, 4)], axis=0)                           # gc -> 2gc+nf
+        p[f"{pre}.stack_x3.weight"] = mx.concatenate(
+            [seg(k, 2) for k in (3, 4)], axis=0)                              # gc -> gc+nf
+        p[f"{pre}.stack_x4.weight"] = seg(4, 3)                               # gc -> nf
+
+    i = 0
+    while f"body.{i}.rdb1.conv1.weight" in p:
+        for j in (1, 2, 3):
+            restack_one(f"body.{i}.rdb{j}")
+        i += 1
 
 
 def conv(x: Any, p: dict, key: str) -> Any:
@@ -140,13 +175,43 @@ def _pixel_unshuffle(x: Any, r: int) -> Any:
 
 
 def _rdb(x: Any, p: dict, prefix: str) -> Any:
-    """ResidualDenseBlock: 5 dense convs, lrelu(0.2), 0.2 residual scale."""
-    x1 = lrelu(conv(x, p, f"{prefix}.conv1"))
-    x2 = lrelu(conv(mx.concatenate([x, x1], axis=-1), p, f"{prefix}.conv2"))
-    x3 = lrelu(conv(mx.concatenate([x, x1, x2], axis=-1), p, f"{prefix}.conv3"))
-    x4 = lrelu(conv(mx.concatenate([x, x1, x2, x3], axis=-1), p, f"{prefix}.conv4"))
-    x5 = conv(mx.concatenate([x, x1, x2, x3, x4], axis=-1), p, f"{prefix}.conv5")
-    return x5 * 0.2 + x
+    """ResidualDenseBlock: 5 dense convs, lrelu(0.2), 0.2 residual scale.
+
+    Computed concat-free from the load-time restacked weights (_restack_rdb_weights):
+    conv-over-concat = sum of per-segment convs, so each produced tensor is convolved
+    ONCE with all its consumers' weight slices and the pre-activations are recombined
+    by slicing. Exactly the same math, reshaped for MLX: the incremental dense concats
+    (a full copy each) disappear, and the x-stack (64 -> 4gc+nf = 224) crosses MLX's
+    winograd gate (C+O >= 256, conv.cpp), where the original thin 32-out growth convs
+    ran implicit GEMM at ~half throughput. ~1.35x on the dense body (measured). The
+    recombination sums run in fp32: the split rounds each partial to fp16 where the
+    original GEMM accumulated all of K in fp32, so summing partials in fp32 keeps the
+    only extra rounding at the conv outputs themselves."""
+    gc = p[f"{prefix}.conv1.bias"].size          # growth channels (32)
+    nf = p[f"{prefix}.conv5.bias"].size          # feature channels (64)
+    dt = x.dtype
+    f32 = mx.float32
+
+    def b(k: int) -> Any:
+        return p[f"{prefix}.conv{k}.bias"].astype(f32)
+
+    ax = mx.conv2d(x, p[f"{prefix}.stack_x.weight"], stride=1, padding=1)
+    x1 = lrelu((ax[..., 0:gc].astype(f32) + b(1)).astype(dt))
+    a1 = mx.conv2d(x1, p[f"{prefix}.stack_x1.weight"], stride=1, padding=1)
+    x2 = lrelu((ax[..., gc:2 * gc].astype(f32) + a1[..., 0:gc].astype(f32)
+                + b(2)).astype(dt))
+    a2 = mx.conv2d(x2, p[f"{prefix}.stack_x2.weight"], stride=1, padding=1)
+    x3 = lrelu((ax[..., 2 * gc:3 * gc].astype(f32) + a1[..., gc:2 * gc].astype(f32)
+                + a2[..., 0:gc].astype(f32) + b(3)).astype(dt))
+    a3 = mx.conv2d(x3, p[f"{prefix}.stack_x3.weight"], stride=1, padding=1)
+    x4 = lrelu((ax[..., 3 * gc:4 * gc].astype(f32) + a1[..., 2 * gc:3 * gc].astype(f32)
+                + a2[..., gc:2 * gc].astype(f32) + a3[..., 0:gc].astype(f32)
+                + b(4)).astype(dt))
+    a4 = mx.conv2d(x4, p[f"{prefix}.stack_x4.weight"], stride=1, padding=1)
+    x5 = (ax[..., 4 * gc:4 * gc + nf].astype(f32) + a1[..., 3 * gc:3 * gc + nf].astype(f32)
+          + a2[..., 2 * gc:2 * gc + nf].astype(f32) + a3[..., gc:gc + nf].astype(f32)
+          + a4.astype(f32) + b(5))                   # conv5: no activation
+    return (x5 * 0.2).astype(dt) + x
 
 
 def _rrdb(x: Any, p: dict, i: int) -> Any:
