@@ -56,7 +56,36 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
         else:
             a = v
         p[k] = a.astype(dtype)
+    _pad_for_gates(p)
     return p
+
+
+def _pad_for_gates(p: dict) -> None:
+    """Zero-pad two convs onto MLX's specialized implicit-GEMM path (exact math --
+    zero weight columns / filters contribute nothing; junk output channels are cut
+    by an existing slice). The gate is (C<=4 or C%16==0) and (O<=16 or O%16==0)
+    (mlx conv.cpp); misses fall to the ~2x-slower general kernel:
+
+    - in_conv input C = in_nc_total (7 for the bundled R3 models) fails the C gate;
+      pad the weight to 16 input channels ("...weight_gp") and _stdf appends
+      matching zero channels to the conv input. ~2.0x on that conv at 480p.
+    - offset_mask output O = in_nc_total*27 (189) fails the O gate; pad to a
+      multiple of 16 with zero filters (+bias). It is the FLOP-heaviest conv in the
+      net; ~1.9x at 480p. The originals stay for _config/introspection."""
+    w = p["ffnet.in_conv.0.weight"]                     # (32,3,3,in_nc_total)
+    cin = w.shape[-1]
+    if cin > 4 and cin % 16:
+        pad = 16 - cin % 16
+        p["ffnet.in_conv.0.weight_gp"] = mx.concatenate(
+            [w, mx.zeros((*w.shape[:3], pad), dtype=w.dtype)], axis=-1)
+    wm, bm = p["ffnet.offset_mask.weight"], p["ffnet.offset_mask.bias"]
+    o = wm.shape[0]
+    if o > 16 and o % 16:
+        pad = 16 - o % 16
+        p["ffnet.offset_mask.weight_gp"] = mx.concatenate(
+            [wm, mx.zeros((pad, *wm.shape[1:]), dtype=wm.dtype)], axis=0)
+        p["ffnet.offset_mask.bias_gp"] = mx.concatenate(
+            [bm, mx.zeros((pad,), dtype=bm.dtype)], axis=0)
 
 
 def _config(p: dict) -> tuple:
@@ -96,7 +125,13 @@ def _stdf(x: Any, p: dict, nb: int) -> Any:
     """Spatio-temporal deformable fusion. x: (N,H,W,in_nc_total) stacked frames; the
     U-Net regresses offsets+mask, the deform-conv fuses the stacked frames -> features."""
     in_nc_total = x.shape[-1]
-    feats = [_relu(_conv(x, p, "ffnet.in_conv.0"))]
+    win = p.get("ffnet.in_conv.0.weight_gp")                    # gate-padded (see _pad_for_gates)
+    if win is None:
+        feats = [_relu(_conv(x, p, "ffnet.in_conv.0"))]
+    else:
+        xin = mx.concatenate(
+            [x, mx.zeros((*x.shape[:3], win.shape[-1] - in_nc_total), dtype=x.dtype)], axis=-1)
+        feats = [_relu(mx.conv2d(xin, win, padding=1) + p["ffnet.in_conv.0.bias"])]
     for i in range(1, nb):
         d = _relu(_conv(feats[-1], p, f"ffnet.dn_conv{i}.0", stride=2))
         feats.append(_relu(_conv(d, p, f"ffnet.dn_conv{i}.2")))
@@ -107,10 +142,12 @@ def _stdf(x: Any, p: dict, nb: int) -> Any:
         out = _relu(_conv(mx.concatenate([out, feats[i]], axis=-1), p, f"ffnet.up_conv{i}.0"))
         out = _relu(_convt(out, p, f"ffnet.up_conv{i}.2"))
     out = _relu(_conv(out, p, "ffnet.out_conv.0"))
-    off_msk = _conv(out, p, "ffnet.offset_mask")                # (N,H,W, in_nc_total*3*9)
+    wom = p.get("ffnet.offset_mask.weight_gp", p["ffnet.offset_mask.weight"])
+    bom = p.get("ffnet.offset_mask.bias_gp", p["ffnet.offset_mask.bias"])
+    off_msk = mx.conv2d(out, wom, padding=1) + bom              # (N,H,W, >=in_nc_total*3*9)
     n_off = in_nc_total * 2 * 9
     off = off_msk[..., :n_off]
-    msk = mx.sigmoid(off_msk[..., n_off:])
+    msk = mx.sigmoid(off_msk[..., n_off:n_off + in_nc_total * 9])   # gate-pad junk cut here
     fused = deform_conv2d(                                       # NHWC -> NCHW for the kernel
         mx.transpose(x, (0, 3, 1, 2)), mx.transpose(off, (0, 3, 1, 2)),
         p["ffnet.deform_conv.weight"], p.get("ffnet.deform_conv.bias"),

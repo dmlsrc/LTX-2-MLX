@@ -26,6 +26,7 @@ from ..vsr_blocks import (
     conv,
     flow_warp,
     lrelu,
+    pad_spynet_gates,
     resize,
 )
 from ..weights import resolve_weights as _resolve_weights
@@ -92,6 +93,7 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
         else:
             a = v
         p[k] = a.astype(dtype)
+    pad_spynet_gates(p)                     # SPyNet first convs 8->16 (see vsr_blocks)
     return p
 
 

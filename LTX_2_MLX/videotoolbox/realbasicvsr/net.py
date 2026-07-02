@@ -21,6 +21,7 @@ from ..vsr_blocks import (
     conv,
     flow_warp,
     lrelu,
+    pad_spynet_gates,
     resize,
 )
 from ..weights import resolve_weights as _resolve_weights
@@ -127,6 +128,7 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
     missing = [k for k in required if k not in p]
     if missing:
         raise ValueError(f"{src} is not a RealBasicVSR generator checkpoint; missing {missing}")
+    pad_spynet_gates(p)                     # SPyNet first convs 8->16 (see vsr_blocks)
     return p
 
 

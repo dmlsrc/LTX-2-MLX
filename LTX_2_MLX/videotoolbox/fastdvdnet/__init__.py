@@ -68,10 +68,40 @@ def _fold(w: dict, prefix: str, conv_sub: str, bn_sub: str | None, dtype: Any):
 
 
 def _load_block(w: dict, prefix: str, dtype: Any) -> dict:
-    return {
+    block = {
         name: (*_fold(w, prefix, conv_sub, bn_sub, dtype), stride, groups)
         for name, conv_sub, bn_sub, stride, groups in _CONVS
     }
+    _pad_inc_for_gates(block)
+    return block
+
+
+def _pad_inc_for_gates(block: dict) -> None:
+    """Zero-pad inc0's grouped conv outputs onto MLX's grouped implicit-GEMM path.
+
+    inc0 (12 -> 90, groups=3) has 30 output channels per group; the grouped gate
+    needs O_per_group%16==0 (mlx conv.cpp), so it fell to the explicit-grouped
+    fallback (~4x slower measured at 480p). Pad each group's filters 30 -> 32 with
+    zeros (+bias zeros) and insert matching zero input columns into inc3 at the pad
+    positions. Exact: the padded channels are 0 (zero filters, zero bias), relu(0)=0,
+    and inc3's matching columns are 0 -- nothing changes but the kernel taken."""
+    W0, b0, s0, g0 = block["inc0"]                     # (O,3,3,I/g), groups g0
+    og = W0.shape[0] // g0                             # out channels per group (30)
+    if g0 <= 1 or og % 16 == 0:
+        return
+    pad = 16 - og % 16                                 # -> 32 per group
+    zr = mx.zeros((pad, *W0.shape[1:]), dtype=W0.dtype)
+    zb = mx.zeros((pad,), dtype=b0.dtype)
+    W0p = mx.concatenate(
+        [t for g in range(g0) for t in (W0[g * og:(g + 1) * og], zr)], axis=0)
+    b0p = mx.concatenate(
+        [t for g in range(g0) for t in (b0[g * og:(g + 1) * og], zb)], axis=0)
+    block["inc0"] = (W0p, b0p, s0, g0)
+    W3, b3, s3, g3 = block["inc3"]                     # (32,3,3,g0*og)
+    zc = mx.zeros((*W3.shape[:3], pad), dtype=W3.dtype)
+    W3p = mx.concatenate(
+        [t for g in range(g0) for t in (W3[..., g * og:(g + 1) * og], zc)], axis=-1)
+    block["inc3"] = (W3p, b3, s3, g3)
 
 
 def load_fastdvdnet(path: str | Path, dtype: Any = mx.float16) -> dict:
