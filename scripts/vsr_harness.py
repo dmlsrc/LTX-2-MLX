@@ -413,7 +413,8 @@ def _pick_hevc_profile(spatial_mode: str, encode_chroma: str) -> str:
         return HEVC_PROFILE_MAIN422_10
     # balanced/image/none/learned upscalers carry RGB (4:4:4 chroma) to the encoder -> 4:2:2.
     return (HEVC_PROFILE_MAIN422_10
-            if spatial_mode in ("balanced", "image", "none", "basicvsrpp", "realbasicvsr", "realesrgan")
+            if spatial_mode in ("balanced", "image", "none", "basicvsrpp", "realbasicvsr",
+                                "realesrgan", "safmn")
             else HEVC_PROFILE_MAIN10)
 
 
@@ -620,6 +621,9 @@ def run(args: argparse.Namespace) -> None:
         from LTX_2_MLX.videotoolbox.realesrgan import net as _rnet
         spatial_scale = _rnet.scale_of(_rnet.load_params(
             _rnet.resolve_weights(args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS"))))
+    elif args.spatial_mode == "safmn":
+        from LTX_2_MLX.videotoolbox.safmn import net as _snet
+        spatial_scale = _snet._config(_snet.load_params(args.safmn_weights))[3]
     out_w, out_h = in_w * spatial_scale, in_h * spatial_scale
     profile = _pick_hevc_profile(args.spatial_mode, args.encode_chroma)
     target_fps = args.target_fps if args.target_fps is not None else source_fps
@@ -679,7 +683,7 @@ def run(args: argparse.Namespace) -> None:
         s: Any
         if args.spatial_mode == "none":
             s = NativePassthrough(in_w, in_h, fps=source_fps)
-        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr", "realesrgan"):
+        elif args.spatial_mode in ("basicvsrpp", "realbasicvsr", "realesrgan", "safmn"):
             # Learned MLX upscalers do the 4x upscale in the loop (windowed); the
             # session is a passthrough at the 4x output dims that just packs the
             # already-upscaled frame for the encoder.
@@ -796,6 +800,9 @@ def run(args: argparse.Namespace) -> None:
                 args.realesrgan_weights or os.environ.get("REALESRGAN_WEIGHTS"),
                 denoise_strength=args.realesrgan_denoise,
             )
+        elif args.spatial_mode == "safmn":
+            from LTX_2_MLX.videotoolbox.safmn import SafmnUpscaler
+            up = SafmnUpscaler(args.safmn_weights)
 
         naf: Any = None
         if args.nafnet != "off":
@@ -1221,12 +1228,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--spatial-mode",
-        choices=["fast", "balanced", "image", "none", "basicvsrpp", "realbasicvsr", "realesrgan"],
+        choices=["fast", "balanced", "image", "none", "basicvsrpp", "realbasicvsr",
+                 "realesrgan", "safmn"],
         default="balanced",
         help=(
             "VSR spatial mode.  Scale factor is implied by the mode (fast=2x, "
             "balanced=4x, image=4x, none=1x, basicvsrpp=4x, realbasicvsr=4x, "
-            "realesrgan=4x). "
+            "realesrgan=4x, safmn=4x). "
             "realesrgan = MLX Real-ESRGAN / ESRGAN RRDBNet 4x per-frame SR "
             "(single-image: no temporal propagation, so no flow ghosting; choose "
             "the checkpoint with --realesrgan-weights). "
@@ -1551,6 +1559,16 @@ def main() -> None:
             "1.0 = pure general). Blends s*general + (1-s)*wdn; per Real-ESRGAN, "
             "higher = stronger denoise (smoother), lower keeps more real-world "
             "texture/grain. Needs the realesr_general_wdn_x4v3 companion weight."
+        ),
+    )
+    parser.add_argument(
+        "--safmn-weights", default=None, metavar="VARIANT|PATH",
+        help=(
+            "SAFMN weights for --spatial-mode safmn: a variant token or a .safetensors "
+            "path (or $SAFMN_WEIGHTS). Tokens: real (default; SAFMN-L / Real_SAFMN++, "
+            "perceptual 4x -- pair after deblock/denoise) and light (light_SAFMN++, tiny "
+            "fidelity 4x trained on compressed content). Neither is bundled; see "
+            "videotoolbox/safmn/weights/README.md."
         ),
     )
     parser.add_argument(
