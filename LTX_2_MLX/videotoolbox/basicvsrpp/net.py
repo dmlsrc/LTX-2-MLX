@@ -94,7 +94,24 @@ def load_params(path: str | Path | None = None, dtype: Any = mx.float16) -> dict
             a = v
         p[k] = a.astype(dtype)
     pad_spynet_gates(p)                     # SPyNet first convs 8->16 (see vsr_blocks)
+    _pad_offset_gates(p)
     return p
+
+
+def _pad_offset_gates(p: dict) -> None:
+    """Zero-pad each deform_align conv_offset.0 weight from 196 to 208 input channels
+    (in place, same key). Its input is concat(cond 192, flow1 2, flow2 2) = 196, and
+    196%16 != 0 fails MLX's implicit-GEMM gate -- the heaviest conv of the offset stack
+    ran on the ~1.45x-slower general kernel, four times per frame. _deform_align appends
+    matching zero channels, so the math is exact (zero columns x zero channels)."""
+    for k in list(p):
+        if k.endswith(".conv_offset.0.weight"):
+            w = p[k]
+            cin = w.shape[-1]
+            if cin > 4 and cin % 16:
+                pad = 16 - cin % 16
+                p[k] = mx.concatenate(
+                    [w, mx.zeros((*w.shape[:3], pad), dtype=w.dtype)], axis=-1)
 
 
 # ---- second-order deformable alignment -------------------------------------
@@ -108,7 +125,11 @@ def _deform_align(feat_cat: Any, cond: Any, flow1: Any, flow2: Any, p: dict,
     """SecondOrderDeformableAlignment: predict offsets/mask from cond+flows, add
     the flows (the deformable offset is relative to the optical flow), then a
     modulated deform conv on feat_cat (NHWC <-> NCHW only at the DCN call)."""
-    extra = mx.concatenate([cond, flow1, flow2], axis=-1)
+    parts = [cond, flow1, flow2]
+    pad = p[f"{key}.conv_offset.0.weight"].shape[-1] - sum(t.shape[-1] for t in parts)
+    if pad:                                       # gate-padded weight (_pad_offset_gates)
+        parts.append(mx.zeros((*cond.shape[:3], pad), dtype=cond.dtype))
+    extra = mx.concatenate(parts, axis=-1)
     o = lrelu(conv(extra, p, f"{key}.conv_offset.0"))
     o = lrelu(conv(o, p, f"{key}.conv_offset.2"))
     o = lrelu(conv(o, p, f"{key}.conv_offset.4"))
